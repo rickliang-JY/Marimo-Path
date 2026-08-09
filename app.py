@@ -93,24 +93,22 @@ def _():
     )
 
     # The OpenSeadragon surface (hescope/osdviewer.py) fed by the loopback tile
-    # server (hescope/tileserver.py) gives real wheel-zoom, real mouse-drag pan
-    # and ROI drawing in level-0 coordinates. It is OPT-IN: set
-    # HESCOPE_ENABLE_OSD=1 to use it. The default is the legacy plotly surface,
-    # whose zoom/pan are cosmetic (they rescale an already-rendered bitmap) but
-    # which is known to work.
+    # server (hescope/tileserver.py) is the main viewing surface: real
+    # wheel-zoom, real mouse-drag pan, ROI drawing in level-0 coordinates.
+    # HESCOPE_DISABLE_OSD=1 falls back to the legacy plotly surface, whose
+    # zoom and pan are cosmetic (they rescale an already-rendered bitmap).
     #
-    # Why opt-in, and why this must not be flipped casually: a widget that
-    # constructs fine in Python can still fail to MOUNT in the browser, and
-    # nothing server-side can tell. When that happens with OpenSeadragon
-    # driving, the plotly surface is suppressed and the user is left with a
-    # dead viewer -- no ROI tool, no drag, and toolbar buttons that command a
-    # widget which is not there. Until an automated test drives the real
-    # marimo page and proves the widget mounts and reports back, the default
-    # stays on the surface we can verify from Python.
+    # This was opt-in for one commit, after shipping it on by default left
+    # users with a dead viewer. The reason was that a widget can construct
+    # fine in Python and still fail to MOUNT in the browser, where nothing
+    # server-side can tell -- and with OpenSeadragon driving, the plotly
+    # fallback is suppressed. It is on again because that gap is now closed
+    # by proof rather than by hope: tests/browser/test_marimo_mount.py drives
+    # the real marimo page in headless Chrome and asserts the widget mounts,
+    # OpenSeadragon initialises, tiles are actually fetched from the loopback
+    # server, and no JS error is raised. Do not flip this back on a hunch --
+    # re-run that test.
     def _probe_osd():
-        _flag = os.environ.get("HESCOPE_ENABLE_OSD", "").strip().lower()
-        if _flag not in ("1", "true", "yes", "on"):
-            return False, "not enabled (set HESCOPE_ENABLE_OSD=1 to try it)"
         if os.environ.get("HESCOPE_DISABLE_OSD", "").strip().lower() in (
             "1", "true", "yes", "on"
         ):
@@ -411,6 +409,7 @@ def _(
     ensure_demo_slide,
     mo,
     open_slide,
+    os,
     serve_slide,
     set_db_msg,
     set_measure_msg,
@@ -495,6 +494,24 @@ def _(
 
     def _on_demo_clicked(_):
         _open_slide_path(str(ensure_demo_slide()), source_kind="local")
+
+    # Open a slide on startup so the app comes up showing an image instead of
+    # an empty frame waiting for a click. ensure_demo_slide() reuses the
+    # cached assets/demo_he.png, so after the first run this is a file open,
+    # not a 15s synthesis. HESCOPE_NO_AUTO_OPEN=1 opts out.
+    #
+    # The "already did it" flag lives in viewer_bus, NOT in a get_source()
+    # read: this cell builds the loader widgets, so taking a reactive
+    # dependency on the slide would rebuild the path box and buttons every
+    # time the slide changes.
+    if not viewer_bus.get("auto_opened") and os.environ.get(
+        "HESCOPE_NO_AUTO_OPEN", ""
+    ).strip().lower() not in ("1", "true", "yes", "on"):
+        viewer_bus["auto_opened"] = True
+        try:
+            _open_slide_path(str(ensure_demo_slide()), source_kind="local")
+        except Exception:
+            pass  # a failed auto-open must never block the loader panel
 
     def _on_upload(files):
         if files:

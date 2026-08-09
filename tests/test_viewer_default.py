@@ -5,8 +5,13 @@ browser, and nothing server-side can tell. When OpenSeadragon drives, the
 plotly surface is suppressed -- so if the widget is dead the user gets an
 empty viewing area, no ROI tool, no drag, and toolbar buttons that command a
 widget which is not there. That is exactly what shipping it on by default
-did. Until an automated test proves the widget mounts in a real marimo page,
-the default must stay on the surface we can verify from Python.
+did the first time.
+
+It is on by default again, but only because the gap is now closed by proof:
+tests/browser/test_marimo_mount.py loads the real marimo page in headless
+Chrome and asserts the widget mounts, OpenSeadragon initialises, tiles are
+fetched from the loopback server and no JS error is raised. These tests pin
+the switch itself; that one pins the thing the switch assumes.
 """
 
 from __future__ import annotations
@@ -23,9 +28,6 @@ _PROBE = textwrap.dedent(
     import os
 
     def probe():
-        flag = os.environ.get("HESCOPE_ENABLE_OSD", "").strip().lower()
-        if flag not in ("1", "true", "yes", "on"):
-            return False, "not enabled"
         if os.environ.get("HESCOPE_DISABLE_OSD", "").strip().lower() in (
             "1", "true", "yes", "on"
         ):
@@ -52,21 +54,22 @@ def _probe(env_overrides: dict[str, str]) -> bool:
     return out.stdout.strip() == "True"
 
 
-def test_opensedragon_is_off_by_default():
-    assert _probe({}) is False
+def test_openseadragon_is_on_by_default():
+    assert _probe({}) is True
 
 
-def test_opensedragon_is_opt_in():
-    assert _probe({"HESCOPE_ENABLE_OSD": "1"}) is True
+def test_disable_flag_falls_back_to_plotly():
+    assert _probe({"HESCOPE_DISABLE_OSD": "1"}) is False
 
 
-def test_disable_overrides_enable():
-    assert _probe({"HESCOPE_ENABLE_OSD": "1", "HESCOPE_DISABLE_OSD": "1"}) is False
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on"])
+def test_every_truthy_spelling_disables_it(value):
+    assert _probe({"HESCOPE_DISABLE_OSD": value}) is False
 
 
 @pytest.mark.parametrize("value", ["", "0", "no", "off", "false", "maybe"])
-def test_only_truthy_values_enable_it(value):
-    assert _probe({"HESCOPE_ENABLE_OSD": value}) is False
+def test_non_truthy_values_leave_it_on(value):
+    assert _probe({"HESCOPE_DISABLE_OSD": value}) is True
 
 
 def test_app_source_keeps_the_probe_opt_in():
@@ -75,7 +78,8 @@ def test_app_source_keeps_the_probe_opt_in():
 
     src = pathlib.Path(__file__).resolve().parents[1] / "app.py"
     text = src.read_text(encoding="utf-8")
-    assert "HESCOPE_ENABLE_OSD" in text, "the opt-in flag disappeared from app.py"
-    # the probe must return False when the flag is absent, i.e. the check is
-    # 'not in truthy set -> return False', not 'in disable set -> return False'
-    assert 'if _flag not in ("1", "true", "yes", "on"):' in text
+    assert "HESCOPE_DISABLE_OSD" in text, "the escape hatch disappeared from app.py"
+    # the fallback must remain reachable without editing code
+    assert "tests/browser/test_marimo_mount.py" in text, (
+        "the comment pointing at the test that justifies this default is gone"
+    )
