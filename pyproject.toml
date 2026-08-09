@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hescope"
+version = "0.1.0"
+description = "marimo-native + agent-native H&E pathology whole-slide viewer with a human-agent analysis loop"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "HE-Scope contributors" }]
+keywords = ["pathology", "histology", "whole-slide-image", "marimo", "agent"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+# Single source of truth for dependencies. requirements.txt is a thin
+# compatibility shim that points here (`-e .`).
+dependencies = [
+    "marimo>=0.23",
+    "pillow",
+    "numpy",
+    "scipy",
+    "scikit-image",
+    "plotly",
+    "requests",
+    "tifffile",
+    "zarr>=3",
+    "imagecodecs",
+    "sqlalchemy>=2.0",
+]
+
+[project.optional-dependencies]
+# Real WSI formats via OpenSlide (.svs, .ndpi, .mrxs); needs the OpenSlide
+# system library.
+wsi = ["openslide-python"]
+# Weakly-supervised training (hescope.ml) + torch/FM embedding backends
+# (hescope.features.extract_embedding, hescope.embeddings).
+ml = ["scikit-learn", "joblib", "torch", "torchvision", "timm"]
+test = ["pytest"]
+
+[project.scripts]
+hescope = "hescope.cli:main"
+
+# app.py is shipped as a top-level module so that `hescope app` can locate it
+# next to the installed hescope package (site-packages/app.py) exactly the
+# same way it finds it at the repo root in an editable install.
+[tool.setuptools]
+packages = ["hescope"]
+py-modules = ["app"]

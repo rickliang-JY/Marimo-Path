@@ -1,0 +1,144 @@
+{
+ "data": {
+  "hits": [
+   {
+    "id": "495ab2ae-0286-4d87-8c7b-4d4af7eded01",
+    "cases": [
+     {
+      "submitter_id": "TCGA-BH-A18H",
+      "project": {
+       "primary_site": "Breast",
+       "dbgap_accession_number": null,
+       "project_id": "TCGA-BRCA",
+       "disease_type": "Breast Invasive Carcinoma",
+       "name": "Breast Invasive Carcinoma",
+       "releasable": true,
+       "state": "open",
+       "released": true
+      },
+      "samples": [
+       {
+        "intermediate_dimension": null,
+        "tumor_descriptor": "Primary",
+        "time_between_clamping_and_freezing": null,
+        "sample_id": "9321161b-d568-4d38-aed3-956786a06329",
+        "freezing_method": null,
+        "pathology_report_uuid": "DF536409-601F-489B-9F8A-A2B372BF9999",
+        "submitter_id": "TCGA-BH-A18H-01A",
+        "shortest_dimension": null,
+        "sample_type": "Primary Tumor",
+        "created_datetime": null,
+        "time_between_excision_and_freezing": null,
+        "specimen_type": "Solid Tissue",
+        "updated_datetime": "2023-11-08T11:17:33.420637-06:00",
+        "days_to_sample_procurement": null,
+        "longest_dimension": null,
+        "days_to_collection": 16,
+        "state": "released",
+        "current_weight": null,
+        "initial_weight": 80.0,
+        "tissue_type": "Tumor",
+        "preservation_method": "OCT"
+       }
+      ]
+     }
+    ],
+    "file_name": "TCGA-BH-A18H-01A-01-TSA.75dba5a3-f9f5-4ff4-814c-7d2451820e03.svs",
+    "file_id": "495ab2ae-0286-4d87-8c7b-4d4af7eded01",
+    "file_size": 217303029
+   },
+   {
+    "id": "4730b23e-aea1-49a2-ba63-2231fd88b592",
+    "cases": [
+     {
+      "submitter_id": "TCGA-E2-A14P",
+      "project": {
+       "primary_site": "Breast",
+       "dbgap_accession_number": null,
+       "project_id": "TCGA-BRCA",
+       "disease_type": "Breast Invasive Carcinoma",
+       "name": "Breast Invasive Carcinoma",
+       "releasable": true,
+       "state": "open",
+       "released": true
+      },
+      "samples": [
+       {
+        "tumor_descriptor": "Primary",
+        "specimen_type": "Solid Tissue",
+        "updated_datetime": "2023-11-08T11:17:33.420637-06:00",
+        "days_to_sample_procurement": 0,
+        "sample_id": "7cd039a5-5824-4a84-9d4a-193c2adcc8c1",
+        "submitter_id": "TCGA-E2-A14P-01Z",
+        "state": "released",
+        "sample_type": "Primary Tumor",
+        "tissue_type": "Tumor",
+        "preservation_method": "FFPE",
+        "created_datetime": "2018-05-17T12:10:31.746556-05:00"
+       }
+      ]
+     }
+    ],
+    "file_name": "TCGA-E2-A14P-01Z-00-DX1.663B02FF-C64B-41A6-8685-FD61CD76F9C6.svs",
+    "file_id": "4730b23e-aea1-49a2-ba63-2231fd88b592",
+    "file_size": 1597343893
+   },
+   {
+    "id": "2dad7f43-870e-4556-afbe-b0abf1d02b47",
+    "cases": [
+     {
+      "submitter_id": "TCGA-E2-A14P",
+      "project": {
+       "primary_site": "Breast",
+       "dbgap_accession_number": null,
+       "project_id": "TCGA-BRCA",
+       "disease_type": "Breast Invasive Carcinoma",
+       "name": "Breast Invasive Carcinoma",
+       "releasable": true,
+       "state": "open",
+       "released": true
+      },
+      "samples": [
+       {
+        "intermediate_dimension": null,
+        "tumor_descriptor": "Primary",
+        "time_between_clamping_and_freezing": null,
+        "sample_id": "58bfe278-a80f-4722-b286-4d966214d244",
+        "freezing_method": null,
+        "pathology_report_uuid": "FD8CDFD9-6DCF-4CE1-9BB1-A7FF568EE53C",
+        "submitter_id": "TCGA-E2-A14P-01A",
+        "shortest_dimension": null,
+        "sample_type": "Primary Tumor",
+        "created_datetime": null,
+        "time_between_excision_and_freezing": null,
+        "specimen_type": "Solid Tissue",
+        "updated_datetime": "2023-11-08T11:21:17.930864-06:00",
+        "days_to_sample_procurement": null,
+        "longest_dimension": null,
+        "days_to_collection": 965,
+        "state": "released",
+        "current_weight": null,
+        "initial_weight": 290.0,
+        "tissue_type": "Tumor",
+        "preservation_method": "Unknown"
+       }
+      ]
+     }
+    ],
+    "file_name": "TCGA-E2-A14P-01A-03-TSC.e301fe1e-c75b-4ed2-b304-16a9d63fd835.svs",
+    "file_id": "2dad7f43-870e-4556-afbe-b0abf1d02b47",
+    "file_size": 289308789
+   }
+  ],
+  "pagination": {
+   "count": 3,
+   "total": 3112,
+   "size": 3,
+   "from": 0,
+   "sort": "",
+   "page": 1,
+   "pages": 1038
+  }
+ },
+ "warnings": {}
+}

@@ -1,0 +1,6 @@
+# Dependencies are declared in pyproject.toml (single source of truth).
+# This shim keeps `pip install -r requirements.txt` working: it installs
+# HE-Scope in editable mode, which pulls in all core dependencies.
+# Optional extras: `pip install -e .[wsi]` (OpenSlide), `.[ml]` (training /
+# FM encoders), `.[test]` (pytest).
+-e .
