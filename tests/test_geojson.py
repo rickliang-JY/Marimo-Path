@@ -139,3 +139,69 @@ def test_slide_geojson_text_with_no_slide_open_is_an_empty_collection(engine):
         "type": "FeatureCollection",
         "features": [],
     }
+
+
+# --- tier 1.1: the export must be faithful to the drawn shape --------------
+
+
+def _ring(kind, points_json, bbox):
+    from hescope.geojson import rois_to_geojson
+
+    row = {
+        "id": 1, "kind": kind, "label": "tumor", "notes": "",
+        "points_json": points_json, "bbox": bbox,
+    }
+    fc = rois_to_geojson([row])
+    return fc["features"][0]["geometry"]["coordinates"][0]
+
+
+def test_lasso_exports_its_own_vertices_not_its_bbox():
+    """The regression: every ROI used to export as its bounding box, so a
+    lasso reached QuPath as a rectangle -- a different region than the one the
+    pathologist drew. rois.points_json always held the real geometry."""
+    ring = _ring("polygon", "[[10,10],[90,20],[50,80]]", [10, 10, 90, 80])
+    assert ring == [[10.0, 10.0], [90.0, 20.0], [50.0, 80.0], [10.0, 10.0]]
+    # the bbox corners that are NOT vertices must not appear
+    assert [90.0, 80.0] not in ring
+
+
+def test_rect_exports_as_its_box():
+    ring = _ring("rect", "[[90,80],[10,10]]", [10, 10, 90, 80])  # corners any order
+    assert ring == [
+        [10.0, 10.0], [90.0, 10.0], [90.0, 80.0], [10.0, 80.0], [10.0, 10.0]
+    ]
+
+
+def test_circle_is_sampled_into_a_ring():
+    import math
+
+    ring = _ring("circle", "[[50,50],[75,50]]", [25, 25, 75, 75])
+    assert len(ring) == 65 and ring[0] == ring[-1]  # closed
+    for x, y in ring:
+        assert math.hypot(x - 50.0, y - 50.0) == pytest.approx(25.0)
+
+
+def test_unusable_geometry_falls_back_to_the_bbox():
+    """A row with no or broken points_json must still export something."""
+    expected = [
+        [10.0, 10.0], [90.0, 10.0], [90.0, 80.0], [10.0, 80.0], [10.0, 10.0]
+    ]
+    assert _ring("polygon", "not json", [10, 10, 90, 80]) == expected
+    assert _ring("polygon", None, [10, 10, 90, 80]) == expected
+    assert _ring("polygon", "[[1,2]]", [10, 10, 90, 80]) == expected  # too few
+
+
+def test_every_exported_ring_is_closed():
+    from hescope.geojson import rois_to_geojson
+
+    rows = [
+        {"id": 1, "kind": "polygon", "points_json": "[[0,0],[10,0],[5,9]]",
+         "bbox": [0, 0, 10, 9], "label": "", "notes": ""},
+        {"id": 2, "kind": "rect", "points_json": "[[0,0],[4,4]]",
+         "bbox": [0, 0, 4, 4], "label": "", "notes": ""},
+        {"id": 3, "kind": "circle", "points_json": "[[5,5],[8,5]]",
+         "bbox": [2, 2, 8, 8], "label": "", "notes": ""},
+    ]
+    for feature in rois_to_geojson(rows)["features"]:
+        ring = feature["geometry"]["coordinates"][0]
+        assert ring[0] == ring[-1], "GeoJSON rings must be closed"
