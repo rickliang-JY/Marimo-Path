@@ -1022,6 +1022,7 @@ def _(
     get_tiles,
     make_viewer,
     mo,
+    os,
 ):
     # THE viewer: an OpenSeadragon surface fed by the loopback tile server.
     # Real wheel-zoom, real drag-pan, real detail — the browser fetches 256px
@@ -1037,13 +1038,20 @@ def _(
     # zoom keeps resetting" or "the widget stopped reporting", diagnosed
     # nowhere near the cause.
     # For the same reason this cell must NEVER read osd_viewer.value.
+    def _viewer_height() -> int:
+        try:
+            _h = int(os.environ.get("HESCOPE_VIEWER_HEIGHT", "") or 820)
+        except ValueError:
+            _h = 820
+        return max(400, min(2000, _h))
+
     _src = get_source()
     _tiles = get_tiles()
     osd_viewer = None
-    # Renders nothing by default: with OpenSeadragon opt-in and off, the
-    # legacy cell below owns the viewer. This cell must never be the reason
-    # the page shows an empty viewing area -- every branch that suppresses
-    # the fallback has to put something actionable here instead.
+    # Renders nothing when OpenSeadragon is not driving: the legacy cell below
+    # owns the viewer then. This cell must never be the reason the page shows
+    # an empty viewing area -- every branch that suppresses the fallback has
+    # to put something actionable here instead.
     _view = mo.md("")
     if _src is None and not OSD_AVAILABLE:
         _view = mo.md("")  # the legacy cell already prompts to open a slide
@@ -1054,7 +1062,12 @@ def _(
     elif _tiles is not None:
         try:
             osd_viewer = mo.ui.anywidget(
-                make_viewer(_src, _tiles["tile_source"], height=680)
+                # Taller than the 640 default: whole-slide scans are usually
+                # portrait, so with a full-width viewport the fit-to-window
+                # zoom is bound by HEIGHT and the extra width just becomes
+                # letterboxing. Height is what makes the slide bigger.
+                # HESCOPE_VIEWER_HEIGHT overrides it (clamped to 400..2000).
+                make_viewer(_src, _tiles["tile_source"], height=_viewer_height())
             )
             # The escape hatch travels WITH the widget. A widget that fails to
             # mount in the browser raises nothing in Python, so this text is
@@ -1396,42 +1409,46 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    ROI,
     circle_checkbox,
     format_measurement,
     get_rois,
     get_source,
-    get_vp,
+    live_selection,
     measure_box,
     measure_checkbox,
-    parse_plotly_selection,
-    raw_plotly_selection,
-    roi_plot,
-    selection_to_roi,
     set_measure_msg,
     set_rois,
     ui_actions,
 ):
     # "Add ROI" action for the toolbar button (registered by name; the
     # button itself lives in the toolbar cell above the viewer).
+    #
+    # Goes through live_selection(), the one place that knows which surface is
+    # authoritative. It used to read roi_plot directly, which is None whenever
+    # OpenSeadragon is driving -- so this handler returned immediately and the
+    # button did nothing at all, silently. The agent tool kept working
+    # throughout, because it already went through live_selection(); that gap
+    # between "the agent can read my selection" and "the UI ignores it" is
+    # exactly what a second selection path buys you.
     def _on_add_roi(_):
-        if roi_plot is None:
-            return
-        # raw_plotly_selection handles marimo 0.23 image-only figures,
-        # where .value is [] and the selection lives on _selection_data.
-        _sel = parse_plotly_selection(raw_plotly_selection(roi_plot))
+        # level-0 coordinates on both surfaces (contract dict), so nothing
+        # here needs viewport_transform.
+        _sel = live_selection()
         if _sel is None:
             set_measure_msg(
                 ("warn", "No selection: drag a box or lasso on the viewer first.")
             )
             return
+        _kind = _sel["kind"]
+        _pts = tuple(tuple(float(c) for c in p) for p in _sel["points_level0"])
         if measure_checkbox.value:
-            # Measure mode: box selections become a measurement, not an
-            # ROI. Circle/lasso selections are ignored with a hint.
-            if _sel["kind"] == "box":
-                _rect = selection_to_roi(_sel, get_vp())
+            # Measure mode: rectangles become a measurement, not an ROI.
+            # Lasso selections are ignored with a hint.
+            if _kind == "rect" and len(_pts) == 2:
                 _src = get_source()
                 _mpp = _src.mpp if _src is not None else None
-                _m = measure_box(_rect.points[0], _rect.points[1], _mpp)
+                _m = measure_box(_pts[0], _pts[1], _mpp)
                 set_measure_msg(("info", format_measurement(_m)))
             else:
                 set_measure_msg(
@@ -1442,9 +1459,15 @@ def _(
                     )
                 )
             return
-        _roi = selection_to_roi(
-            _sel, get_vp(), as_circle=bool(circle_checkbox.value)
-        )
+        if circle_checkbox.value and _kind == "rect" and len(_pts) == 2:
+            # Same inscribed-circle geometry as selection_to_roi(as_circle=True),
+            # applied in level-0 space: centre plus a point on the edge.
+            (_x0, _y0), (_x1, _y1) = _pts
+            _cx, _cy = (_x0 + _x1) / 2.0, (_y0 + _y1) / 2.0
+            _r = min(abs(_x1 - _x0), abs(_y1 - _y0)) / 2.0
+            _roi = ROI(kind="circle", points=((_cx, _cy), (_cx + _r, _cy)))
+        else:
+            _roi = ROI(kind=_kind, points=_pts)
         set_rois(get_rois() + [_roi])
         set_measure_msg(None)
 
@@ -1456,6 +1479,7 @@ def _(
 def _(
     AgentBridge,
     OUT_DIR,
+    ROI,
     agent_bridge,
     db,
     get_payload,
@@ -1463,12 +1487,9 @@ def _(
     get_slide_id,
     get_source,
     get_vp,
+    live_selection,
     magnification_for,
     mo,
-    parse_plotly_selection,
-    raw_plotly_selection,
-    roi_plot,
-    selection_to_roi,
     set_ann_version,
     set_db_msg,
     set_payload,
@@ -1486,9 +1507,10 @@ def _(
         if not _rois:
             # Common case: the user dragged a box/lasso on the viewer but
             # never clicked "Add ROI" — fall back to the LIVE selection.
-            _sel = parse_plotly_selection(
-                raw_plotly_selection(roi_plot) if roi_plot is not None else None
-            )
+            # Through live_selection(), so this works on whichever surface is
+            # driving; reading roi_plot here made it a no-op under
+            # OpenSeadragon, reporting "nothing to send" over a real selection.
+            _sel = live_selection()
             if _sel is None:
                 set_db_msg(
                     (
@@ -1498,7 +1520,12 @@ def _(
                     )
                 )
                 return
-            _roi = selection_to_roi(_sel, get_vp())
+            _roi = ROI(
+                kind=_sel["kind"],
+                points=tuple(
+                    tuple(float(c) for c in p) for p in _sel["points_level0"]
+                ),
+            )
             set_rois(get_rois() + [_roi])
             _rois = get_rois()
         _mag = magnification_for(_src.mpp, get_vp().downsample)
@@ -2054,34 +2081,31 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
-    current_selection,
     detect_nuclei,
     extract_patch,
     get_payload,
     get_rois,
     get_source,
-    get_vp,
+    live_selection,
     mo,
     qc_report,
-    raw_plotly_selection,
-    roi_plot,
     ROI,
     set_analysis_result,
 ):
     # "Analyze current selection" (Analysis accordion): runs nuclei detection
-    # + QC on the LIVE plotly selection; falls back to the last submitted ROI
-    # payload, then to the last session ROI, when nothing is drawn.
+    # + QC on the LIVE selection from whichever surface is driving; falls back
+    # to the last submitted ROI payload, then to the last session ROI, when
+    # nothing is drawn.
     def _on_analyze(_):
         try:
             _src = get_source()
             if _src is None:
                 set_analysis_result(("warn", "Open a slide first.", None))
                 return
-            _sel = current_selection(
-                _src,
-                get_vp(),
-                raw_plotly_selection(roi_plot) if roi_plot is not None else None,
-            )
+            # live_selection() again: reading roi_plot here meant "Analyze
+            # current selection" ignored anything drawn on OpenSeadragon and
+            # silently fell through to the last submitted ROI.
+            _sel = live_selection()
             _roi = None
             _origin = "live selection"
             if _sel is not None:
