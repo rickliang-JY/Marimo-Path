@@ -44,9 +44,12 @@ HE-Scope 本体是一个 marimo notebook(`app.py`),背后是一个普通 Python 
 - **FM encoder factory**(`hescope.embeddings`):GPFM(MIT,默认)、
   H-optimus-0(Apache-2.0)、UNI2-h(CC-BY-NC-ND,仅学术对照、永不为默认)、
   ResNet18(ImageNet)本地回退;注册表零重依赖可导入,权重懒加载。
-- **interactions 轨迹**:圈选查看、ROI 提交、标注回写、工具调用、human-gate
-  决策统一落 `interactions` 表(记录过程完全异常安全)。
-- **GeoJSON 导出**:标注一键导出 QuPath 兼容 FeatureCollection。
+- **interactions 轨迹**:圈选查看、ROI 提交、标注回写、ROI 删除、分析运行、
+  agent 工具调用统一落 `interactions` 表 —— notebook 里的按钮和 agent 工具
+  都会写,人写的标注与 agent 写的标注由行内 `actor` 区分(记录过程完全异常
+  安全)。`human_gate` 为保留类型:尚无人工闸门界面,因此无人写入。
+- **GeoJSON 导出**:标注面板的 *Export ROIs (GeoJSON, QuPath)* 一键导出当前
+  切片标注为 QuPath 兼容 FeatureCollection。
 - **降级模式**:无数据库 / 无 OpenSlide / 无网络时应用照常运行,降级以
   callout 呈现,绝不崩 notebook。
 

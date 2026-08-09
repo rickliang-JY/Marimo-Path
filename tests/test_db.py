@@ -148,6 +148,153 @@ def test_slide_find_by_path_and_list_filter(engine):
     assert [s["name"] for s in only_tcga] == ["b.svs"]
 
 
+def test_register_dedups_equivalent_spellings_of_one_file(
+    engine, tmp_path, monkeypatch
+):
+    """R05-2: slides.path was the raw string, so one file opened under an
+    equivalent spelling became a second slide row and its annotations
+    disappeared. app.py passes whatever the user typed into the sidebar box,
+    hescope.cli passes ``str(f.resolve())`` -- they could never agree."""
+    real = tmp_path / "Slides" / "demo_he.png"
+    real.parent.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (240, 230, 240)).save(real)
+    monkeypatch.chdir(tmp_path)  # so a relative spelling names the same file
+
+    drive, tail = os.path.splitdrive(str(real))
+    spellings = [
+        str(real),
+        str(real).replace("\\", "/"),      # pasted with forward slashes
+        os.path.join("Slides", "demo_he.png"),  # relative to CWD
+    ]
+    if drive:  # Windows: a pasted path with a lowercase drive letter
+        spellings.append(drive.lower() + tail)
+    # every spelling really is the same file, so any split is the DB's doing
+    for s in spellings:
+        assert os.path.samefile(s, real)
+
+    repo = SlideRepo(engine)
+    ids = {
+        repo.register(
+            source_kind="local", name="demo_he.png", path=s, width=8, height=8
+        )
+        for s in spellings
+    }
+    assert len(ids) == 1, f"one file became {len(ids)} slide rows: {ids}"
+    assert len(repo.list()) == 1
+
+    # the damage this caused: an ROI saved under one spelling was invisible
+    # under another, with no error anywhere
+    sid = ids.pop()
+    ROIRepo(engine).add(sid, _rect(), label="tumor")
+    for s in spellings:
+        found = repo.find_by_path(s)
+        assert found is not None and found["id"] == sid
+        assert len(ROIRepo(engine).for_slide(found["id"])) == 1
+
+
+def test_register_keeps_extra_json_when_extra_is_omitted(engine):
+    """R05-5: ``extra_json = json.dumps(extra or {})`` ran unconditionally, so
+    re-opening a slide (app.py never passes ``extra``) wiped the column."""
+    repo = SlideRepo(engine)
+    sid = repo.register(
+        source_kind="tcga", name="s.svs", path="/p/keep.svs", width=4, height=4,
+        extra={"gdc_file_id": "abc", "project": "TCGA-BRCA"},
+    )
+    repo.register(  # the same call app.py makes on every open: no `extra`
+        source_kind="tcga", name="s.svs", path="/p/keep.svs", width=4, height=4
+    )
+    assert json.loads(repo.get(sid)["extra_json"]) == {
+        "gdc_file_id": "abc",
+        "project": "TCGA-BRCA",
+    }
+    # passing extra explicitly still replaces it
+    repo.register(
+        source_kind="tcga", name="s.svs", path="/p/keep.svs", width=4, height=4,
+        extra={},
+    )
+    assert json.loads(repo.get(sid)["extra_json"]) == {}
+
+
+def test_merge_duplicate_slide_paths_reunites_a_split_slide(engine, tmp_path):
+    """R05-2 repair: rows written before normalization already exist in the
+    shipped database (``assets\\demo_he.png`` and its absolute twin, one ROI
+    each). Merging must move the ROIs, not cascade-delete them."""
+    from hescope.db import Slide, merge_duplicate_slide_paths
+
+    real = tmp_path / "split.png"
+    Image.new("RGB", (8, 8), (240, 230, 240)).save(real)
+    canonical = str(real.resolve())
+
+    with sa.orm.Session(engine) as s:  # bypass register(): pre-fix rows
+        for path in (canonical, str(real).replace("\\", "/")):
+            s.add(Slide(
+                source_kind="local", name="split.png", path=path,
+                width=8, height=8, extra_json="{}",
+            ))
+        s.commit()
+    sids = [row["id"] for row in SlideRepo(engine).list()]
+    assert len(sids) == 2, "the split rows were not created"
+    for sid in sids:
+        ROIRepo(engine).add(sid, _rect(), label=f"roi-of-{sid}")
+
+    merged = merge_duplicate_slide_paths(engine)
+
+    assert merged == [(sids[1], sids[0])]
+    rows = SlideRepo(engine).list()
+    assert len(rows) == 1 and rows[0]["path"] == canonical
+    labels = sorted(r["label"] for r in ROIRepo(engine).for_slide(sids[0]))
+    assert labels == [f"roi-of-{sids[0]}", f"roi-of-{sids[1]}"], (
+        "the duplicate row's ROIs were lost -- slides.rois cascade-deletes, "
+        "so they must be moved BEFORE the row is deleted"
+    )
+
+
+def test_merge_duplicate_slide_paths_is_a_noop_on_a_clean_database(engine, slide_id):
+    from hescope.db import merge_duplicate_slide_paths
+
+    assert merge_duplicate_slide_paths(engine) == []
+    assert len(SlideRepo(engine).list()) == 1
+
+
+def test_init_db_adds_columns_an_older_database_is_missing(tmp_path):
+    """R05-7: create_all adds missing TABLES but never missing COLUMNS, so a
+    column-drifted database reported db.enabled=True and then failed every ROI
+    write with 'table rois has no column named magnification'."""
+    import sqlite3
+
+    db_file = tmp_path / "old.db"
+    con = sqlite3.connect(db_file)
+    con.executescript(
+        """
+        CREATE TABLE slides (
+            id INTEGER PRIMARY KEY, source_kind VARCHAR(32), name VARCHAR(512),
+            path VARCHAR(1024) UNIQUE, width INTEGER, height INTEGER,
+            mpp FLOAT, extra_json TEXT, created_at DATETIME
+        );
+        CREATE TABLE rois (
+            id INTEGER PRIMARY KEY, slide_id INTEGER, kind VARCHAR(32),
+            points_json TEXT, bbox_json TEXT, label VARCHAR(512), notes TEXT,
+            patch_path VARCHAR(1024), stats_json TEXT, created_at DATETIME
+        );
+        """  # note: no `magnification` column, and no interactions table
+    )
+    con.commit()
+    con.close()
+
+    eng = get_engine(f"sqlite:///{db_file}")
+    init_db(eng)
+
+    cols = {c["name"] for c in sa.inspect(eng).get_columns("rois")}
+    assert "magnification" in cols
+    sid = SlideRepo(eng).register(
+        source_kind="local", name="s.png", path="/p/old.png", width=4, height=4
+    )
+    # the write that used to fail
+    roi_id = ROIRepo(eng).add(sid, _rect(), magnification=20.0)
+    assert ROIRepo(eng).get(roi_id)["magnification"] == pytest.approx(20.0)
+    eng.dispose()
+
+
 # --- ROIRepo ---------------------------------------------------------------
 
 

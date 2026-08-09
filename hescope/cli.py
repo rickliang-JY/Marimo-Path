@@ -9,6 +9,7 @@ Commands:
   init                          create database tables
   ingest PATH [--kind K] [--recursive]   register image files as slides
   list [--kind K]               list registered slides
+  dedupe-slides                 merge slide rows that name the same file
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import os
 import sys
 from pathlib import Path
 
-from .db import SlideRepo, get_engine, init_db
+from .db import SlideRepo, get_engine, init_db, merge_duplicate_slide_paths
 from .slides import open_slide
 
 IMAGE_EXTENSIONS = {".svs", ".tif", ".tiff", ".ndpi", ".png", ".jpg", ".jpeg"}
@@ -124,6 +125,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="recurse into subdirectories when PATH is a directory",
     )
 
+    sub.add_parser(
+        "dedupe-slides",
+        help="merge slide rows that name the same file under different "
+        "path spellings (one-off repair for databases written before "
+        "paths were canonicalized)",
+    )
+
     p_list = sub.add_parser("list", help="list registered slides")
     p_list.add_argument(
         "--kind",
@@ -199,6 +207,18 @@ def _cmd_list(engine, kind: str | None) -> int:
     return 0
 
 
+def _cmd_dedupe_slides(engine) -> int:
+    init_db(engine)
+    merged = merge_duplicate_slide_paths(engine)
+    if not merged:
+        print("no duplicate slide paths found")
+        return 0
+    for dup_id, kept_id in merged:
+        print(f"merged slide id={dup_id} into id={kept_id}")
+    print(f"{len(merged)} duplicate slide row(s) merged")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command in (None, "app"):
@@ -210,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_ingest(engine, args.path, args.kind, args.recursive)
     if args.command == "list":
         return _cmd_list(engine, args.kind)
+    if args.command == "dedupe-slides":
+        return _cmd_dedupe_slides(engine)
     return 1  # pragma: no cover - argparse enforces a valid command
 
 

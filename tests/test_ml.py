@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -110,6 +111,67 @@ def test_train_from_annotations(tmp_path):
     assert len(runs) == 1
     assert "m1" in runs[0]["input_json"]
     assert runs[0]["status"] == "ok"
+
+
+def test_a_label_lost_to_missing_patches_is_recorded_in_the_warning(tmp_path):
+    """R06-3: a class whose patch files vanished must not disappear silently.
+
+    ``agent_out/patches/`` is scratch output while the ``rois`` rows are the
+    durable record, so the two drift apart in normal use (a cleanup, a moved
+    repo, a tmp reaper). Before this, a three-class model became a two-class
+    model with ``ModelInfo.warning`` still None: ``model_prob:necrosis``
+    simply stopped appearing in the heatmap metric dropdown and every tile
+    that was really necrosis was forced into one of the two survivors.
+    """
+    engine = _engine(tmp_path)
+    slide_id = SlideRepo(engine).register(
+        source_kind="pillow", name="s", path=str(tmp_path / "s.png"),
+        width=64, height=64,
+    )
+    repo = ROIRepo(engine)
+    roi = ROI(kind="rect", points=((0.0, 0.0), (48.0, 48.0)))
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+    gone = []
+    for label, color in (
+        ("tumor", (210, 40, 40)),
+        ("stroma", (40, 40, 210)),
+        ("necrosis", (40, 210, 40)),
+    ):
+        for i in range(3):
+            path = _patch(patch_dir / f"{label}{i}.png", color, i)
+            repo.add(slide_id, roi, label=label, patch_path=path)
+            if label == "necrosis":
+                gone.append(path)
+    for path in gone:  # the DB rows stay; only the scratch PNGs are removed
+        Path(path).unlink()
+
+    info = train_from_annotations(
+        engine, name="m2", models_dir=tmp_path / "models"
+    )
+    assert info.labels == ["stroma", "tumor"]  # necrosis really is dropped
+    assert info.warning is not None, (
+        "a whole labelled class was dropped from the model and nothing "
+        "recorded it -- ModelInfo.warning, which exists for exactly this "
+        "kind of note and is threaded all the way to meta.json, stayed None"
+    )
+    assert "necrosis" in info.warning and "3" in info.warning
+    assert "NOT in this model" in info.warning
+
+    _model, meta = load_model("m2", tmp_path / "models")
+    assert meta["warning"] == info.warning
+
+
+def test_missing_patches_that_lose_no_class_are_still_counted(tmp_path):
+    """The seed fixture drops one 'b' row; the class survives, the note stays."""
+    engine = _engine(tmp_path)
+    _seed_db(tmp_path, engine)
+    info = train_from_annotations(
+        engine, name="m3", models_dir=tmp_path / "models"
+    )
+    assert info.labels == ["a", "b"]
+    assert info.warning is not None and "1 labelled ROI(s) skipped" in info.warning
+    assert "NOT in this model" not in info.warning
 
 
 def test_train_requires_two_labels(tmp_path):

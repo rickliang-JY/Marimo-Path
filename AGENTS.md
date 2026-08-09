@@ -150,12 +150,20 @@ if db.enabled:
 `annotate_roi(roi_id, label=..., notes=...)` tool (or
 `db.roi_repo.update_annotation` directly).
 
-User/agent interactions (selection views, ROI submissions, label write-backs,
-tool calls, human-gate decisions) are traced in the `interactions` table via
+User/agent interactions are traced in the `interactions` table via
 `InteractionRepo` (`record` / `recent` / `for_slide`; fully exception-safe —
-`record` returns None on failure). For QuPath interop,
+`record` returns None on failure). Both sides write: the agent tools record
+`selection_view` (`get_current_selection`), `tool_call` (`query_annotations`,
+`get_slide_info`) and `label_set` (`annotate_roi`), while the notebook's own
+handlers record `roi_submit`, `label_set`, `roi_delete` and `analysis_run`
+with `"actor": "human"` in the payload, so an agent-written label and a
+user-typed one can be told apart. `human_gate` is reserved — no UI writes it
+yet. For QuPath interop,
 `hescope.geojson.export_rois_geojson(db.engine, slide_id, path)` writes a
-FeatureCollection (bbox polygons, `classification` mapped from `label`).
+FeatureCollection to disk (bbox polygons, `classification` mapped from
+`label`); `slide_geojson_text(db.engine, slide_id)` returns the same document
+as a string, and is what the Annotations panel's GeoJSON download button
+hands the user.
 
 ## 7. Quick end-to-end example (via marimo-pair execute-code)
 
@@ -239,10 +247,21 @@ all are additionally re-exported at the `hescope` top level.
 
 Notes:
 - `compute_grid` cells skipped by the tissue filter are `np.nan` in the
-  returned grid; `render_heatmap` blends only non-NaN cells.
+  returned grid; `render_heatmap` blends only non-NaN cells. A tile whose
+  metric *raised* is also `np.nan`, so pass `error_cb=fn(gx, gy, exc)` if you
+  need to tell "no tissue here" from "the metric is broken" — without it a
+  sweep in which every tile failed is byte-identical to the bare thumbnail.
 - `extract_embedding` (ResNet18, 512-d) returns `None` when torch /
   torchvision / weights are unavailable; the first successful call may
   download weights. Check `caps["torch_embedding_available"]` first — it is
   a pure `find_spec` probe and never triggers a download.
 - `train_from_annotations` raises `ValueError` with a clear message when
   there is not enough labeled data; catch it and report it to the user.
+- Always check `info.warning` (also `meta["warning"]`): it is non-None when a
+  `HESCOPE_EMBEDDER` could not be loaded and training fell back to the 56
+  handcrafted features, and when labeled ROIs were skipped because their
+  patch file is gone — including when that dropped a whole class.
+- Handcrafted models record `meta["feature_raster"]` and are scored at that
+  raster: `extract_features` is raster-dependent (nuclei counts, mean nucleus
+  area, blur), so a tile must be resampled to the training raster before it
+  is comparable. `predict_patch` / `make_prob_metric` do this for you.

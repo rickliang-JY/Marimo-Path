@@ -412,6 +412,31 @@ class DBContext:
     def enabled(self) -> bool:
         return self.engine is not None
 
+    def trace(self, kind: str, **fields: Any) -> int | None:
+        """Append one interaction-trace row; returns its id, or None.
+
+        README/AGENTS.md promise that selection views, ROI submissions, label
+        write-backs, analysis runs and tool calls all land in ``interactions``,
+        but only the DB-backed AGENT tools ever wrote one: every human action
+        in the notebook went untraced, so ``label_set`` recorded the agent
+        writing a label and not the user typing it — backwards for the
+        automation-bias question the table exists to answer. This is the
+        notebook's side of that write.
+
+        Same contract as ``InteractionRepo.record``: never raises, and it is a
+        no-op in DB-free mode, so a UI handler can call it without a
+        ``try``/``except`` of its own. Tracing must never be able to break the
+        action it is tracing.
+        """
+        if self.engine is None:
+            return None
+        try:
+            from .db import InteractionRepo
+
+            return InteractionRepo(self.engine).record(kind=kind, **fields)
+        except Exception:
+            return None
+
 
 def bootstrap_db(url: str | None = None) -> DBContext:
     """Create the engine, initialize the schema and build the repositories.

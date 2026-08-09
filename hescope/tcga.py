@@ -195,6 +195,9 @@ class GDCClient:
         size (and, if given, md5) checks pass. Raises on HTTP error; raises
         IOError on size/md5 mismatch or when every retry is exhausted.
         """
+        # Contained once, at the top, so the URL, both `f"{file_id}.svs"`
+        # fallbacks and the error messages below all get the safe form.
+        file_id = safe_file_id(file_id)
         dest_dir = Path(dest_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
         url = f"{self.api_base}/data/{file_id}"
@@ -414,10 +417,48 @@ class GDCClient:
         ) from last_err
 
 
+def _contained_name(name: str) -> str | None:
+    """Reduce a server-supplied file name to a bare, contained one.
+
+    The name arrives on Content-Disposition and is joined onto dest_dir,
+    and the result is what gets written to disk, stored in the catalog as
+    the slide's location and later opened. A "../" segment, an absolute
+    path or a Windows drive letter would all place it outside the
+    download directory, so keep the last path component only. Returns
+    None when nothing usable is left (the callers fall back to file_id).
+    """
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    # "C:evil.svs" is drive-relative on Windows and joins as an absolute
+    # path; a colon also introduces an NTFS alternate data stream.
+    name = name.rsplit(":", 1)[-1]
+    # leaves "." and ".." empty, keeps ordinary names untouched
+    return name.strip().strip(".") or None
+
+
+def safe_file_id(file_id: str) -> str:
+    """Reduce a GDC-supplied file_id to something safe to join onto a path.
+
+    ``file_id`` reaches us from the same untrusted place as the
+    Content-Disposition name (``_record_from_hit``), and it is joined onto a
+    path twice: app.py builds the per-slide download directory as
+    ``TCGA_DATA_DIR / file_id``, and ``download_slide`` falls back to
+    ``f"{file_id}.svs"`` when the server sends no file name. A "../" segment
+    therefore escaped the download root twice over, and the escaped path was
+    persisted to ``tcga_slides.local_path``. Same containment rule (and the
+    same low severity — the real GDC sends a UUID) as R02-3's
+    ``_contained_name`` on the header file name.
+
+    A real file_id is a UUID and passes through unchanged.
+    """
+    return _contained_name(str(file_id)) or "unknown_file_id"
+
+
 def _filename_from_headers(headers) -> str | None:
     cd = headers.get("Content-Disposition") or ""
     m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', cd)
-    return m.group(1).strip() if m else None
+    # sanitised here rather than at the two join sites so no future caller
+    # can reintroduce the escape by forgetting one
+    return _contained_name(m.group(1).strip()) if m else None
 
 
 def _resolve_workers(workers: int | None) -> int:
@@ -542,7 +583,8 @@ class SlideCatalog:
 
     def upsert(self, records: list[SlideRecord]) -> int:
         """Insert new records (existing file_ids are ignored, local download
-        state is preserved). Returns the number of newly inserted rows."""
+        state is preserved). A missing md5sum on an existing row is the one
+        field that is backfilled. Returns the number of newly inserted rows."""
         now = self._now()
         inserted = 0
         with self._connect() as con:
@@ -570,6 +612,19 @@ class SlideCatalog:
                     ),
                 )
                 inserted += cur.rowcount
+                # md5sum is the only content check a download gets. A row
+                # that predates it -- carried over by the ALTER TABLE
+                # upgrade above, or first seen when GDC reported none --
+                # would otherwise keep md5sum NULL forever, so every later
+                # download of that slide runs with expected_md5=None and is
+                # silently accepted unverified. Fill it in, but never
+                # overwrite a value that is already recorded.
+                if cur.rowcount == 0 and r.md5sum:
+                    con.execute(
+                        "UPDATE tcga_slides SET md5sum = ? "
+                        "WHERE file_id = ? AND md5sum IS NULL",
+                        (r.md5sum, r.file_id),
+                    )
         return inserted
 
     def mark_downloaded(self, file_id: str, local_path: str) -> None:

@@ -11,6 +11,7 @@ from hescope.heatmap import (
     compute_grid,
     get_colormap_lut,
     grid_bbox_to_level0,
+    grid_coverage,
     render_heatmap,
 )
 from hescope.slides import open_slide
@@ -138,3 +139,55 @@ def test_render_heatmap_explicit_vmin_vmax():
     grid = np.array([[5.0]])
     out = render_heatmap(base, grid, alpha=1.0, vmin=0.0, vmax=10.0)
     assert tuple(np.asarray(out)[16, 16]) == tuple(lut[128])
+
+
+# --- R03-4: the grid spans MORE than the slide; the overlay must not stretch -
+
+
+def test_grid_coverage_is_one_when_the_slide_divides_evenly():
+    # 1024 wide / (128 * 4) = exactly 2 cells; 768 / 512 = 1.5 -> 2 cells
+    assert grid_coverage((1024, 1024), (2, 2), tile=128, downsample=4.0) == (1.0, 1.0)
+    fx, fy = grid_coverage((1024, 768), (2, 2), tile=128, downsample=4.0)
+    assert fx == pytest.approx(1.0)
+    assert fy == pytest.approx(1024 / 768)
+
+
+def test_grid_coverage_matches_the_real_sweep(tmp_path):
+    src = _make_slide(tmp_path, size=(1024, 768))
+    rows, cols = grid_shape(src, tile=TILE, downsample=DS)
+    fx, fy = grid_coverage(src.dimensions, (rows, cols), tile=TILE, downsample=DS)
+    assert fx == pytest.approx(cols * CELL / src.dimensions[0])
+    assert fy == pytest.approx(rows * CELL / src.dimensions[1])
+    assert fy > 1.0  # 768 px of slide, 1024 px of grid
+
+
+def test_render_heatmap_coverage_keeps_cells_on_their_own_pixels():
+    """A 2-row grid over a base only 1.5 rows tall must not be squashed.
+
+    Without ``coverage`` the two rows each get half the image, so the boundary
+    between them lands at y = 24 instead of the y = 32 the sweep measured --
+    the bottom row of every heatmap is drawn over tissue it never saw.
+    """
+    base = Image.new("RGB", (64, 48), (0, 0, 0))
+    lut = get_colormap_lut("viridis")
+    grid = np.array([[0.0, 0.0], [1.0, 1.0]])  # row 0 = vmin, row 1 = vmax
+    cov = grid_coverage((64, 48), (2, 2), tile=32, downsample=1.0)
+    assert cov == pytest.approx((1.0, 64 / 48))
+
+    out = np.asarray(render_heatmap(base, grid, alpha=1.0, coverage=cov))
+    # cell height is 32 base px: row 0 owns y < 32, row 1 owns y >= 32
+    assert tuple(out[31, 10]) == tuple(lut[0])
+    assert tuple(out[33, 10]) == tuple(lut[255])
+
+    # the unfixed behaviour, for contrast: the split moves up to y = 24
+    stretched = np.asarray(render_heatmap(base, grid, alpha=1.0))
+    assert tuple(stretched[25, 10]) == tuple(lut[255])
+    assert tuple(stretched[31, 10]) == tuple(lut[255])  # wrong row at y = 31
+
+
+def test_render_heatmap_coverage_defaults_to_the_old_behaviour():
+    base = Image.new("RGB", (64, 48), (10, 20, 30))
+    grid = np.array([[0.0, 1.0], [np.nan, 0.5]])
+    a = np.asarray(render_heatmap(base, grid, alpha=0.5))
+    b = np.asarray(render_heatmap(base, grid, alpha=0.5, coverage=(1.0, 1.0)))
+    assert np.array_equal(a, b)

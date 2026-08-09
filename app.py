@@ -30,6 +30,7 @@ def _():
     import math
     import os
     import tempfile
+    import threading
     from dataclasses import replace as dc_replace
     from pathlib import Path
 
@@ -46,8 +47,9 @@ def _():
         make_slide_info_tool,
     )
     from hescope.db import export_rois
+    from hescope.geojson import slide_geojson_text
     from hescope.grid import tissue_fraction_proxy
-    from hescope.heatmap import compute_grid, render_heatmap
+    from hescope.heatmap import compute_grid, grid_coverage, render_heatmap
     from hescope.measure import format_measurement, measure_box
     from hescope.ml import (
         list_models,
@@ -145,6 +147,7 @@ def _():
         export_rois,
         extract_patch,
         format_measurement,
+        grid_coverage,
         json,
         jump_viewport_for_bbox,
         list_models,
@@ -166,13 +169,16 @@ def _():
         osd_current_selection,
         parse_osd_measure,
         qc_report,
+        raw_osd_selection,
         raw_plotly_selection,
         render_heatmap,
         render_viewport,
         roi_from_db_row,
         rois_to_payload,
         serve_slide,
+        slide_geojson_text,
         tempfile,
+        threading,
         tissue_fraction_proxy,
         train_from_annotations,
         viewport_changed,
@@ -336,31 +342,46 @@ def _(mo):
     # message tuples or opaque result dicts; None = nothing to show.
     get_analysis_result, set_analysis_result = mo.state(None)
     get_analysis_msg, set_analysis_msg = mo.state(None)  # (kind, text) | None
-    get_hm_progress, set_hm_progress = mo.state(None)  # (done, total) | None
     get_hm_result, set_hm_result = mo.state(None)  # {"grid","params","png"}
     get_train_msg, set_train_msg = mo.state(None)  # (kind, text) | None
     get_train_info, set_train_info = mo.state(None)  # ModelInfo dict | None
     get_models_version, set_models_version = mo.state(None)  # refresh token
+    # Background heatmap sweep. A plain thread-shared dict, NOT mo.state, for
+    # the same two reasons the TCGA download uses one: a synchronous sweep
+    # blocks the kernel so NO cell can re-render while it runs (which is why
+    # the progress bar written to explain the wait could never appear, and why
+    # the "already running" guard could never be true), and mo.state setters
+    # are inert when called from a foreign thread. The worker writes here; the
+    # ticker cell renders progress and publishes the finished grid to mo.state
+    # on the main thread.
+    hm_job = {"thread": None, "progress": None, "result": None, "msg": None}
+    hm_ticker = mo.ui.refresh(options=["1s"], default_interval="1s")
+    # Background training run, same shape and for the same reasons: feature
+    # extraction is ~0.04 s per patch and a realistic annotation set is
+    # hundreds of ROIs, so running it inline froze the kernel (measured:
+    # 19.7 s for 20 ROIs before this) with no message and no way to re-render.
+    train_job = {"thread": None, "result": None, "msg": None}
     return (
         get_analysis_msg,
         get_analysis_result,
-        get_hm_progress,
         get_hm_result,
         get_models_version,
         get_train_info,
         get_train_msg,
+        hm_job,
+        hm_ticker,
         set_analysis_msg,
         set_analysis_result,
-        set_hm_progress,
         set_hm_result,
         set_models_version,
         set_train_info,
         set_train_msg,
+        train_job,
     )
 
 
 @app.cell(hide_code=True)
-def _(live_selection, make_live_selection_tool):
+def _(db, get_slide_id, live_selection, make_live_selection_tool):
     # Zero-click live-selection tool for a code agent (marimo-pair). Reports
     # the selection the user just drew on the viewer, in level-0 coordinates —
     # no "Send to code agent" click required. Returns "NO_SELECTION" when
@@ -370,7 +391,9 @@ def _(live_selection, make_live_selection_tool):
     # live_selection() picks the surface (OpenSeadragon or the plotly
     # fallback); this cell only wraps it in the tool contract, so there is
     # exactly ONE place that decides which viewer is authoritative.
-    get_current_selection = make_live_selection_tool(live_selection)
+    get_current_selection = make_live_selection_tool(
+        live_selection, lambda: db, get_slide_id
+    )
     return
 
 
@@ -406,8 +429,13 @@ def _(
     open_slide,
     os,
     serve_slide,
+    set_analysis_msg,
+    set_analysis_result,
     set_db_msg,
+    set_hm_result,
     set_measure_msg,
+    set_payload,
+    set_rois,
     set_slide_id,
     set_source,
     set_tiles,
@@ -422,6 +450,22 @@ def _(
         src = open_slide(p)
         set_source(src)
         set_measure_msg(None)
+        # A slide boundary invalidates EVERYTHING derived from the old slide.
+        # All of it is level-0 geometry or level-0 pixel statistics, and none
+        # of it carries the slide it came from, so left in place it is
+        # silently re-attributed to the new one: "Send to code agent" with
+        # nothing drawn resubmits slide A's rectangle, persists it as a row of
+        # slide B's annotations and reports success; "Analyze current
+        # selection" extracts slide A's bbox out of slide B; the navigator
+        # blends slide A's metric grid onto slide B's thumbnail (the
+        # `except Exception: pass` guard there never fires -- a grid from
+        # another slide does not raise, render_heatmap just resizes it); and
+        # overlay_rois draws slide A's outlines over slide B.
+        set_rois([])
+        set_payload(None)
+        set_analysis_result(None)
+        set_analysis_msg(None)
+        set_hm_result(None)
         _w, _h = src.dimensions
         # Bootstrap viewport. With OpenSeadragon this is replaced by the real
         # container geometry as soon as the widget reports back; it still has
@@ -662,6 +706,7 @@ def _(
     get_hm_result,
     get_source,
     get_vp,
+    grid_coverage,
     hm_nav_checkbox,
     mo,
     navigator_image,
@@ -686,7 +731,19 @@ def _(
         _hm = get_hm_result()
         if hm_nav_checkbox.value and _hm is not None:
             try:
-                _nav_img = render_heatmap(_nav_img, _hm["grid"])
+                # coverage: the grid's cell count is rounded UP, so it spans
+                # more than the slide. Without it the overlay is stretched
+                # over the thumbnail and drifts off the tissue it measured.
+                _nav_img = render_heatmap(
+                    _nav_img,
+                    _hm["grid"],
+                    coverage=grid_coverage(
+                        _src.dimensions,
+                        _hm["grid"].shape,
+                        tile=int(_hm["params"]["tile"]),
+                        downsample=float(_hm["params"]["downsample"]),
+                    ),
+                )
             except Exception:
                 pass  # stale/mismatched grid: show the plain thumbnail
         if overlay_checkbox.value and overlay_rois:
@@ -953,10 +1010,19 @@ def _(get_source, mo, ui_actions):
 
 
 @app.cell(hide_code=True)
-def _(ViewportState, dc_replace, get_source, get_vp, move_camera, ui_actions):
-    # Camera actions for the toolbar buttons. Kept out of the toolbar cell on
-    # purpose (see the comment there): this cell reads the live viewport, so it
-    # re-runs whenever the view moves, and it must therefore build no UI.
+def _(
+    ViewportState,
+    dc_replace,
+    get_source,
+    get_vp,
+    jump_viewport_for_bbox,
+    move_camera,
+    ui_actions,
+):
+    # Camera actions for the toolbar buttons AND for the annotation browser.
+    # Kept out of every UI-building cell on purpose (see the comment in the
+    # toolbar cell): this cell reads the live viewport, so it re-runs whenever
+    # the view moves, and it must therefore build no UI.
     def _pan(dx, dy):
         # step = 25% of the viewport, in level-0 coordinates
         _vp = get_vp()
@@ -986,6 +1052,33 @@ def _(ViewportState, dc_replace, get_source, get_vp, move_camera, ui_actions):
             return
         move_camera(dc_replace(get_vp(), downsample=max(float(v), 1.0)))
 
+    def _on_jump_bbox(bbox):
+        """Center the viewer on a level-0 bbox (annotation click-to-jump).
+
+        This handler lives HERE, with the other camera actions, for the same
+        reason they do: reading the live viewport is exactly what puts a cell
+        inside get_vp's dependency set. It used to live in the annotation
+        browser, which therefore re-ran on every pan and zoom -- rebuilding
+        mo.ui.table and, through it, the label/notes boxes. A re-constructed
+        mo.ui element comes back at its DEFAULT value by design (marimo stamps
+        every element with a fresh token so a re-run resets it), so a mouse
+        drag destroyed the row selection, the ROI highlight and any half-typed
+        label. The Annotations panel is the one panel holding user-TYPED data;
+        it must depend on slide identity and the ROI rows, nothing else.
+        """
+        _s = get_source()
+        if _s is None or not bbox:
+            return
+        _center, _ds = jump_viewport_for_bbox(
+            bbox,
+            get_vp().size,
+            max_downsample=float(max(_s.level_downsamples)),
+        )
+        # move_camera, not set_vp: set_vp only updates ViewportState
+        # (navigator/header), leaving the OpenSeadragon surface -- the default
+        # one, the one actually showing the slide -- exactly where it was.
+        move_camera(dc_replace(get_vp(), center=_center, downsample=_ds))
+
     # `fn=_pan` binds the function OBJECT now. A bare `lambda _: _pan(...)`
     # defers the lookup to click time, and by then marimo's cell-private name
     # mangling (_pan -> _cell_<id>_pan) has taken it out of scope: every arrow
@@ -998,6 +1091,7 @@ def _(ViewportState, dc_replace, get_source, get_vp, move_camera, ui_actions):
     ui_actions["pan_s"] = lambda _v, fn=_pan: fn(0, 1)
     ui_actions["zoom_fit"] = _on_zoom_fit
     ui_actions["zoom"] = _on_zoom
+    ui_actions["jump_bbox"] = _on_jump_bbox
     return
 
 
@@ -1313,6 +1407,8 @@ def _(
     get_vp,
     osd_current_selection,
     osd_viewer,
+    parse_osd_measure,
+    raw_osd_selection,
     raw_plotly_selection,
     roi_plot,
 ):
@@ -1339,7 +1435,39 @@ def _(
             )
         return None
 
-    return (live_selection,)
+    def live_measure():
+        """Level-0 corners of what the user wants MEASURED, or None.
+
+        The companion to live_selection(), and here for the same reason: the
+        measure vocabulary is surface-specific and a handler that cannot see
+        it reasons about a surface it does not understand. OpenSeadragon
+        reports a measure drag as kind="measure", which parse_osd_selection
+        refuses ON PURPOSE (a measurement is a UI readout and must never reach
+        the agent contract as an ROI) -- so live_selection() is None during a
+        measurement, and "Add ROI" in measure mode used to answer a real
+        measurement with "No selection: drag a box ... first", overwriting the
+        readout the widget had just published into that same channel.
+
+        The plotly surface has no measure tool at all; there a box selection
+        IS the measurement. The rect fallback covers it, and also covers a
+        rect drawn on the OSD surface before measure mode was switched on --
+        the widget does not clear `selection` when the tool changes.
+        """
+        if osd_viewer is not None:
+            _pts = parse_osd_measure(raw_osd_selection(osd_viewer.value))
+            if _pts is not None:
+                return _pts
+        _sel = live_selection()
+        if _sel is not None and _sel["kind"] == "rect":
+            _p = _sel["points_level0"]
+            if len(_p) >= 2:
+                return (
+                    (float(_p[0][0]), float(_p[0][1])),
+                    (float(_p[1][0]), float(_p[1][1])),
+                )
+        return None
+
+    return live_measure, live_selection
 
 
 @app.cell(hide_code=True)
@@ -1393,6 +1521,7 @@ def _(
     format_measurement,
     get_rois,
     get_source,
+    live_measure,
     live_selection,
     measure_box,
     measure_checkbox,
@@ -1411,6 +1540,30 @@ def _(
     # between "the agent can read my selection" and "the UI ignores it" is
     # exactly what a second selection path buys you.
     def _on_add_roi(_):
+        # Measure mode FIRST, through live_measure(): asking live_selection()
+        # here is blind to the OpenSeadragon measure vocabulary (kind
+        # "measure" is refused on purpose), so the None branch below fired on
+        # a real measurement and wrote "No selection ..." over the readout the
+        # widget had just published -- the warning and the measurement share
+        # this one set_measure_msg channel.
+        if measure_checkbox.value:
+            # Measure mode: a box becomes a measurement, never an ROI.
+            _mpts = live_measure()
+            if _mpts is None:
+                set_measure_msg(
+                    (
+                        "warn",
+                        "Measure mode: drag a BOX on the viewer to measure; "
+                        "lasso/circle selections are not measured.",
+                    )
+                )
+                return
+            _src = get_source()
+            _mpp = _src.mpp if _src is not None else None
+            set_measure_msg(
+                ("info", format_measurement(measure_box(_mpts[0], _mpts[1], _mpp)))
+            )
+            return
         # level-0 coordinates on both surfaces (contract dict), so nothing
         # here needs viewport_transform.
         _sel = live_selection()
@@ -1421,23 +1574,6 @@ def _(
             return
         _kind = _sel["kind"]
         _pts = tuple(tuple(float(c) for c in p) for p in _sel["points_level0"])
-        if measure_checkbox.value:
-            # Measure mode: rectangles become a measurement, not an ROI.
-            # Lasso selections are ignored with a hint.
-            if _kind == "rect" and len(_pts) == 2:
-                _src = get_source()
-                _mpp = _src.mpp if _src is not None else None
-                _m = measure_box(_pts[0], _pts[1], _mpp)
-                set_measure_msg(("info", format_measurement(_m)))
-            else:
-                set_measure_msg(
-                    (
-                        "warn",
-                        "Measure mode: only box selections are measured; "
-                        "lasso/circle selections are ignored.",
-                    )
-                )
-            return
         if circle_checkbox.value and _kind == "rect" and len(_pts) == 2:
             # Same inscribed-circle geometry as selection_to_roi(as_circle=True),
             # applied in level-0 space: centre plus a point on the edge.
@@ -1528,6 +1664,20 @@ def _(
                 f"bbox={_payload.roi['bbox_level0']} — the agent reads it "
                 "with get_latest_selection().",
             )
+        )
+        # Interaction trace for the HUMAN submit. Recorded whenever the DB is
+        # up, including the DB-free-ROI case (roi_id None), because the event
+        # being traced is the click, not the row.
+        db.trace(
+            "roi_submit",
+            payload={
+                "actor": "human",
+                "kind": _payload.roi["kind"],
+                "bbox_level0": _payload.roi["bbox_level0"],
+                "magnification": _payload.magnification,
+            },
+            slide_id=_sid,
+            roi_id=_payload.roi_id,
         )
         if db.enabled and _payload.roi_id is not None:
             set_ann_version(object())  # refresh annotation browser
@@ -1642,21 +1792,17 @@ def _(db, get_ann_version, get_payload, mo):
 
 
 @app.cell(hide_code=True)
-def _(
-    db,
-    db_roi_error,
-    db_roi_rows,
-    dc_replace,
-    get_slide_id,
-    get_source,
-    get_vp,
-    jump_viewport_for_bbox,
-    mo,
-    set_vp,
-):
+def _(db, db_roi_error, db_roi_rows, get_slide_id, mo, ui_actions):
     # Annotation browser (inside the Annotations accordion). Selecting a row
     # jumps the unified viewer: center on the ROI bbox, zoom so it fills
     # ~80% of the viewport (clamped to the valid downsample range).
+    #
+    # *** THIS CELL MUST NOT REFERENCE get_vp. *** It builds mo.ui.table, and
+    # the annotation editor below builds the label/notes boxes off its value,
+    # so a re-run wipes the row selection, the ROI highlight and any typed
+    # text. The jump needs the live viewport, so it is a NAMED ACTION in
+    # ui_actions (registered by the camera cell, looked up at click time) --
+    # the same arrangement the toolbar uses for exactly the same reason.
     if not db.enabled:
         annotation_table = None
         ann_browser_view = mo.callout(
@@ -1676,19 +1822,41 @@ def _(
         else:
             _err_view = mo.md("")
 
-        def _on_row_selected(rows):
-            if not rows:
-                return
-            _bbox = rows[0].get("bbox")
-            _src = get_source()
-            if not _bbox or _src is None:
-                return
-            _center, _ds = jump_viewport_for_bbox(
-                _bbox,
-                get_vp().size,
-                max_downsample=float(max(_src.level_downsamples)),
-            )
-            set_vp(dc_replace(get_vp(), center=_center, downsample=_ds))
+        # The table shows the bbox as text (a list renders badly in a cell),
+        # so the NUMERIC bbox has to be carried separately and looked up by
+        # row id. Reading rows[0]["bbox"] back out of the table handed
+        # jump_viewport_for_bbox the string "[x0, y0, x1, y1]", which it
+        # unpacks character by character -> ValueError, i.e. clicking a row
+        # never jumped anywhere.
+        # Built through a factory so the lookup arrives as a FUNCTION
+        # PARAMETER: a cell-private name (`_bbox_by_id`) referenced from a
+        # handler body is mangled and discarded when the cell ends, and the
+        # handler would die at click time. Same shape as the ROI panel's
+        # `_make_view(_idx)`.
+        def _make_row_jump(bbox_by_id):
+            def _on_row_selected(rows):
+                if not rows:
+                    return
+                try:
+                    bbox = bbox_by_id.get(int(rows[0].get("id")))
+                except (TypeError, ValueError):
+                    return
+                if not bbox:
+                    return
+                # Looked up at CLICK time, like every toolbar button:
+                # `ui_actions` is a notebook global (no leading underscore),
+                # so it survives marimo's cell-private name mangling, and the
+                # handler that reads the live viewport stays in the camera
+                # cell where a viewport-triggered re-run costs nothing.
+                jump = ui_actions.get("jump_bbox")
+                if jump is not None:
+                    jump(bbox)
+
+            return _on_row_selected
+
+        _on_row_selected = _make_row_jump(
+            {int(_r["id"]): [float(_v) for _v in _r["bbox"]] for _r in db_roi_rows}
+        )
 
         _table_rows = [
             {
@@ -1731,6 +1899,7 @@ def _(
     mo,
     set_ann_version,
     set_db_msg,
+    slide_geojson_text,
 ):
     # Annotation editor + export (inside the Annotations accordion).
     if not db.enabled:
@@ -1777,6 +1946,20 @@ def _(
                 db.roi_repo.update_annotation(
                     _rid, label=label_input.value, notes=notes_input.value
                 )
+                # Trace the HUMAN label write. The agent's annotate_roi tool
+                # has always recorded this kind; without the line below the
+                # interactions table said only the agent ever labels anything.
+                db.trace(
+                    "label_set",
+                    payload={
+                        "actor": "human",
+                        "roi_id": _rid,
+                        "label": label_input.value,
+                        "notes": notes_input.value,
+                    },
+                    slide_id=get_slide_id(),
+                    roi_id=_rid,
+                )
                 set_ann_version(object())
                 set_db_msg(("success", f"Saved annotation for ROI {_rid}."))
             except Exception as _exc:
@@ -1789,6 +1972,15 @@ def _(
                 return
             try:
                 db.roi_repo.delete(_rid)
+                # Recorded AFTER the row is gone, and deliberately not
+                # roi_id-linked in the FK sense: a rejected ROI is the most
+                # informative event the trace can hold, and the row it names
+                # no longer exists to be re-read.
+                db.trace(
+                    "roi_delete",
+                    payload={"actor": "human", "roi_id": _rid},
+                    slide_id=get_slide_id(),
+                )
                 set_ann_version(object())
                 set_db_msg(("success", f"Deleted ROI {_rid}."))
             except Exception as _exc:
@@ -1821,11 +2013,30 @@ def _(
             mimetype="text/csv",
             label="Export ROIs (CSV)",
         )
+
+        def _export_geojson():
+            # README advertises "one click turns annotations into a
+            # QuPath-compatible FeatureCollection"; until R05-8 the only
+            # entry point was hescope.geojson, which app.py never called, so
+            # the one interop feature on the user-facing list was agent-only.
+            try:
+                return slide_geojson_text(db.engine, get_slide_id())
+            except Exception as _exc:
+                return f"export failed: {_exc}"
+
+        export_geojson_button = mo.download(
+            data=lambda: _export_geojson(),
+            filename="rois.geojson",
+            mimetype="application/geo+json",
+            label="Export ROIs (GeoJSON, QuPath)",
+        )
         ann_edit_view = mo.vstack(
             [
                 mo.hstack([label_input, notes_input]),
                 mo.hstack([save_ann_button, delete_ann_button]),
-                mo.hstack([export_json_button, export_csv_button]),
+                mo.hstack(
+                    [export_json_button, export_csv_button, export_geojson_button]
+                ),
             ]
         )
     return (ann_edit_view,)
@@ -1834,7 +2045,7 @@ def _(
 @app.cell(hide_code=True)
 def _(Path, mo):
     from hescope import tcga_panel
-    from hescope.tcga import GDCClient, SlideCatalog
+    from hescope.tcga import GDCClient, SlideCatalog, safe_file_id
 
     # marimo rule: imported names must be unique across cells -> underscore.
     from hescope.paths import resolve_runtime_dir as _resolve_runtime_dir
@@ -1865,6 +2076,7 @@ def _(Path, mo):
         TCGA_DATA_DIR,
         get_tcga_msg,
         get_tcga_records,
+        safe_file_id,
         set_tcga_msg,
         set_tcga_records,
         tcga_catalog,
@@ -1932,6 +2144,7 @@ def _(
     TCGA_DATA_DIR,
     get_tcga_records,
     mo,
+    safe_file_id,
     set_tcga_msg,
     tcga_catalog,
     tcga_client,
@@ -1966,7 +2179,10 @@ def _(
             try:
                 _path = tcga_client.download_slide(
                     _fid,
-                    TCGA_DATA_DIR / _fid,
+                    # file_id is server-supplied: contained before it is
+                    # joined onto a path, or a "../" in it walks the
+                    # download out of TCGA_DATA_DIR (R05-1).
+                    TCGA_DATA_DIR / safe_file_id(_fid),
                     progress_cb=lambda _d, _t: tcga_dl.__setitem__(
                         "progress", (_d, _t)
                     ),
@@ -2061,10 +2277,12 @@ def _(
 @app.cell(hide_code=True)
 def _(
     ROI,
+    db,
     detect_nuclei,
     extract_patch,
     get_payload,
     get_rois,
+    get_slide_id,
     get_source,
     live_selection,
     mo,
@@ -2122,6 +2340,17 @@ def _(
             _patch = extract_patch(_src, _roi, max_size=1024)
             _labels, _nuc = detect_nuclei(_patch, mpp=_src.mpp)
             _qc = qc_report(_patch, mpp=_src.mpp)
+            db.trace(
+                "analysis_run",
+                payload={
+                    "actor": "human",
+                    "analysis": "nuclei+qc",
+                    "origin": _origin,
+                    "bbox": [int(v) for v in _roi.bbox()],
+                    "nuclei_count": _nuc.count,
+                },
+                slide_id=get_slide_id(),
+            )
             set_analysis_result(
                 (
                     "ok",
@@ -2201,6 +2430,18 @@ def _(MODELS_DIR, get_models_version, list_models, mo):
         label="model (for model_prob metrics)",
         allow_select_none=True,
     )
+    return hm_model_dropdown, hm_models
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    # Sweep geometry + navigator blend. Deliberately NOT in the cell above:
+    # that one reads get_models_version() so the model list refreshes after
+    # training, and a re-run RE-CONSTRUCTS every mo.ui element in the cell,
+    # which brings it back at its default value. Parked together, a successful
+    # "Train from annotations" silently reset the user's tile size and their
+    # "show heatmap on navigator" choice -- neither of which has anything to do
+    # with the model list. Same rule as the toolbar cell states above.
     hm_tile_slider = mo.ui.slider(
         start=128, stop=512, step=128, value=256,
         label="tile size", show_value=True,
@@ -2208,7 +2449,7 @@ def _(MODELS_DIR, get_models_version, list_models, mo):
     hm_nav_checkbox = mo.ui.checkbox(
         value=False, label="show heatmap on navigator"
     )
-    return hm_model_dropdown, hm_models, hm_nav_checkbox, hm_tile_slider
+    return hm_nav_checkbox, hm_tile_slider
 
 
 @app.cell(hide_code=True)
@@ -2234,9 +2475,12 @@ def _(hm_model_dropdown, hm_models, mo):
 def _(
     MODELS_DIR,
     compute_grid,
+    db,
     detect_nuclei,
-    get_hm_progress,
+    get_slide_id,
     get_source,
+    grid_coverage,
+    hm_job,
     hm_metric_dropdown,
     hm_model_dropdown,
     hm_tile_slider,
@@ -2245,13 +2489,23 @@ def _(
     mo,
     render_heatmap,
     set_analysis_msg,
-    set_hm_progress,
-    set_hm_result,
     tissue_fraction_proxy,
+    threading,
     viewport_png_bytes,
 ):
-    # "Run heatmap" action: same in-flight guard pattern as the TCGA
-    # download button (progress state != None means busy).
+    # "Run heatmap" action. Same shape as the TCGA download button: the sweep
+    # runs on a WORKER THREAD and reports through the plain hm_job dict.
+    #
+    # It used to run inline, which made two things that look functional
+    # impossible: marimo resolves state updates only after the runner finishes
+    # (runtime.py: `await runner.run_all()` then `resolve_state_updates`), so
+    # no cell could re-render while the handler was on the stack and the
+    # progress bar never had a value other than the None the `finally` left
+    # behind -- and by the same token the in-flight guard could never be true,
+    # so a second click simply re-ran the whole sweep. Measured on the
+    # 6000x4000 demo slide: 0.4 s for tissue_fraction, 9.2 s for
+    # nuclei_density; a real WSI plans hundreds of cells and blocks the kernel
+    # for minutes with nothing on screen.
     def _quick_nuclei_count(_tile_img):
         # Cap tile cost: count nuclei on a <= 256 px working image.
         _img = _tile_img
@@ -2261,7 +2515,8 @@ def _(
         return float(detect_nuclei(_img)[1].count)
 
     def _on_run_heatmap(_):
-        if get_hm_progress() is not None:
+        _t = hm_job["thread"]
+        if _t is not None and _t.is_alive():
             set_analysis_msg(("warn", "Heatmap already running."))
             return
         _src = get_source()
@@ -2270,6 +2525,9 @@ def _(
             return
         _metric = hm_metric_dropdown.value or "tissue_fraction"
         _tile = int(hm_tile_slider.value or 256)
+        # Metric resolution stays on the MAIN thread: "select a model first"
+        # and "unknown metric" are user errors about the controls, and they
+        # must be answered immediately rather than a tick later.
         try:
             if _metric == "tissue_fraction":
                 _metric_fn = tissue_fraction_proxy
@@ -2290,22 +2548,65 @@ def _(
                 )
             else:
                 raise ValueError(f"unknown metric {_metric!r}")
-            # Pick a downsample that keeps the grid <= ~48 cells on the long
-            # axis so sweeps stay interactive; >= 1.0 (never upsample).
-            _w, _h = _src.dimensions
-            _ds = max(1.0, max(_w, _h) / (_tile * 48.0))
-            set_hm_progress((0, 1))
-            _grid = compute_grid(
-                _src,
-                _metric_fn,
-                tile=_tile,
-                downsample=_ds,
-                progress_cb=lambda _d, _t: set_hm_progress((_d, _t)),
-            )
-            _thumb = _src.get_thumbnail((512, 512)).convert("RGB")
-            _blended = render_heatmap(_thumb, _grid)
-            set_hm_result(
-                {
+        except Exception as _exc:  # never crash the notebook
+            set_analysis_msg(("danger", f"Heatmap failed: {_exc}"))
+            return
+        # Pick a downsample that keeps the grid <= ~48 cells on the long
+        # axis so sweeps stay interactive; >= 1.0 (never upsample).
+        _w, _h = _src.dimensions
+        _ds = max(1.0, max(_w, _h) / (_tile * 48.0))
+        hm_job.update(progress=(0, 1), result=None, msg=None)
+        set_analysis_msg(("info", f"Heatmap '{_metric}': sweep started."))
+        # Traced on the MAIN thread, before the worker starts: the sweep runs
+        # for minutes and may be abandoned, and what the trace is about is the
+        # user asking for it.
+        db.trace(
+            "analysis_run",
+            payload={
+                "actor": "human",
+                "analysis": "heatmap",
+                "metric": _metric,
+                "tile": _tile,
+                "downsample": round(_ds, 3),
+            },
+            slide_id=get_slide_id(),
+        )
+
+        def _work():
+            # compute_grid writes NaN for a tile whose metric RAISED, which is
+            # the same NaN a background tile gets, and render_heatmap leaves
+            # NaN cells untouched -- so a sweep in which every tile failed
+            # renders as the bare thumbnail. Counting the failures is the only
+            # way this can be told apart from "no tissue here" (R06-2).
+            _fail = {"n": 0, "first": None}
+
+            def _note_failure(_gx, _gy, _exc):
+                _fail["n"] += 1
+                if _fail["first"] is None:
+                    _fail["first"] = f"{type(_exc).__name__}: {_exc}"
+
+            try:
+                _grid = compute_grid(
+                    _src,
+                    _metric_fn,
+                    tile=_tile,
+                    downsample=_ds,
+                    progress_cb=lambda _d, _t: hm_job.__setitem__(
+                        "progress", (_d, _t)
+                    ),
+                    error_cb=_note_failure,
+                )
+                _thumb = _src.get_thumbnail((512, 512)).convert("RGB")
+                _blended = render_heatmap(
+                    _thumb,
+                    _grid,
+                    coverage=grid_coverage(
+                        _src.dimensions, _grid.shape, tile=_tile, downsample=_ds
+                    ),
+                )
+                # Consumed on the main thread by the ticker cell: mo.state
+                # setters do nothing reactive from a foreign thread.
+                hm_job["result"] = {
                     "grid": _grid,
                     "params": {
                         "metric": _metric,
@@ -2316,18 +2617,46 @@ def _(
                     },
                     "png": viewport_png_bytes(_blended),
                 }
-            )
-            set_analysis_msg(
-                (
-                    "success",
-                    f"Heatmap '{_metric}': grid {_grid.shape[0]}x"
-                    f"{_grid.shape[1]} (tile {_tile}, downsample {_ds:.2f}).",
+                # NaN != NaN: counts the cells the metric returned a value
+                # for, without pulling numpy into the notebook.
+                _valid = sum(1 for _v in _grid.flat if _v == _v)
+                _where = (
+                    f"grid {_grid.shape[0]}x{_grid.shape[1]} "
+                    f"(tile {_tile}, downsample {_ds:.2f})"
                 )
-            )
-        except Exception as _exc:  # never crash the notebook
-            set_analysis_msg(("danger", f"Heatmap failed: {_exc}"))
-        finally:
-            set_hm_progress(None)
+                if _valid == 0 and _fail["n"]:
+                    hm_job["msg"] = (
+                        "danger",
+                        f"Heatmap '{_metric}': all {_fail['n']} tiles failed, "
+                        f"nothing was measured -- the image below is the plain "
+                        f"thumbnail. First error: {_fail['first']}. {_where}.",
+                    )
+                elif _valid == 0:
+                    hm_job["msg"] = (
+                        "warn",
+                        f"Heatmap '{_metric}': no tile passed the tissue "
+                        f"filter, so nothing is overlaid. {_where}.",
+                    )
+                elif _fail["n"]:
+                    hm_job["msg"] = (
+                        "warn",
+                        f"Heatmap '{_metric}': {_fail['n']} of "
+                        f"{_fail['n'] + _valid} measured tiles failed and are "
+                        f"blank. First error: {_fail['first']}. {_where}.",
+                    )
+                else:
+                    hm_job["msg"] = (
+                        "success",
+                        f"Heatmap '{_metric}': {_valid} cells measured, "
+                        f"{_where}.",
+                    )
+            except Exception as _exc:  # never crash the notebook
+                hm_job["msg"] = ("danger", f"Heatmap failed: {_exc}")
+            finally:
+                hm_job["progress"] = None
+
+        hm_job["thread"] = threading.Thread(target=_work, daemon=True)
+        hm_job["thread"].start()
 
     hm_run_button = mo.ui.button(
         label="Run heatmap", kind="success", on_click=_on_run_heatmap
@@ -2337,8 +2666,68 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    hm_job,
+    hm_ticker,
+    mo,
+    set_analysis_msg,
+    set_hm_result,
+    set_models_version,
+    set_train_info,
+    set_train_msg,
+    train_job,
+):
+    # 1s ticker (created in the analysis-state cell): re-renders THIS cell so
+    # progress written by the background heatmap worker (plain hm_job dict)
+    # becomes visible, and so the finished grid is published to mo.state on
+    # the main thread, where state updates are reactive.
+    #
+    # It is a cell of its own, and its view is stacked next to heatmap_view
+    # rather than inside it, so the once-a-second re-render does not drag the
+    # heatmap PNG through a fresh base64 data URI every tick.
+    #
+    # The background TRAINING run is drained here too rather than from a
+    # second ticker: it needs exactly the same main-thread hand-off, and one
+    # mo.ui.refresh widget must not be displayed from two cells.
+    hm_ticker.value  # dependency: re-run on every tick
+
+    if hm_job["result"] is not None:
+        set_hm_result(hm_job["result"])
+        hm_job["result"] = None
+    if hm_job["msg"] is not None:
+        set_analysis_msg(hm_job["msg"])
+        hm_job["msg"] = None
+
+    if train_job["result"] is not None:
+        set_train_info(train_job["result"])
+        train_job["result"] = None
+        set_models_version(object())  # refresh heatmap model dropdown
+    if train_job["msg"] is not None:
+        set_train_msg(train_job["msg"])
+        train_job["msg"] = None
+
+    _prog = hm_job["progress"]
+    if _prog is None:
+        _prog_view = mo.md("")
+    else:
+        _done, _total = _prog
+        _pct = int(_done * 100 / _total) if _total else 0
+        _prog_view = mo.Html(
+            '<div style="margin:4px 0;">'
+            f"Heatmap running: {_done}/{_total} cells ({_pct}%)"
+            '<div style="width:100%;height:8px;background:#e8e4dc;'
+            'border-radius:4px;overflow:hidden;">'
+            f'<div style="height:100%;width:{_pct}%;background:#5b8c5a;">'
+            "</div></div></div>"
+        )
+    hm_progress_view = mo.hstack(
+        [_prog_view, hm_ticker], justify="space-between", align="center"
+    )
+    return (hm_progress_view,)
+
+
+@app.cell(hide_code=True)
+def _(
     get_analysis_msg,
-    get_hm_progress,
     get_hm_result,
     hm_metric_dropdown,
     hm_model_dropdown,
@@ -2347,26 +2736,13 @@ def _(
     hm_tile_slider,
     mo,
 ):
-    # Heatmap controls + progress + result image (Analysis accordion).
+    # Heatmap controls + result image (Analysis accordion). The progress bar
+    # is deliberately NOT here -- see the ticker cell above.
     _parts = [
         mo.md("### Heatmap"),
         mo.hstack([hm_model_dropdown, hm_metric_dropdown, hm_tile_slider]),
         mo.hstack([hm_run_button, hm_nav_checkbox]),
     ]
-    _prog = get_hm_progress()
-    if _prog is not None:
-        _done, _total = _prog
-        _pct = int(_done * 100 / _total) if _total else 0
-        _parts.append(
-            mo.Html(
-                '<div style="margin:4px 0;">'
-                f"Heatmap running: {_done}/{_total} cells ({_pct}%)"
-                '<div style="width:100%;height:8px;background:#e8e4dc;'
-                'border-radius:4px;overflow:hidden;">'
-                f'<div style="height:100%;width:{_pct}%;background:#5b8c5a;">'
-                "</div></div></div>"
-            )
-        )
     _msg = get_analysis_msg()
     if _msg is not None:
         _kind = _msg[0] if _msg[0] in ("info", "warn", "success", "danger") else "info"
@@ -2393,18 +2769,30 @@ def _(
     MODELS_DIR,
     db,
     mo,
-    set_models_version,
     set_train_info,
     set_train_msg,
+    threading,
     train_from_annotations,
+    train_job,
 ):
     # "Train from annotations" (Analysis accordion): weakly-supervised patch
     # classifier from labeled ROIs in the DB. Requires the database.
+    #
+    # Runs on a WORKER THREAD through the plain train_job dict, exactly like
+    # the heatmap sweep above: reading and featurizing every labelled patch
+    # is seconds of work (measured at 19.7 s for 20 ROIs while it was inline)
+    # and marimo resolves state updates only after the handler returns, so an
+    # inline run froze the whole notebook with nothing on screen. The ticker
+    # cell publishes the result on the main thread.
     train_name_input = mo.ui.text(
         label="model name", value="default", placeholder="e.g. tumor_vs_stroma"
     )
 
     def _on_train(_):
+        _t = train_job["thread"]
+        if _t is not None and _t.is_alive():
+            set_train_msg(("warn", "Training already running."))
+            return
         if not db.enabled:
             set_train_info(None)
             set_train_msg(
@@ -2416,12 +2804,23 @@ def _(
             )
             return
         _name = (train_name_input.value or "").strip() or "default"
-        try:
-            _info = train_from_annotations(
-                db.engine, name=_name, models_dir=str(MODELS_DIR)
-            )
-            set_train_info(
-                {
+        train_job.update(result=None, msg=None)
+        # Cleared here, on the main thread, so a failed run cannot leave the
+        # previous model's table standing under its error message.
+        set_train_info(None)
+        set_train_msg(("info", f"Training '{_name}': started."))
+
+        def _work():
+            try:
+                _info = train_from_annotations(
+                    db.engine, name=_name, models_dir=str(MODELS_DIR)
+                )
+            except ValueError as _exc:  # not enough labeled data: expected path
+                train_job["msg"] = ("warn", str(_exc))
+            except Exception as _exc:  # never crash the notebook
+                train_job["msg"] = ("danger", f"Training failed: {_exc}")
+            else:
+                train_job["result"] = {
                     "name": _info.name,
                     "labels": ", ".join(_info.labels),
                     "n_samples": _info.n_samples,
@@ -2430,17 +2829,28 @@ def _(
                         if _info.cv_accuracy is not None
                         else "n/a"
                     ),
+                    # Which feature space this model actually lives in. A
+                    # HESCOPE_EMBEDDER that fails to load falls back to the
+                    # handcrafted vector, and that used to be visible only as
+                    # a feature_dim nobody reads as a checksum.
+                    "encoder": _info.encoder or "handcrafted",
                     "feature_dim": _info.feature_dim,
                 }
-            )
-            set_train_msg(("success", f"Model '{_info.name}' trained."))
-            set_models_version(object())  # refresh heatmap model dropdown
-        except ValueError as _exc:  # not enough labeled data: expected path
-            set_train_info(None)
-            set_train_msg(("warn", str(_exc)))
-        except Exception as _exc:  # never crash the notebook
-            set_train_info(None)
-            set_train_msg(("danger", f"Training failed: {_exc}"))
+                if _info.warning:
+                    # ModelInfo.warning is how the fallback and a dropped
+                    # class report themselves; it was persisted to meta.json
+                    # and never shown, so both read as a plain success.
+                    train_job["msg"] = (
+                        "warn",
+                        f"Model '{_info.name}' trained, but: {_info.warning}",
+                    )
+                else:
+                    train_job["msg"] = (
+                        "success", f"Model '{_info.name}' trained."
+                    )
+
+        train_job["thread"] = threading.Thread(target=_work, daemon=True)
+        train_job["thread"].start()
 
     train_button = mo.ui.button(
         label="Train from annotations", on_click=_on_train
@@ -2487,10 +2897,17 @@ def _(MODELS_DIR, analysis_capabilities, json):
 
 
 @app.cell(hide_code=True)
-def _(analysis_select_view, heatmap_view, mo, train_view):
+def _(analysis_select_view, heatmap_view, hm_progress_view, mo, train_view):
     # The Analysis accordion panel content.
     analysis_view = mo.vstack(
-        [analysis_select_view, mo.md("---"), heatmap_view, mo.md("---"), train_view]
+        [
+            analysis_select_view,
+            mo.md("---"),
+            heatmap_view,
+            hm_progress_view,
+            mo.md("---"),
+            train_view,
+        ]
     )
     return (analysis_view,)
 

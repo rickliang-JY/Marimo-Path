@@ -59,6 +59,33 @@ def rois_to_geojson(rows: list[dict], mpp: float | None = None) -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
+def slide_feature_collection(engine: Any, slide_id: int) -> dict:
+    """FeatureCollection for one slide's saved ROIs, straight from the DB.
+
+    Split out of ``export_rois_geojson`` so the notebook's download button can
+    hand the user the same bytes without writing a file first: the README
+    advertises a one-click GeoJSON export, and for a while the only entry point
+    was the file-writing function, which app.py never called (R05-8).
+    """
+    from .db import ROIRepo, SlideRepo
+
+    rows = ROIRepo(engine).for_slide(slide_id)
+    slide = SlideRepo(engine).get(slide_id)
+    mpp = slide.get("mpp") if slide else None
+    return rois_to_geojson(rows, mpp=mpp)
+
+
+def slide_geojson_text(engine: Any, slide_id: int | None) -> str:
+    """``slide_feature_collection`` as the JSON text a download hands over.
+
+    ``slide_id`` of None (no slide open) yields an empty FeatureCollection
+    rather than an error, so the button is always safe to click.
+    """
+    if slide_id is None:
+        return json.dumps({"type": "FeatureCollection", "features": []}, indent=2)
+    return json.dumps(slide_feature_collection(engine, slide_id), indent=2)
+
+
 def export_rois_geojson(
     engine: Any,
     slide_id: int,
@@ -69,12 +96,7 @@ def export_rois_geojson(
     Returns the FeatureCollection dict that was written (also useful without
     reading the file back). Parent directories are created as needed.
     """
-    from .db import ROIRepo, SlideRepo
-
-    rows = ROIRepo(engine).for_slide(slide_id)
-    slide = SlideRepo(engine).get(slide_id)
-    mpp = slide.get("mpp") if slide else None
-    fc = rois_to_geojson(rows, mpp=mpp)
+    fc = slide_feature_collection(engine, slide_id)
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(fc, indent=2), encoding="utf-8")

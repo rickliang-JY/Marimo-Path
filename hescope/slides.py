@@ -166,7 +166,14 @@ class OpenSlideSource:
         sx1 = min(lw, lx + w)
         sy1 = min(lh, ly + h)
         if sx1 > sx0 and sy1 > sy0:
-            crop = img.crop((sx0 - lx, sy0 - ly, sx1 - lx + (sx1 - sx0), sy1 - ly + (sy1 - sy0)))
+            # Crop exactly the IN-SLIDE part of what openslide returned.
+            # `img` pixel (0, 0) is level coordinate (lx, ly), so the valid
+            # window is [sx0 - lx, sx1 - lx) x [sy0 - ly, sy1 - ly).
+            # Adding the window size to the right/bottom edge (as this used
+            # to) doubles the box, so PIL also copies the region *past* the
+            # slide edge -- which openslide returns as transparent, i.e.
+            # BLACK after .convert("RGB") -- straight over the white padding.
+            crop = img.crop((sx0 - lx, sy0 - ly, sx1 - lx, sy1 - ly))
             out.paste(crop, (sx0 - lx, sy0 - ly))
         return out
 

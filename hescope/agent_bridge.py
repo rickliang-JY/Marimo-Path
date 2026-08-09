@@ -397,7 +397,11 @@ def _live_patch_dir() -> str:
     return tempfile.mkdtemp(prefix="hescope_live_patches_")
 
 
-def make_live_selection_tool(getter: Callable[[], dict | None]) -> Callable[[], str]:
+def make_live_selection_tool(
+    getter: Callable[[], dict | None],
+    db_getter: Callable[[], object] | None = None,
+    slide_id_getter: Callable[[], int | None] | None = None,
+) -> Callable[[], str]:
     """Zero-arg tool for code agents. Returns compact JSON of the live
     selection dict, or the exact string 'NO_SELECTION'.
 
@@ -406,6 +410,12 @@ def make_live_selection_tool(getter: Callable[[], dict | None]) -> Callable[[], 
     user to click "Send to code agent"), while this tool reports the raw
     live figure selection (box/lasso) as mapped by
     ``hescope.viewer.current_selection`` — no user click required.
+
+    With ``db_getter`` the read is traced as an interactions row
+    (kind=selection_view): an agent looking at what the user just drew is the
+    "selection view" README/AGENTS.md promise the table records, and it is the
+    one event that says the agent saw the human's choice before answering.
+    Both extra arguments are optional so existing callers are unaffected.
     """
 
     def get_current_selection() -> str:
@@ -413,6 +423,19 @@ def make_live_selection_tool(getter: Callable[[], dict | None]) -> Callable[[], 
         # returns an "error" JSON object instead of propagating.
         try:
             sel = getter()
+            if db_getter is not None:
+                _record_interaction(
+                    db_getter(),
+                    kind="selection_view",
+                    payload={
+                        "tool": "get_current_selection",
+                        "kind": (sel or {}).get("kind"),
+                        "bbox_level0": (sel or {}).get("bbox_level0"),
+                    },
+                    slide_id=(
+                        slide_id_getter() if slide_id_getter is not None else None
+                    ),
+                )
             return json.dumps(sel) if sel is not None else "NO_SELECTION"
         except Exception as exc:
             return json.dumps({"error": f"{type(exc).__name__}: {exc}"})

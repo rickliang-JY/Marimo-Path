@@ -7,7 +7,11 @@ import json
 import pytest
 
 from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.geojson import export_rois_geojson, rois_to_geojson
+from hescope.geojson import (
+    export_rois_geojson,
+    rois_to_geojson,
+    slide_geojson_text,
+)
 from hescope.rois import ROI
 
 
@@ -113,3 +117,25 @@ def test_export_rois_geojson_empty_slide(engine, slide_id, tmp_path):
     fc = export_rois_geojson(engine, slide_id, out)
     assert fc == {"type": "FeatureCollection", "features": []}
     assert json.loads(out.read_text()) == fc
+
+
+def test_slide_geojson_text_matches_the_file_export(engine, slide_id, tmp_path):
+    """R05-8: the download button needs the document as a string, and it must
+    be the SAME document the file exporter writes -- not a second
+    implementation that can drift."""
+    repo = ROIRepo(engine)
+    repo.add(slide_id, _rect(), label="stroma")
+    out = tmp_path / "rois.geojson"
+
+    assert json.loads(slide_geojson_text(engine, slide_id)) == export_rois_geojson(
+        engine, slide_id, out
+    )
+
+
+def test_slide_geojson_text_with_no_slide_open_is_an_empty_collection(engine):
+    """`get_slide_id()` is None whenever no slide is open; the button is
+    always clickable, so this must not raise."""
+    assert json.loads(slide_geojson_text(engine, None)) == {
+        "type": "FeatureCollection",
+        "features": [],
+    }

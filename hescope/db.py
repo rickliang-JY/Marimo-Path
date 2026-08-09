@@ -71,9 +71,62 @@ def get_engine(url: str | None = None) -> sa.Engine:
     return engine
 
 
+def normalize_slide_path(path: str | Path) -> str:
+    """Canonical form of a slide path — the key ``slides.path`` is stored under.
+
+    ``slides.path`` is UNIQUE and is the only thing tying saved ROIs to a file,
+    but the callers spell it differently: app.py passes the raw string from the
+    sidebar text box, ``hescope.cli`` passes an already-resolved path. Without
+    one shared normalization the SAME file opened as ``E:\\x\\s.svs``,
+    ``e:/x/s.svs`` or ``assets/s.svs`` becomes three slide rows, and each row
+    sees only its own annotations — ``query_annotations()`` and
+    ``get_slide_info()`` then report an empty slide with no error. Normalizing
+    inside the repository rather than at the call sites means a future caller
+    cannot reintroduce the split by forgetting one (the same reasoning that put
+    ``_contained_name`` inside ``_filename_from_headers``).
+
+    Falls back to the input string if the path cannot be resolved (an
+    unreachable network share, a name the OS rejects): a slightly worse key
+    beats refusing to register the slide.
+    """
+    try:
+        return str(Path(path).expanduser().resolve())
+    except (OSError, ValueError, RuntimeError):
+        return str(path)
+
+
 def init_db(engine: sa.Engine) -> None:
-    """Create all tables (idempotent)."""
+    """Create all tables, then add any columns an older database is missing.
+
+    ``create_all`` adds missing TABLES but never missing COLUMNS, so a database
+    written by a build with a narrower schema (branch switching, a user
+    upgrading hescope) came up with ``db.enabled = True`` and then failed every
+    ROI write with "table rois has no column named ...". The additive
+    ``PRAGMA table_info`` + ``ALTER TABLE`` upgrade below is the same one
+    ``SlideCatalog`` already does for its md5sum column; there is no migration
+    framework here, so it is additive only — never a drop, a rename or a type
+    change. A failure propagates to ``bootstrap_db``, which degrades to DB-free
+    mode: an honest "database disabled" beats a live-looking panel whose every
+    save answers "Submit failed".
+    """
     Base.metadata.create_all(engine)
+    inspector = sa.inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                # Added without NOT NULL on purpose: existing rows have no
+                # value for it and SQLite rejects ADD COLUMN NOT NULL without
+                # a default.
+                type_sql = column.type.compile(engine.dialect)
+                conn.execute(
+                    sa.text(
+                        f'ALTER TABLE "{table.name}" '
+                        f'ADD COLUMN "{column.name}" {type_sql}'
+                    )
+                )
 
 
 class Base(DeclarativeBase):
@@ -123,8 +176,10 @@ INTERACTION_KINDS = (
     "selection_view",
     "roi_submit",
     "label_set",
+    "roi_delete",
     "analysis_run",
     "tool_call",
+    # reserved: no human-gate UI exists yet, so nothing writes this kind
     "human_gate",
 )
 
@@ -241,7 +296,15 @@ class SlideRepo:
         extra: dict | None = None,
     ) -> int:
         """Register a slide. Idempotent on the unique ``path``: re-registering
-        the same path returns the existing id and refreshes mutable fields."""
+        the same FILE returns the existing id and refreshes mutable fields.
+
+        ``path`` is canonicalized (see ``normalize_slide_path``) so that two
+        spellings of one file cannot become two slide rows.
+
+        ``extra`` is only written when given: omitting the argument is not a
+        request to clear the column, and both production callers omit it on
+        every slide open."""
+        path = normalize_slide_path(path)
         with Session(self.engine) as s:
             slide = s.execute(
                 select(Slide).where(Slide.path == path)
@@ -254,7 +317,8 @@ class SlideRepo:
             slide.width = int(width)
             slide.height = int(height)
             slide.mpp = mpp
-            slide.extra_json = json.dumps(extra or {})
+            if extra is not None:
+                slide.extra_json = json.dumps(extra)
             s.commit()
             return slide.id  # type: ignore[return-value]
 
@@ -264,6 +328,8 @@ class SlideRepo:
             return _slide_dict(slide) if slide is not None else None
 
     def find_by_path(self, path: str) -> dict | None:
+        """Look a slide up by file, under any spelling of its path."""
+        path = normalize_slide_path(path)
         with Session(self.engine) as s:
             slide = s.execute(
                 select(Slide).where(Slide.path == path)
@@ -285,6 +351,51 @@ class SlideRepo:
             if slide is not None:
                 s.delete(slide)
                 s.commit()
+
+
+def merge_duplicate_slide_paths(engine: sa.Engine) -> list[tuple[int, int]]:
+    """One-off repair for slide rows written before path normalization.
+
+    ``SlideRepo.register`` now canonicalizes ``slides.path``, but a database
+    filled in before that can already hold several rows for one file (the
+    shipped ``data/hescope.db`` held ``assets\\demo_he.png`` and
+    ``E:\\...\\assets\\demo_he.png``, one ROI hanging off each). Group the
+    existing rows by their canonical path; in each group the LOWEST id wins
+    (the oldest registration), every other row's ROIs and interactions are
+    re-pointed at it, and the duplicate row is deleted. Rows that are already
+    unique keep their id and only get their stored path rewritten.
+
+    ROIs are moved BEFORE the duplicate row is deleted — ``slides.rois``
+    cascade-deletes, so the other order would destroy exactly the annotations
+    this is meant to rescue.
+
+    Returns the ``(deleted_id, kept_id)`` pairs, oldest first.
+    """
+    merged: list[tuple[int, int]] = []
+    with Session(engine) as s:
+        groups: dict[str, list[Slide]] = {}
+        for slide in s.execute(select(Slide).order_by(Slide.id)).scalars():
+            groups.setdefault(normalize_slide_path(slide.path), []).append(slide)
+        for canonical, rows in groups.items():
+            keeper = rows[0]
+            for dup in rows[1:]:
+                s.execute(
+                    sa.update(ROI)
+                    .where(ROI.slide_id == dup.id)
+                    .values(slide_id=keeper.id)
+                )
+                s.execute(
+                    sa.update(Interaction)
+                    .where(Interaction.slide_id == dup.id)
+                    .values(slide_id=keeper.id)
+                )
+                s.delete(dup)
+                merged.append((dup.id, keeper.id))
+            # only after the duplicates are gone: slides.path is UNIQUE
+            s.flush()
+            keeper.path = canonical
+        s.commit()
+    return merged
 
 
 class ROIRepo:

@@ -384,6 +384,148 @@ def test_catalog_md5sum_roundtrip_fresh_db(tmp_path):
     assert cat.search()[0].md5sum == "3" * 32
 
 
+def test_upsert_backfills_missing_md5sum(tmp_path):
+    """R02-2: a row with no md5sum must pick one up on a later GDC search.
+
+    INSERT OR IGNORE leaves existing rows alone, so without the backfill
+    md5sum stays NULL forever and every download of that slide runs with
+    expected_md5=None -- unverified, with nothing on screen to say so.
+    """
+    db = tmp_path / "upgraded.db"
+    _make_old_schema_db(db)  # 'old-fid' predates the md5sum column
+    cat = SlideCatalog(db)
+    assert cat.search()[0].md5sum is None
+
+    # the same slide comes back from GDC, this time carrying its md5
+    same = SlideRecord(
+        "old-fid", "old.svs", 11, "TCGA-BRCA", "TCGA-OO",
+        "Primary Tumor", "Breast", md5sum="a" * 32,
+    )
+    assert cat.upsert([same]) == 0  # still not a new row
+    assert cat.search()[0].md5sum == "a" * 32
+
+    # and this is what app.py hands to download_slide as expected_md5
+    md5 = next(
+        (r.md5sum for r in cat.search(limit=100000)
+         if r.file_id == "old-fid" and r.md5sum),
+        None,
+    )
+    assert md5 == "a" * 32
+
+
+def test_upsert_never_overwrites_a_recorded_md5sum(tmp_path):
+    """Backfill fills a hole; it must not rewrite a value already stored,
+    and it must not disturb local download state."""
+    cat = SlideCatalog(tmp_path / "keep.db")
+    cat.upsert([SlideRecord("k", "k.svs", 1, "TCGA-BRCA", None, None, None,
+                            md5sum="b" * 32)])
+    cat.mark_downloaded("k", "/data/tcga/k.svs")
+
+    cat.upsert([SlideRecord("k", "k.svs", 1, "TCGA-BRCA", None, None, None,
+                            md5sum="c" * 32)])
+    rec = cat.search()[0]
+    assert rec.md5sum == "b" * 32
+    assert rec.local_path == "/data/tcga/k.svs"
+
+
+# --------------------------------------------------------------------------
+# server-supplied file name containment
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("slide.svs", "slide.svs"),
+        ("../../escaped.svs", "escaped.svs"),
+        ("..\\..\\escaped.svs", "escaped.svs"),
+        ("/etc/escaped.svs", "escaped.svs"),
+        ("C:/Windows/Temp/escaped.svs", "escaped.svs"),
+        ("C:escaped.svs", "escaped.svs"),  # drive-relative on Windows
+        ("..", None),
+        (".", None),
+    ],
+)
+def test_filename_from_headers_is_contained(raw, expected):
+    """R02-3: the name is server-controlled and gets joined onto dest_dir."""
+    from hescope.tcga import _filename_from_headers
+
+    headers = {"Content-Disposition": f'attachment; filename="{raw}"'}
+    assert _filename_from_headers(headers) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # a real GDC file_id is a UUID and must pass through untouched
+        ("d0534f82-3ab5-4930-8597-18d4ab09a42f",
+         "d0534f82-3ab5-4930-8597-18d4ab09a42f"),
+        ("../../../pwned", "pwned"),
+        ("..\\..\\..\\pwned", "pwned"),
+        ("/etc/passwd", "passwd"),
+        ("C:pwned", "pwned"),  # drive-relative on Windows
+        ("..", "unknown_file_id"),
+        ("", "unknown_file_id"),
+    ],
+)
+def test_safe_file_id_is_contained(raw, expected):
+    """R05-1: file_id arrives from the same untrusted place as the header file
+    name (``_record_from_hit``) and is joined onto a path twice."""
+    from hescope.tcga import safe_file_id
+
+    assert safe_file_id(raw) == expected
+
+
+def _get_without_filename(payload: bytes = PAYLOAD):
+    """Range-aware stub that sends NO Content-Disposition, so download_slide
+    falls back to ``f"{file_id}.svs"`` -- the join R05-1 is about."""
+    inner = make_ranged_get(payload=payload)
+
+    def fake_get(*a, **kw):
+        resp = inner(*a, **kw)
+        resp.headers.pop("Content-Disposition", None)
+        return resp
+
+    return fake_get
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_download_contains_a_traversing_file_id(monkeypatch, tmp_path, workers):
+    """R05-1: with no Content-Disposition the file name falls back to the
+    GDC-supplied file_id, which used to be joined onto dest_dir raw -- the
+    escaped path was then written to disk and persisted to
+    ``tcga_slides.local_path``."""
+    monkeypatch.setattr("hescope.tcga.requests.get", _get_without_filename())
+    dest_dir = tmp_path / "tcga" / "sub"
+    dest_dir.mkdir(parents=True)
+
+    dest = GDCClient().download_slide("../../../pwned", dest_dir, workers=workers)
+
+    assert dest.name == "pwned.svs"
+    assert dest.resolve().parent == dest_dir.resolve(), (
+        f"the download escaped its directory: {dest.resolve()}"
+    )
+    assert dest.read_bytes() == PAYLOAD
+    assert not list(tmp_path.glob("pwned*")), "a file was written outside dest_dir"
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_download_stays_inside_dest_dir(monkeypatch, tmp_path, workers):
+    """A traversing Content-Disposition must not write outside dest_dir."""
+    monkeypatch.setattr(
+        "hescope.tcga.requests.get", make_ranged_get(file_name="../../escaped.svs")
+    )
+    dest_dir = tmp_path / "slides" / "fid-evil"
+    dest_dir.mkdir(parents=True)
+
+    dest = GDCClient().download_slide("fid-evil", dest_dir, workers=workers)
+
+    assert dest.parent.resolve() == dest_dir.resolve()
+    assert dest.name == "escaped.svs"
+    assert dest.read_bytes() == PAYLOAD
+    assert not (tmp_path / "escaped.svs").exists()  # nothing escaped
+
+
 # --------------------------------------------------------------------------
 # download retries (flaky upstream)
 # --------------------------------------------------------------------------

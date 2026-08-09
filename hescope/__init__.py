@@ -33,7 +33,13 @@ from .embeddings import (
 )
 from .features import FEATURE_DIM, FEATURE_NAMES, extract_embedding, extract_features
 from .grid import grid_shape, iter_grid, tissue_fraction_proxy
-from .heatmap import compute_grid, get_colormap_lut, grid_bbox_to_level0, render_heatmap
+from .heatmap import (
+    compute_grid,
+    get_colormap_lut,
+    grid_bbox_to_level0,
+    grid_coverage,
+    render_heatmap,
+)
 from .ml import (
     ModelInfo,
     list_models,
@@ -125,6 +131,7 @@ __all__ = [
     "fit_reference",
     "get_colormap_lut",
     "grid_bbox_to_level0",
+    "grid_coverage",
     "grid_shape",
     "iter_grid",
     "list_encoders",

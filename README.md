@@ -52,9 +52,14 @@ analysis stack works headless, with no UI in the way.
   never the default) and a local ResNet18 (ImageNet) fallback. The registry
   imports with no heavy dependencies; weights load lazily.
 - **Interaction trace.** Selection views, ROI submissions, label write-backs,
-  tool calls and human-gate decisions all land in the `interactions` table, and
-  recording is fully exception-safe.
-- **GeoJSON export.** One click turns annotations into a QuPath-compatible
+  ROI deletions, analysis runs and agent tool calls all land in the
+  `interactions` table — from the notebook's own buttons as well as from the
+  agent tools, so a label the user typed and a label the agent wrote are both
+  recorded and are told apart by the row's `actor`. Recording is fully
+  exception-safe. (`human_gate` is a reserved kind: there is no human-gate UI
+  yet, so nothing writes it.)
+- **GeoJSON export.** One click — Annotations → *Export ROIs (GeoJSON,
+  QuPath)* — turns the open slide's annotations into a QuPath-compatible
   FeatureCollection.
 - **Graceful degradation.** No database, no OpenSlide, or no network — the app
   still runs. Every degradation surfaces as a callout instead of crashing the

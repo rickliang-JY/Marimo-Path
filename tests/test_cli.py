@@ -129,6 +129,42 @@ def test_db_option_overrides_env(tmp_path, monkeypatch, capsys):
     env_engine.dispose()
 
 
+def test_dedupe_slides_merges_rows_that_name_one_file(tmp_path, capsys):
+    """R05-2 repair path: a database filled in before paths were canonicalized
+    already holds several rows per file, so the fix needs a way to reunite
+    them (the shipped data/hescope.db had two rows for the demo slide, one ROI
+    hanging off each)."""
+    from hescope.db import ROIRepo, Slide
+    from hescope.rois import ROI
+
+    db_url = f"sqlite:///{tmp_path}/dedupe.db"
+    slide = tmp_path / "dup.png"
+    Image.fromarray(
+        np.full((8, 8, 3), 240, dtype=np.uint8), "RGB"
+    ).save(slide)
+    main(["--db", db_url, "init"])
+    engine = get_engine(db_url)
+    with sa.orm.Session(engine) as s:  # pre-fix rows: bypass register()
+        for path in (str(slide.resolve()), str(slide).replace("\\", "/")):
+            s.add(Slide(source_kind="local", name="dup.png", path=path,
+                        width=8, height=8, extra_json="{}"))
+        s.commit()
+    ids = [row["id"] for row in SlideRepo(engine).list()]
+    assert len(ids) == 2
+    for sid in ids:
+        ROIRepo(engine).add(sid, ROI(kind="rect", points=((0.0, 0.0), (4.0, 4.0))))
+
+    assert main(["--db", db_url, "dedupe-slides"]) == 0
+
+    out = capsys.readouterr().out
+    assert f"merged slide id={ids[1]} into id={ids[0]}" in out
+    assert len(SlideRepo(engine).list()) == 1
+    assert len(ROIRepo(engine).for_slide(ids[0])) == 2, "annotations were lost"
+    assert main(["--db", db_url, "dedupe-slides"]) == 0  # idempotent
+    assert "no duplicate slide paths found" in capsys.readouterr().out
+    engine.dispose()
+
+
 # --- app launcher subcommand -------------------------------------------------
 
 

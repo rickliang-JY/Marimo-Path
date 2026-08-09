@@ -82,6 +82,7 @@ def compute_grid(
     tissue_min: float = 0.05,
     max_tiles: int = 4000,
     progress_cb: Callable[[int, int], None] | None = None,
+    error_cb: Callable[[int, int, BaseException], None] | None = None,
 ) -> np.ndarray:
     """Evaluate ``metric_fn(pil_tile) -> float`` over the slide grid.
 
@@ -91,6 +92,13 @@ def compute_grid(
     called with ``total = rows * cols`` grid cells; ``done`` counts cells
     swept so far, and a final ``progress_cb(total, total)`` call is
     guaranteed at completion.
+
+    ``error_cb(gx, gy, exc)`` is called for every tile whose metric raised.
+    A tile that failed and a tile that was never attempted both end up as
+    ``NaN``, and :func:`render_heatmap` leaves NaN cells untouched, so a
+    sweep in which EVERY tile raised is byte-identical to the bare
+    thumbnail: without this callback a caller cannot tell "no tissue here"
+    from "the metric is broken" and reports total failure as a success.
     """
     rows, cols = grid_shape(source, tile=tile, downsample=downsample)
     total = rows * cols
@@ -103,14 +111,40 @@ def compute_grid(
     ):
         try:
             grid[gy, gx] = float(metric_fn(pil_tile))
-        except Exception:
+        except Exception as exc:
             grid[gy, gx] = np.nan
+            if error_cb is not None:
+                error_cb(gx, gy, exc)
         last_done = gy * cols + gx + 1
         if progress_cb is not None:
             progress_cb(last_done, total)
     if progress_cb is not None and last_done < total:
         progress_cb(total, total)
     return grid
+
+
+def grid_coverage(
+    slide_dimensions: tuple[int, int],
+    grid_shape_rc: tuple[int, int],
+    *,
+    tile: int,
+    downsample: float,
+) -> tuple[float, float]:
+    """How much of ``base_img`` a grid actually spans, as (fx, fy) >= 1.0.
+
+    ``grid_shape`` rounds the cell count UP, so a grid of ``cols`` columns
+    covers ``cols * tile * downsample`` level-0 pixels -- up to one whole
+    cell MORE than the slide is wide. Pass the result to
+    :func:`render_heatmap` as ``coverage``; without it the grid is stretched
+    to the slide's extent and every cell is drawn ``fy`` too tall, which
+    walks the bottom row off the tissue it was measured on.
+    """
+    rows, cols = int(grid_shape_rc[0]), int(grid_shape_rc[1])
+    cell = float(tile) * float(downsample)
+    w, h = float(slide_dimensions[0]), float(slide_dimensions[1])
+    fx = (cols * cell / w) if w > 0 else 1.0
+    fy = (rows * cell / h) if h > 0 else 1.0
+    return (max(1.0, fx), max(1.0, fy))
 
 
 def render_heatmap(
@@ -121,6 +155,7 @@ def render_heatmap(
     colormap: str = "viridis",
     vmin: float | None = None,
     vmax: float | None = None,
+    coverage: tuple[float, float] | None = None,
 ) -> "Image.Image":
     """Overlay a metric grid on ``base_img`` (returns a new RGB image).
 
@@ -129,6 +164,12 @@ def render_heatmap(
     not NaN (NaN cells leave the base image untouched). ``vmin``/``vmax``
     default to the nan-aware min/max of the grid; a degenerate (constant or
     all-NaN) range maps all valid cells to the top of the colormap.
+
+    ``coverage`` is ``(fx, fy)``, the fraction of ``base_img`` the grid spans
+    -- see :func:`grid_coverage`. It defaults to ``(1.0, 1.0)``, i.e. "the
+    grid covers exactly the base image", which is only true when the slide
+    divides evenly into cells. Anything else silently mis-registers the
+    overlay against the tissue underneath it.
     """
     lut = get_colormap_lut(colormap)
     grid = np.asarray(grid, dtype=np.float64)
@@ -152,10 +193,19 @@ def render_heatmap(
     else:
         idx = np.where(valid, 255.0, 0.0)
     idx = np.nan_to_num(idx, nan=0.0)
-    idx_img = Image.fromarray(idx.astype(np.uint8), "L").resize((w, h), Image.NEAREST)
-    mask_img = Image.fromarray((valid * 255).astype(np.uint8), "L").resize(
-        (w, h), Image.NEAREST
+    # Scale to the extent the grid actually covers, then crop back to the
+    # base image: the grid's last row/column may hang off the slide.
+    fx, fy = (1.0, 1.0) if coverage is None else (
+        max(1.0, float(coverage[0])), max(1.0, float(coverage[1]))
     )
+    full = (max(w, int(round(w * fx))), max(h, int(round(h * fy))))
+    idx_img = Image.fromarray(idx.astype(np.uint8), "L").resize(full, Image.NEAREST)
+    mask_img = Image.fromarray((valid * 255).astype(np.uint8), "L").resize(
+        full, Image.NEAREST
+    )
+    if full != (w, h):
+        idx_img = idx_img.crop((0, 0, w, h))
+        mask_img = mask_img.crop((0, 0, w, h))
 
     idx_full = np.asarray(idx_img, dtype=np.int64)
     mask_full = np.asarray(mask_img, dtype=np.float64) / 255.0  # 1.0 where valid

@@ -7,9 +7,17 @@ regressions a previous round claimed to have fixed.
 
 ## Files
 
+**Start here: [SUMMARY.md](SUMMARY.md)** — all six rounds by area and severity,
+the bug classes that recurred, and what is still open.
+
 | Round | Date | Findings | Status |
 | --- | --- | --- | --- |
 | [round-01](2026-08-09-round-01.md) | 2026-08-09 | 7 | fixed |
+| [round-02](2026-08-09-round-02.md) | 2026-08-09 | 2 | fixed (+1 wontfix) |
+| [round-03](2026-08-09-round-03.md) | 2026-08-09 | 4 | fixed |
+| [round-04](2026-08-09-round-04.md) | 2026-08-09 | 6 | fixed |
+| [round-05](2026-08-09-round-05.md) | 2026-08-09 | 7 | fixed — **record reconstructed 2026-08-10**, see its header for what is and is not recoverable |
+| [round-06](2026-08-09-round-06.md) | 2026-08-09 | 5 | fixed (+2 refuted) |
 
 ## Conventions
 
@@ -37,6 +45,18 @@ regressions a previous round claimed to have fixed.
   whenever a finding's evidence or scope turns out to be wrong. Round 01 had
   one of each: evidence built from inputs the code cannot receive, and a
   deprecation found at one call site out of three.
+- **Line numbers are as-of the round that wrote them.** These rounds all land in
+  one uncommitted working tree, so a later round editing the same file shifts
+  every number above its edit (round 06 moved round 04's `_on_run_heatmap` by
+  87 lines). Cite the function or the cell name as the durable anchor and treat
+  the number as a hint. The same applies to `hescope/` modules.
+- **Say which invocation a regression test needs.** Two of round 01's fixes are
+  pinned only by `-W "error::FutureWarning"` and pass under a plain `pytest -q`
+  with the bug reintroduced. A record that says "regression coverage: the
+  existing suite" without naming the invocation overstates the guard.
+- **Do not cite a finding number that no record defines.** Round 06 dismissed a
+  live doc gap as "the already-recorded R02-4"; no round ever wrote an R02-4, so
+  the gap went unrecorded for two rounds.
 
 ## Start every round with
 

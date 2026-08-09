@@ -122,3 +122,97 @@ def test_read_region_respects_axis_order():
     assert got2.shape == (2, 3, 3)
     assert list(got2[0, :, 0]) == [20, 30, 40]
     assert (got2 == got).all()
+
+
+# --- R03-1: OpenSlideSource must pad OUTSIDE the slide with white ------------
+
+
+class _StubOpenSlide:
+    """Minimal stand-in for ``openslide.OpenSlide``.
+
+    Reproduces the one behaviour that matters here: a read that runs past the
+    slide edge comes back RGBA with the out-of-bounds part TRANSPARENT, which
+    becomes BLACK the moment ``OpenSlideSource.read_region`` calls
+    ``.convert("RGB")``.
+    """
+
+    def __init__(self, arr):
+        self._arr = arr  # (h, w, 3) uint8, level 0
+        h, w = arr.shape[:2]
+        self.dimensions = (w, h)
+        self.level_count = 1
+        self.level_downsamples = (1.0,)
+        self.properties = {}
+
+    def read_region(self, location, level, size):
+        x0, y0 = location
+        w, h = size
+        out = Image.new("RGBA", (w, h), (0, 0, 0, 0))  # transparent, like openslide
+        ah, aw = self._arr.shape[:2]
+        sx0, sy0 = max(0, x0), max(0, y0)
+        sx1, sy1 = min(aw, x0 + w), min(ah, y0 + h)
+        if sx1 > sx0 and sy1 > sy0:
+            block = self._arr[sy0:sy1, sx0:sx1]
+            out.paste(Image.fromarray(block, "RGB"), (sx0 - x0, sy0 - y0))
+        return out
+
+
+def _fake_openslide_source(arr):
+    from hescope.slides import OpenSlideSource
+
+    src = object.__new__(OpenSlideSource)
+    src.name = "stub.svs"
+    src._slide = _StubOpenSlide(arr)
+    src.dimensions = src._slide.dimensions
+    src.level_count = 1
+    src.level_downsamples = (1.0,)
+    src.mpp = None
+    return src
+
+
+def test_openslide_read_region_pads_outside_the_slide_with_white():
+    """The off-slide part of a read must be white (255, 255, 255).
+
+    It used to be black: the crop box added the window size to its right and
+    bottom edges, doubling it, so the transparent-turned-black region past the
+    slide edge was pasted over the white padding. Black counts as tissue
+    (luminance < 0.9 * 255), so an ROI straddling the edge reported inflated
+    tissue_fraction / H&E means, and every border cell of a heatmap sweep was
+    kept as "tissue".
+    """
+    arr = np.full((40, 60, 3), 200, dtype=np.uint8)
+    src = _fake_openslide_source(arr)
+
+    # right edge: 30 in-slide columns, 30 past it
+    img = src.read_region((30, 0), 0, (60, 40))
+    out = np.asarray(img)
+    assert img.size == (60, 40)
+    assert (out[:, :30] == 200).all()
+    assert (out[:, 30:] == 255).all()
+
+    # bottom edge
+    out2 = np.asarray(src.read_region((0, 20), 0, (60, 40)))
+    assert (out2[:20, :] == 200).all()
+    assert (out2[20:, :] == 255).all()
+
+    # negative origin: white on the top/left, image content after it
+    out3 = np.asarray(src.read_region((-10, -5), 0, (30, 30)))
+    assert (out3[:5, :] == 255).all()
+    assert (out3[:, :10] == 255).all()
+    assert (out3[5:, 10:] == 200).all()
+
+    # fully inside: unchanged, every pixel is slide content
+    out4 = np.asarray(src.read_region((10, 10), 0, (20, 20)))
+    assert (out4 == 200).all()
+
+
+def test_openslide_and_pillow_pad_identically(slide_path):
+    """The three backends document the same contract; pin them together."""
+    pil = PillowSource(slide_path)
+    w, h = pil.dimensions
+    arr = np.asarray(Image.open(slide_path).convert("RGB"))
+    osl = _fake_openslide_source(arr)
+    for loc in [(w - 50, 0), (0, h - 50), (-30, -30), (w - 10, h - 10)]:
+        a = np.asarray(pil.read_region(loc, 0, (100, 100)))
+        b = np.asarray(osl.read_region(loc, 0, (100, 100)))
+        assert (a == b).all(), f"backends disagree at {loc}"

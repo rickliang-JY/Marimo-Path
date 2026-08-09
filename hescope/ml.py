@@ -28,6 +28,25 @@ META_FILENAME = "meta.json"
 #: (e.g. "gpfm"). Unset/empty keeps the default handcrafted-feature path.
 EMBEDDER_ENV_VAR = "HESCOPE_EMBEDDER"
 
+#: Square raster (px) every HANDCRAFTED feature vector is computed at, at
+#: BOTH training and inference time.
+#:
+#: ``features.extract_features`` is raster-dependent by construction:
+#: nuclei_count, nuclei_mean_area_px and blur_score are pixel-geometry
+#: quantities. On IDENTICAL pixels resampled to 1024/512/256/128 px,
+#: nuclei_mean_area_px measured 4973.7 / 1263.2 / 325.5 / 80.7 -- a 62x
+#: spread -- and a patch a model classified as 'sparse' with P(dense)=0.0165
+#: at the training raster scored P(dense)=0.5559 as a 256 px tile, i.e. the
+#: class flipped on resampling alone. Training patches come from
+#: ``rois.extract_patch`` (capped at 1024 px) while heatmap tiles are
+#: ``tile`` px wide, so the two rasters NEVER agree by accident on a real
+#: WSI -- the model is asked to score a distribution it was never fit on.
+#: Normalizing both ends to one raster is what makes them comparable; the
+#: value is recorded in the model meta as ``feature_raster`` so a model can
+#: state what it was fit at. 256 px is the size features.extract_features
+#: documents its "<0.5 s" per-tile budget against.
+FEATURE_RASTER = 256
+
 
 @dataclass
 class ModelInfo:
@@ -42,17 +61,35 @@ class ModelInfo:
     # lack these keys and are treated as handcrafted-feature models).
     encoder: str | None = None  # hescope.embeddings registry name, if used
     warning: str | None = None  # e.g. embedder load failure -> fallback note
+    # Raster the handcrafted features were computed at; None for encoder
+    # models (the encoder does its own resize) and for pre-R06-1 metas.
+    feature_raster: int | None = None
 
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_feature_vector(patch_path: str) -> "np.ndarray":
+def _to_feature_raster(img: "Image.Image", raster: int | None) -> "Image.Image":
+    """Resample to the square raster handcrafted features are defined at.
+
+    ``raster=None`` (a pre-``feature_raster`` model meta) means "leave the
+    image alone": those models were fit on whatever raster their patches
+    happened to have, so resizing here would introduce the mismatch this
+    guards against rather than remove it.
+    """
+    if not raster or img.size == (int(raster), int(raster)):
+        return img
+    return img.resize((int(raster), int(raster)), Image.BILINEAR)
+
+
+def _load_feature_vector(
+    patch_path: str, raster: int | None = FEATURE_RASTER
+) -> "np.ndarray":
     from hescope import features  # lazy: hescope.features may not exist yet
 
     with Image.open(patch_path) as im:
-        img = im.convert("RGB")
+        img = _to_feature_raster(im.convert("RGB"), raster)
         vec = np.asarray(features.extract_features(img), dtype=np.float32)
     return vec
 
@@ -72,6 +109,10 @@ def _compute_training_features(
     load/inference failure falls back to the handcrafted path and returns a
     human-readable warning (recorded in the model meta). Default (env unset)
     is the handcrafted path with no warning — existing behavior is unchanged.
+
+    The handcrafted path normalizes every patch to :data:`FEATURE_RASTER`;
+    the encoder path does not, because ``Encoder.preprocess`` already
+    resizes to the backbone's own input size.
     """
     embedder = _requested_embedder()
     if embedder:
@@ -106,7 +147,13 @@ def train_from_annotations(
 
     Pulls all ROIs via ``ROIRepo(engine)`` (``search(label=None)`` applies no
     label filter), keeps rows with a non-empty label, and loads each row's
-    ``patch_path`` image (rows whose patch file is missing are skipped).
+    ``patch_path`` image (rows whose patch file is missing are skipped —
+    how many, and whether a whole label was lost that way, is recorded in
+    ``ModelInfo.warning``).
+
+    Handcrafted feature vectors are computed at :data:`FEATURE_RASTER`,
+    recorded as ``feature_raster`` in the meta, and inference resamples to
+    the same raster — see :func:`_feature_vector_for_model`.
 
     Raises ``ValueError`` with a clear message when fewer than 2 distinct
     labels are present or any label has fewer than ``min_per_class`` usable
@@ -137,12 +184,21 @@ def train_from_annotations(
 
     patch_paths: list[str] = []
     labels_list: list[str] = []
+    skipped: dict[str, int] = {}  # label -> labelled rows with no usable patch
     for row in rows:
         label = (row.get("label") or "").strip()
         if not label:
             continue
         patch_path = row.get("patch_path")
         if not patch_path or not Path(patch_path).is_file():
+            # agent_out/patches/ is scratch output while the `rois` rows are
+            # the durable record, so the two drift apart in normal use (a
+            # cleanup, a moved repo, a tmp reaper), and a row labelled in the
+            # Annotations panel never had a patch at all. A whole class can
+            # vanish from the model this way; count it so the meta (and the
+            # UI above it) can say so instead of leaving the user to spot a
+            # label missing from the list.
+            skipped[label] = skipped.get(label, 0) + 1
             continue
         patch_paths.append(patch_path)
         labels_list.append(label)
@@ -150,6 +206,7 @@ def train_from_annotations(
     features_list, encoder_name, embedder_warning = _compute_training_features(
         patch_paths
     )
+    feature_raster = None if encoder_name else FEATURE_RASTER
 
     labels = sorted(set(labels_list))
     if len(labels) < 2:
@@ -189,6 +246,28 @@ def train_from_annotations(
 
     pipeline.fit(X, y)
 
+    notes: list[str] = []
+    if embedder_warning:
+        notes.append(embedder_warning)
+    if skipped:
+        dropped = sorted(set(skipped) - set(labels))
+        # "no usable patch image" covers both causes: a row that never had a
+        # patch_path (labelled but never sent to the code agent) and one whose
+        # file is gone. Both are equally invisible in the trained model.
+        note = (
+            f"{sum(skipped.values())} labelled ROI(s) skipped (no usable "
+            "patch image): "
+            + ", ".join(f"{lab!r} ({n})" for lab, n in sorted(skipped.items()))
+        )
+        if dropped:
+            note += (
+                "; no usable patch left for "
+                + ", ".join(repr(lab) for lab in dropped)
+                + " -- that label is NOT in this model"
+            )
+        notes.append(note)
+    warning = "; ".join(notes) or None
+
     model_dir = Path(models_dir) / name
     model_dir.mkdir(parents=True, exist_ok=True)
     created_at = _utcnow_iso()
@@ -201,7 +280,8 @@ def train_from_annotations(
         path=str(model_dir),
         created_at=created_at,
         encoder=encoder_name,
-        warning=embedder_warning,
+        warning=warning,
+        feature_raster=feature_raster,
     )
     joblib.dump(pipeline, model_dir / MODEL_FILENAME)
     meta = asdict(info)
@@ -217,8 +297,8 @@ def train_from_annotations(
     )
     if encoder_name:
         summary += f", encoder={encoder_name!r} (dim={info.feature_dim})"
-    if embedder_warning:
-        summary += f", warning: {embedder_warning}"
+    if warning:
+        summary += f", warning: {warning}"
     try:
         AgentRunRepo(engine).record(
             tool="train_model",
@@ -256,6 +336,13 @@ def _feature_vector_for_model(meta: dict, img: "Image.Image") -> "np.ndarray":
     Metas with an ``encoder`` key (trained with ``HESCOPE_EMBEDDER`` set)
     embed via ``hescope.embeddings``; metas without it (all pre-embedding
     models) use the handcrafted path, keeping old models fully compatible.
+
+    The handcrafted path resamples to the meta's ``feature_raster`` first.
+    Heatmap tiles are ``tile`` px while training patches were capped at
+    1024 px, and the features are raster-dependent, so scoring a tile at its
+    own raster feeds the classifier a distribution it was never fit on
+    (R06-1). Metas without the key predate the normalization and are scored
+    exactly as before.
     """
     encoder_name = meta.get("encoder")
     if encoder_name:
@@ -265,9 +352,8 @@ def _feature_vector_for_model(meta: dict, img: "Image.Image") -> "np.ndarray":
         return embeddings.embed_tiles(encoder, [img.convert("RGB")])[0]
     from hescope import features  # lazy: hescope.features may not exist yet
 
-    return np.asarray(
-        features.extract_features(img.convert("RGB")), dtype=np.float32
-    )
+    tile = _to_feature_raster(img.convert("RGB"), meta.get("feature_raster"))
+    return np.asarray(features.extract_features(tile), dtype=np.float32)
 
 
 def predict_patch(model, meta: dict, img: "Image.Image") -> dict:
