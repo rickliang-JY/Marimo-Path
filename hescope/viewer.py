@@ -1,18 +1,26 @@
 """Reusable marimo UI building blocks used by app.py.
 
-Rendering is matplotlib-free: the viewport is rendered as a PIL image,
-encoded to PNG bytes and shown with ``mo.image``; the ROI capture surface is
-a Plotly figure shown via ``mo.ui.plotly``.
+Rendering is matplotlib-free: the viewport is rendered as a PIL image and the
+ROI capture surface is a Plotly figure shown via ``mo.ui.plotly``.
+
+Two encoders live here and the distinction is load-bearing:
+
+* :func:`viewport_png_bytes` -- LOSSLESS PNG, for anything that is data or
+  gets saved (navigator thumbnail, heatmap export, report images).
+* :func:`viewport_jpeg_bytes` / :func:`viewport_data_uri` -- LOSSY JPEG, for
+  the ON-SCREEN frame only. Never for patches, statistics, or the database:
+  those go through ``hescope.rois.extract_patch``, which reads unadjusted
+  source pixels straight from ``SlideSource.read_region``.
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dc_replace
 from typing import Any, Iterable, Literal
 
-import numpy as np
 from PIL import Image, ImageDraw
 
 from .agent_bridge import magnification_for  # re-exported for app convenience
@@ -21,13 +29,18 @@ from .slides import SlideSource, best_level_for_downsample
 
 __all__ = [
     "render_viewport",
+    "render_viewport_overscan",
+    "DEFAULT_OVERSCAN",
     "viewport_png_bytes",
+    "viewport_jpeg_bytes",
+    "viewport_data_uri",
     "navigator_image",
     "make_roi_figure",
     "ROI_FIGURE_CONFIG",
     "parse_plotly_selection",
     "raw_plotly_selection",
     "selection_to_roi",
+    "selection_dict_from_roi",
     "current_selection",
     "magnification_for",
     "DBContext",
@@ -36,6 +49,12 @@ __all__ = [
     "jump_viewport_for_bbox",
     "apply_display_pipeline",
 ]
+
+# Fraction of extra frame rendered around the nominal viewport so plotly's
+# native drag reveals real pixels instead of running off the bitmap edge.
+# 1.5 = +25% of the viewport on every side for 2.25x the pixel work; measured
+# at ~9.5 ms and ~0.8 MB per frame against ~70 ms / 2.4 MB for the old path.
+DEFAULT_OVERSCAN = 1.5
 
 
 def render_viewport(source: SlideSource, vp: ViewportState) -> "Image.Image":
@@ -54,11 +73,73 @@ def render_viewport(source: SlideSource, vp: ViewportState) -> "Image.Image":
     return img
 
 
+def render_viewport_overscan(
+    source: SlideSource, vp: ViewportState, *, overscan: float = DEFAULT_OVERSCAN
+) -> tuple["Image.Image", tuple[int, int]]:
+    """Render a frame ``overscan`` times larger than ``vp.size``, CENTERED on
+    the same ``vp.center`` at the same ``vp.downsample``.
+
+    Returns ``(img, (ox, oy))`` where ``(ox, oy)`` is the symmetric margin in
+    VIEWPORT pixels: the image's top-left pixel sits at viewport coordinate
+    ``(-ox, -oy)``. ``overscan <= 1.0`` returns exactly
+    ``render_viewport(source, vp)`` and ``(0, 0)``.
+
+    The margin is computed as an integer FIRST and the frame is then sized
+    ``vp.size + 2 * margin``, rather than rounding a scaled size and splitting
+    the leftover. That keeps the margin exactly symmetric, which is what makes
+    the overscan frame a genuine ViewportState (same center, same downsample,
+    larger size) -- see :func:`apply_display_pipeline`.
+    """
+    vw, vh = vp.size
+    extra = max(0.0, float(overscan) - 1.0) / 2.0
+    ox = int(round(vw * extra))
+    oy = int(round(vh * extra))
+    if ox <= 0 and oy <= 0:
+        return render_viewport(source, vp), (0, 0)
+    big = dc_replace(vp, size=(vw + 2 * ox, vh + 2 * oy))
+    return render_viewport(source, big), (ox, oy)
+
+
 def viewport_png_bytes(img: "Image.Image") -> bytes:
-    """Encode a PIL image as PNG bytes (for mo.image)."""
+    """Encode a PIL image as LOSSLESS PNG bytes (for mo.image).
+
+    Use this for anything that is kept: the navigator thumbnail, heatmap
+    exports, saved patches. The on-screen viewer frame uses
+    :func:`viewport_jpeg_bytes` instead.
+    """
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def viewport_jpeg_bytes(
+    img: "Image.Image", quality: int = 85, *, subsampling: int = 0
+) -> bytes:
+    """Encode the DISPLAY frame as JPEG bytes.
+
+    Lossy, and deliberately so: PNG-encoding a 1024x768 viewport costs
+    60-204 ms and ~1.0-1.5 MB, while JPEG q=85 costs ~6-9 ms and ~0.3-0.5 MB.
+
+    ``subsampling=0`` (4:4:4, no chroma subsampling) because H&E nuclei at 40x
+    are exactly the high-frequency colour detail that 4:2:0 destroys -- the
+    saving is not worth softening what a pathologist is looking at.
+
+    NEVER use this for agent payloads, patch extraction, ROI statistics, or
+    anything written to the database. Those paths read unadjusted source
+    pixels via ``hescope.rois.extract_patch``.
+    """
+    buf = io.BytesIO()
+    img.convert("RGB").save(
+        buf, format="JPEG", quality=int(quality), subsampling=int(subsampling)
+    )
+    return buf.getvalue()
+
+
+def viewport_data_uri(img: "Image.Image", *, quality: int = 85) -> str:
+    """``data:image/jpeg;base64,...`` for the display frame (see
+    :func:`viewport_jpeg_bytes` for why JPEG and why display-only)."""
+    raw = viewport_jpeg_bytes(img, quality)
+    return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
 
 
 def navigator_image(
@@ -94,7 +175,12 @@ ROI_FIGURE_CONFIG = {
 
 
 def make_roi_figure(
-    img: "Image.Image", dragmode: str = "select", *, uirevision: str = "constant"
+    img: "Image.Image",
+    dragmode: str = "select",
+    *,
+    uirevision: str = "constant",
+    viewport_size: tuple[int, int] | None = None,
+    quality: int = 85,
 ) -> "Any":
     """Build the unified-viewer Plotly figure for the viewport image.
 
@@ -104,30 +190,63 @@ def make_roi_figure(
     dragmode "pan"    -> native plotly panning (no selection),
     dragmode "select" -> box selection (value["range"]),
     dragmode "lasso"  -> freehand polygon (value["lasso"]/value["lasso_points"]).
-    Axes are in viewport pixel coordinates with explicit extents matching the
-    image size, so selection coordinates map 1:1 to viewport pixels regardless
-    of client-side zoom. Axes intentionally have no fixedrange: plotly
-    wheel-zoom/pan work natively (visual only; data coordinates are unchanged).
-    ``uirevision`` keeps client zoom across re-renders with the same revision.
-    The plotly config is attached as ``fig._config`` (see ROI_FIGURE_CONFIG).
-    """
-    import plotly.express as px
 
-    arr = np.asarray(img.convert("RGB"))
-    height, width = arr.shape[0], arr.shape[1]
-    fig = px.imshow(arr)
+    The axis coordinate system is ALWAYS "viewport pixels, (0, 0) at the
+    NOMINAL viewport's top-left", whatever ``img`` actually contains. When
+    ``img`` is an overscan frame from :func:`render_viewport_overscan`, pass
+    the nominal ``viewport_size``: the image is then attached at
+    ``x0 = -ox, y0 = -oy`` while the axis range stays pinned to the nominal
+    viewport, so plotly's native drag reveals real pixels out to the overscan
+    edge and a box dragged into that margin still maps to correct level-0
+    coordinates through the unchanged
+    parse_plotly_selection -> selection_to_roi chain (``viewport_transform``
+    is a pure affine map with no clamping, so it extrapolates exactly).
+    ``viewport_size`` defaults to ``img.size``, i.e. no overscan.
+
+    The frame travels as a self-encoded JPEG data URI on a ``go.Image`` trace.
+    ``px.imshow`` is deliberately NOT used: it emits a base64 PNG (measured
+    1.4-2.2 MB of figure JSON per frame), and its ``binary_format="jpg"``
+    escape hatch cannot reach q=85 because ``_plotly_utils/data_utils.py``
+    passes ``compress_level`` (a PNG kwarg) to PIL's JPEG saver, silently
+    pinning quality at PIL's default 75.
+
+    Axes intentionally have no fixedrange: plotly wheel-zoom/pan work natively
+    (visual only; data coordinates are unchanged). ``uirevision`` keeps client
+    zoom across re-renders with the same revision. The plotly config is
+    attached as ``fig._config`` (see ROI_FIGURE_CONFIG).
+    """
+    import plotly.graph_objects as go
+
+    vw, vh = viewport_size if viewport_size is not None else img.size
+    vw, vh = int(vw), int(vh)
+    # Symmetric margin; floor-halved so an odd difference biases the image
+    # right/down by one pixel rather than desynchronising the axes.
+    ox = (img.width - vw) // 2
+    oy = (img.height - vh) // 2
+    fig = go.Figure(
+        go.Image(
+            source=viewport_data_uri(img, quality=quality),
+            x0=-ox,
+            y0=-oy,
+            dx=1,
+            dy=1,
+            # px.imshow's default template reads %{z}, which does not exist
+            # behind a `source`; blank it rather than show "color: [, , ]".
+            hovertemplate="",
+        )
+    )
     fig.update_layout(
         dragmode=dragmode,
         uirevision=uirevision,
         margin=dict(l=0, r=0, t=0, b=0),
         xaxis=dict(
-            range=[-0.5, width - 0.5],
+            range=[-0.5, vw - 0.5],
             showticklabels=False,
             showgrid=False,
             zeroline=False,
         ),
         yaxis=dict(
-            range=[height - 0.5, -0.5],
+            range=[vh - 0.5, -0.5],
             showticklabels=False,
             showgrid=False,
             zeroline=False,
@@ -213,13 +332,17 @@ def selection_to_roi(
     return ROI(kind="polygon", points=pts)
 
 
-def current_selection(
-    source: SlideSource | None, vp: ViewportState, plotly_value: dict | None
+def selection_dict_from_roi(
+    source: SlideSource | None, roi: ROI | None, downsample: float
 ) -> dict | None:
-    """Map the RAW plotly UI value (the live figure selection) to a level-0
-    selection dict. Returns None when there is no selection or no source.
+    """Build THE agent-contract selection dict from a level-0 ROI.
 
-    Uses parse_plotly_selection + selection_to_roi (both in this module).
+    This is the single source of truth for the 7-key shape documented in
+    AGENTS.md 4.1. It is extracted from :func:`current_selection` so an
+    alternative viewer front-end can reuse the exact contract without editing
+    this module (and without a second copy of the key list drifting from this
+    one). Returns None when there is no source or no ROI.
+
     Return shape::
 
         {"kind": "rect"|"polygon",
@@ -229,6 +352,29 @@ def current_selection(
          "slide": str,
          "slide_dimensions": [w, h],
          "mpp": float | None}
+    """
+    if source is None or roi is None:
+        return None
+    x0, y0, x1, y1 = roi.bbox()
+    return {
+        "kind": roi.kind,
+        "points_level0": [[float(x), float(y)] for x, y in roi.points],
+        "bbox_level0": [x0, y0, x1, y1],
+        "viewport_downsample": float(downsample),
+        "slide": source.name,
+        "slide_dimensions": [int(source.dimensions[0]), int(source.dimensions[1])],
+        "mpp": source.mpp,
+    }
+
+
+def current_selection(
+    source: SlideSource | None, vp: ViewportState, plotly_value: dict | None
+) -> dict | None:
+    """Map the RAW plotly UI value (the live figure selection) to a level-0
+    selection dict. Returns None when there is no selection or no source.
+
+    Uses parse_plotly_selection + selection_to_roi + selection_dict_from_roi
+    (all in this module). Return shape: see :func:`selection_dict_from_roi`.
 
     (The circle checkbox is a UI concern; the live tool reports the raw
     box/lasso geometry only.)
@@ -239,16 +385,7 @@ def current_selection(
     if sel is None:
         return None
     roi = selection_to_roi(sel, vp, as_circle=False)
-    x0, y0, x1, y1 = roi.bbox()
-    return {
-        "kind": roi.kind,
-        "points_level0": [[float(x), float(y)] for x, y in roi.points],
-        "bbox_level0": [x0, y0, x1, y1],
-        "viewport_downsample": float(vp.downsample),
-        "slide": source.name,
-        "slide_dimensions": [int(source.dimensions[0]), int(source.dimensions[1])],
-        "mpp": source.mpp,
-    }
+    return selection_dict_from_roi(source, roi, vp.downsample)
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +485,14 @@ def apply_display_pipeline(
 
     apply_adjustments -> channel_view -> draw_rois. Overlays are drawn last
     so ROI outlines stay crisp regardless of the adjustments.
+
+    ``img`` may be an overscan frame (:func:`render_viewport_overscan`), i.e.
+    larger than ``vp.size``. Overscan is symmetric about ``vp.center`` at the
+    same downsample, so a frame of size ``img.size`` IS a valid ViewportState
+    differing from ``vp`` only in ``size`` -- handing that to ``draw_rois``
+    keeps every outline on its true level-0 position instead of shifting it
+    by the overscan margin. With no overscan ``img.size == vp.size`` and the
+    substitution is the identity, so it is applied unconditionally.
     """
     from .adjust import apply_adjustments, channel_view
     from .overlay import draw_rois
@@ -358,5 +503,7 @@ def apply_display_pipeline(
     out = channel_view(out, channel)
     roi_list = list(rois)
     if show_overlays and roi_list:
-        out = draw_rois(out, roi_list, vp, selected_index=selected_index)
+        out = draw_rois(
+            out, roi_list, dc_replace(vp, size=out.size), selected_index=selected_index
+        )
     return out

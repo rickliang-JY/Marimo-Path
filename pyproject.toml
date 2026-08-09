@@ -31,6 +31,11 @@ dependencies = [
     "zarr>=3",
     "imagecodecs",
     "sqlalchemy>=2.0",
+    # Powers the OpenSeadragon viewer (hescope.osdviewer), which is the main
+    # viewing surface: continuous mouse pan, wheel zoom and ROI drawing.
+    # app.py falls back to the plotly viewer when this is missing, but that
+    # fallback is for robustness -- it is not the intended default.
+    "anywidget>=0.9",
 ]
 
 [project.optional-dependencies]
@@ -51,3 +56,10 @@ hescope = "hescope.cli:main"
 [tool.setuptools]
 packages = ["hescope"]
 py-modules = ["app"]
+
+# The OpenSeadragon viewer loads its vendored JS from inside the installed
+# package, so the bundle has to ship in the wheel. Without this a wheel
+# install silently falls back to the capped plotly viewer, because
+# build_esm() cannot find openseadragon.min.js.
+[tool.setuptools.package-data]
+hescope = ["static/**/*.js", "static/**/*.txt", "static/**/*.md"]

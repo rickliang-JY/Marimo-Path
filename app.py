@@ -28,6 +28,7 @@ app = marimo.App(width="full", css_file="assets/theme.css")
 def _():
     import json
     import math
+    import os
     import tempfile
     from dataclasses import replace as dc_replace
     from pathlib import Path
@@ -55,11 +56,27 @@ def _():
         train_from_annotations,
     )
     from hescope.nuclei import detect_nuclei
+    from hescope.osdviewer import (
+        make_viewer,
+        osd_current_selection,
+        osd_selection_to_roi,
+        parse_osd_measure,
+        parse_osd_selection,
+        raw_osd_selection,
+        rois_to_payload,
+        viewport_changed,
+        viewport_state_from_report,
+    )
     from hescope.overlay import draw_navigator_markers, draw_scale_bar
     from hescope.qc import qc_report
     from hescope.rois import ROI, ViewportState, extract_patch
     from hescope.slides import open_slide
-    from hescope.stain import fit_reference, macenko_normalize
+    from hescope.tileserver import (
+        DisplayParams,
+        SlideRefs,
+        ensure_server,
+        serve_slide,
+    )
     from hescope.viewer import (
         apply_display_pipeline,
         bootstrap_db,
@@ -75,9 +92,37 @@ def _():
         viewport_png_bytes,
     )
 
+    # The main viewing surface is OpenSeadragon (hescope/osdviewer.py) fed by
+    # the loopback tile server (hescope/tileserver.py): real wheel-zoom, real
+    # mouse-drag pan, ROI drawing in level-0 coordinates. It needs anywidget
+    # plus the vendored OpenSeadragon bundle, so probe BOTH once here. When the
+    # probe fails the notebook falls back to the legacy plotly surface, whose
+    # zoom/pan are cosmetic (they rescale an already-rendered bitmap).
+    # HESCOPE_DISABLE_OSD=1 forces that fallback deliberately.
+    def _probe_osd():
+        if os.environ.get("HESCOPE_DISABLE_OSD", "").strip().lower() in (
+            "1", "true", "yes", "on"
+        ):
+            return False, "disabled by HESCOPE_DISABLE_OSD"
+        try:
+            import anywidget  # noqa: F401
+
+            from hescope.osdviewer import build_esm
+
+            build_esm()  # reads the vendored bundle; cached after the first call
+            return True, None
+        except Exception as _exc:  # missing dep / missing vendored JS
+            return False, f"{type(_exc).__name__}: {_exc}"
+
+    OSD_AVAILABLE, OSD_ERROR = _probe_osd()
+
     return (
         AgentBridge,
+        DisplayParams,
+        OSD_AVAILABLE,
+        OSD_ERROR,
         Path,
+        SlideRefs,
         ViewportState,
         analysis_capabilities,
         apply_display_pipeline,
@@ -88,15 +133,14 @@ def _():
         detect_nuclei,
         draw_navigator_markers,
         draw_scale_bar,
+        ensure_server,
         export_rois,
         extract_patch,
-        fit_reference,
         format_measurement,
         json,
         jump_viewport_for_bbox,
         list_models,
         load_model,
-        macenko_normalize,
         magnification_for,
         make_annotate_roi_tool,
         make_live_selection_tool,
@@ -105,21 +149,31 @@ def _():
         make_query_annotations_tool,
         make_slide_info_tool,
         make_roi_figure,
+        make_viewer,
         measure_box,
         mo,
         navigator_image,
         open_slide,
+        osd_current_selection,
+        osd_selection_to_roi,
+        parse_osd_measure,
+        parse_osd_selection,
         parse_plotly_selection,
         qc_report,
+        raw_osd_selection,
         raw_plotly_selection,
         render_heatmap,
         render_viewport,
         roi_from_db_row,
+        rois_to_payload,
         selection_to_roi,
+        serve_slide,
         tempfile,
         tissue_fraction_proxy,
         train_from_annotations,
+        viewport_changed,
         viewport_png_bytes,
+        viewport_state_from_report,
     )
 
 
@@ -191,6 +245,46 @@ def _(AgentBridge, OUT_DIR, ViewportState, make_marimo_tool, mo):
     get_db_msg, set_db_msg = mo.state(None)  # (kind, text) or None
     get_ann_version, set_ann_version = mo.state(None)  # opaque refresh token
     get_measure_msg, set_measure_msg = mo.state(None)  # (kind, text) or None
+    # Tile-server descriptor for the open slide (hescope.tileserver.serve_slide
+    # output) or None when the OpenSeadragon path is unavailable and the plotly
+    # fallback is driving the viewer.
+    get_tiles, set_tiles = mo.state(None)
+    # Camera COMMAND channel: (bbox_level0, token). Programmatic moves (pan
+    # buttons, zoom slider, zoom-to-fit, "View ROI", annotation click-to-jump)
+    # publish here; a consumer cell forwards them to the widget. The token is a
+    # fresh object() per command so an identical bbox still moves the camera.
+    get_cam, set_cam = mo.state(None)
+
+    # Plain (non-reactive) bus for the widget consumer cell. It must NOT be
+    # mo.state: that cell reads reports and WRITES the viewport state, so
+    # holding the "last seen" values in reactive state would make it a
+    # self-loop. A plain dict is invisible to the dataflow graph, which is
+    # exactly right for de-duplication bookkeeping.
+    viewer_bus = {"cam_token": None, "vp": None, "sel_seq": None}
+
+    def move_camera(vp):
+        """Programmatic camera move.
+
+        Updates ViewportState (navigator, header, agent contract) AND commands
+        the OpenSeadragon widget to the matching level-0 rectangle, so the two
+        surfaces never disagree about where the user is looking. The bbox is
+        derived from ``vp`` itself, so ``jump_viewport_for_bbox`` stays the
+        single source of truth for framing decisions.
+        """
+        set_vp(vp)
+        half_w = vp.size[0] * vp.downsample / 2.0
+        half_h = vp.size[1] * vp.downsample / 2.0
+        set_cam(
+            (
+                (
+                    vp.center[0] - half_w,
+                    vp.center[1] - half_h,
+                    vp.center[0] + half_w,
+                    vp.center[1] + half_h,
+                ),
+                object(),
+            )
+        )
 
     agent_bridge = AgentBridge(OUT_DIR)
 
@@ -198,20 +292,26 @@ def _(AgentBridge, OUT_DIR, ViewportState, make_marimo_tool, mo):
     get_latest_selection = make_marimo_tool(lambda: agent_bridge)
 
     # Click-handler registry: toolbar buttons are built BEFORE the viewer
-    # cell exists (so they cannot reference roi_plot without a cycle), while
+    # cell exists (so they cannot reference the viewer without a cycle), while
     # the handlers they trigger live in later cells. Later cells register
-    # their handlers here; toolbar buttons look them up at click time.
+    # their handlers here; toolbar buttons look them up at click time. This is
+    # also what keeps the toolbar cell OUT of the viewport's dependency set:
+    # a toolbar that re-ran on every pan would rebuild its radio/checkboxes
+    # and silently reset the user's tool choice.
     ui_actions = {}
     return (
         agent_bridge,
         get_ann_version,
+        get_cam,
         get_db_msg,
         get_measure_msg,
         get_payload,
         get_rois,
         get_slide_id,
         get_source,
+        get_tiles,
         get_vp,
+        move_camera,
         set_ann_version,
         set_db_msg,
         set_measure_msg,
@@ -219,8 +319,10 @@ def _(AgentBridge, OUT_DIR, ViewportState, make_marimo_tool, mo):
         set_rois,
         set_slide_id,
         set_source,
+        set_tiles,
         set_vp,
         ui_actions,
+        viewer_bus,
     )
 
 
@@ -228,9 +330,6 @@ def _(AgentBridge, OUT_DIR, ViewportState, make_marimo_tool, mo):
 def _(mo):
     # Analysis-panel state (SPEC-ML Part C). All channels are (kind, text)
     # message tuples or opaque result dicts; None = nothing to show.
-    # get_stain_ref uses allow_self_loops: the viewer cell reads it AND sets
-    # it once (reference fit on the first non-blank viewport image).
-    get_stain_ref, set_stain_ref = mo.state(None, allow_self_loops=True)
     get_analysis_result, set_analysis_result = mo.state(None)
     get_analysis_msg, set_analysis_msg = mo.state(None)  # (kind, text) | None
     get_hm_progress, set_hm_progress = mo.state(None)  # (done, total) | None
@@ -244,7 +343,6 @@ def _(mo):
         get_hm_progress,
         get_hm_result,
         get_models_version,
-        get_stain_ref,
         get_train_info,
         get_train_msg,
         set_analysis_msg,
@@ -252,39 +350,23 @@ def _(mo):
         set_hm_progress,
         set_hm_result,
         set_models_version,
-        set_stain_ref,
         set_train_info,
         set_train_msg,
     )
 
 
 @app.cell(hide_code=True)
-def _(
-    current_selection,
-    get_source,
-    get_vp,
-    make_live_selection_tool,
-    raw_plotly_selection,
-    roi_plot,
-):
+def _(live_selection, make_live_selection_tool):
     # Zero-click live-selection tool for a code agent (marimo-pair). Reports
-    # the RAW figure selection (box/lasso) mapped to level-0 coordinates the
-    # moment the user drags on the unified plotly viewer — no "Send to code
-    # agent" click required. Returns "NO_SELECTION" when nothing is drawn or
-    # no slide is open. Companion of get_latest_selection (last submitted ROI).
-    def _live_plotly_value():
-        try:
-            _plot = roi_plot
-        except NameError:  # defensive: viewer cell not run in this kernel
-            return None
-        # raw_plotly_selection reads the private _selection_data attr: for an
-        # image-only figure .value is the (empty) selected-points list, not
-        # the selection dict (marimo 0.23).
-        return raw_plotly_selection(_plot)
-
-    get_current_selection = make_live_selection_tool(
-        lambda: current_selection(get_source(), get_vp(), _live_plotly_value())
-    )
+    # the selection the user just drew on the viewer, in level-0 coordinates —
+    # no "Send to code agent" click required. Returns "NO_SELECTION" when
+    # nothing is drawn or no slide is open. Companion of get_latest_selection
+    # (last submitted ROI).
+    #
+    # live_selection() picks the surface (OpenSeadragon or the plotly
+    # fallback); this cell only wraps it in the tool contract, so there is
+    # exactly ONE place that decides which viewer is authoritative.
+    get_current_selection = make_live_selection_tool(live_selection)
     return (get_current_selection,)
 
 
@@ -310,18 +392,23 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    OSD_AVAILABLE,
     Path,
+    SlideRefs,
     ViewportState,
     db,
     ensure_demo_slide,
     mo,
     open_slide,
+    serve_slide,
     set_db_msg,
     set_measure_msg,
     set_slide_id,
     set_source,
+    set_tiles,
     set_vp,
     tempfile,
+    viewer_bus,
 ):
     # Sidebar "Open slide" panel. Hardened: every widget is constructed in
     # its own try/except, so a failure renders a callout in place of that
@@ -331,6 +418,9 @@ def _(
         set_source(src)
         set_measure_msg(None)
         _w, _h = src.dimensions
+        # Bootstrap viewport. With OpenSeadragon this is replaced by the real
+        # container geometry as soon as the widget reports back; it still has
+        # to be coherent in the meantime (navigator rectangle, header readout).
         set_vp(
             ViewportState(
                 center=(_w / 2.0, _h / 2.0),
@@ -338,6 +428,37 @@ def _(
                 size=(1024, 768),
             )
         )
+        # New slide: forget the previous slide's de-dup bookkeeping, otherwise
+        # the first report of the new slide can be mistaken for a repeat.
+        viewer_bus["vp"] = None
+        viewer_bus["sel_seq"] = None
+        # Register the slide with the loopback tile server that feeds
+        # OpenSeadragon. refs are fitted ONCE per slide (never per tile): an
+        # H/E channel view normalized per tile turns blank background into
+        # convincing fake structure. SlideRefs.fit never raises.
+        if OSD_AVAILABLE:
+            try:
+                _info = serve_slide(src, refs=SlideRefs.fit(src))
+                # width/height let the widget recognize a same-slide tile-source
+                # swap (channel view) and keep the user's position instead of
+                # snapping back to the whole-slide view.
+                _info["tile_source"] = {
+                    **_info["tile_source"],
+                    "width": _info["width"],
+                    "height": _info["height"],
+                }
+                set_tiles(_info)
+            except Exception as _exc:  # port blocked, source unreadable, ...
+                set_tiles(None)
+                set_db_msg(
+                    (
+                        "warn",
+                        f"Tile server unavailable ({_exc}); falling back to the "
+                        "legacy plotly viewer (cosmetic zoom only).",
+                    )
+                )
+        else:
+            set_tiles(None)
         if db.enabled:
             try:
                 set_slide_id(
@@ -420,8 +541,16 @@ def _(
 
 @app.cell(hide_code=True)
 def _(mo):
-    # Sidebar "Display" panel: adjustments affect the DISPLAYED unified
-    # viewer only; selection coordinates are unaffected (same extents).
+    # Sidebar "Display" panel. These affect the DISPLAYED viewer only:
+    # selection coordinates, extracted patches, ROI statistics and everything
+    # written to the database read UNADJUSTED source pixels
+    # (hescope.rois.extract_patch -> SlideSource.read_region).
+    #
+    # brightness / contrast / gamma are continuous sliders, so on the
+    # OpenSeadragon surface they are applied as a CSS filter on the tile canvas
+    # (instant, no round trip, no tile-cache invalidation). channel view is a
+    # true per-pixel colour transform CSS cannot express, so it is baked into
+    # the tiles server-side, normalized against a range fitted once per slide.
     brightness_slider = mo.ui.slider(
         start=0.2, stop=3.0, step=0.05, value=1.0,
         label="brightness", show_value=True,
@@ -440,13 +569,15 @@ def _(mo):
         label="channel view",
     )
     overlay_checkbox = mo.ui.checkbox(value=True, label="show ROI overlays")
-    # Display-only Macenko stain normalization: the reference is fitted ONCE
-    # on the first non-blank viewport image and cached (mo.state); it only
-    # changes what is displayed — selection coordinates and any downstream
-    # analysis still read the raw slide pixels.
-    stain_norm_checkbox = mo.ui.checkbox(
-        value=False, label="stain normalize (Macenko)"
-    )
+    # NOTE: the "stain normalize (Macenko)" checkbox was removed here. It was
+    # dead-wired — the viewer cell declared the stain helpers but never called
+    # them, so the checkbox did nothing at all. It cannot simply be re-wired to
+    # the tiled viewer either: hescope.stain.macenko_normalize refits the
+    # SOURCE stain matrix from whatever image it is handed, so a blank
+    # background tile normalizes to solid black. Bringing it back needs a
+    # pinned source matrix (a `source_reference=` argument on
+    # macenko_normalize) plus a canonical H&E target; hescope/tileserver.py
+    # already carries the plumbing (DisplayParams.stain_norm, SlideRefs).
     display_panel = mo.vstack(
         [
             mo.md("**Display**"),
@@ -455,7 +586,6 @@ def _(mo):
             gamma_slider,
             channel_dropdown,
             overlay_checkbox,
-            stain_norm_checkbox,
         ]
     )
     return (
@@ -465,7 +595,6 @@ def _(mo):
         display_panel,
         gamma_slider,
         overlay_checkbox,
-        stain_norm_checkbox,
     )
 
 
@@ -555,9 +684,9 @@ def _(
     get_vp,
     jump_viewport_for_bbox,
     mo,
+    move_camera,
     set_db_msg,
     set_rois,
-    set_vp,
 ):
     # Sidebar "ROIs" panel: session ROI list with per-row view/delete
     # buttons. View reuses the annotation-browser jump (center on the bbox,
@@ -579,7 +708,7 @@ def _(
                 get_vp().size,
                 max_downsample=float(max(_src.level_downsamples)),
             )
-            set_vp(dc_replace(get_vp(), center=_center, downsample=_ds))
+            move_camera(dc_replace(get_vp(), center=_center, downsample=_ds))
             set_db_msg(("info", f"Viewer centered on ROI [{_idx}]."))
 
         return _view
@@ -717,64 +846,52 @@ def _(Path, db_status_badge, get_source, get_vp, magnification_for, mo):
 
 
 @app.cell(hide_code=True)
-def _(
-    ViewportState,
-    dc_replace,
-    get_source,
-    get_vp,
-    mo,
-    set_vp,
-    ui_actions,
-):
+def _(get_source, mo, ui_actions):
     # THE toolbar: every control the user touches mid-session lives in this
     # one compact row (wraps on narrow windows). Muted, flat styling only.
+    #
+    # THIS CELL MUST NOT REFERENCE get_vp. Every widget here is CONSTRUCTED on
+    # each run, and a re-constructed mo.ui element comes back at its default
+    # value — so a toolbar inside the viewport's dependency set would reset the
+    # user's tool choice on every pan. Its only reactive input is the slide
+    # (which legitimately changes the zoom range). Everything that needs the
+    # live viewport is a named action in ui_actions, registered by the camera
+    # cell below and looked up at click time.
     _src = get_source()
     if _src is not None:
         _max_ds = float(max(_src.level_downsamples))
     else:
         _max_ds = 8.0
 
-    def _pan(dx, dy):
-        # step = 25% of the viewport, in level-0 coordinates
-        _vp = get_vp()
-        _sx = _vp.size[0] * 0.25 * _vp.downsample
-        _sy = _vp.size[1] * 0.25 * _vp.downsample
-        set_vp(
-            dc_replace(
-                _vp, center=(_vp.center[0] + dx * _sx, _vp.center[1] + dy * _sy)
-            )
-        )
+    def _fire(name):
+        def _handler(value):
+            _fn = ui_actions.get(name)
+            if _fn is not None:
+                _fn(value)
 
-    pan_west = mo.ui.button(label="◀", on_click=lambda _: _pan(-1, 0))
-    pan_east = mo.ui.button(label="▶", on_click=lambda _: _pan(1, 0))
-    pan_north = mo.ui.button(label="▲", on_click=lambda _: _pan(0, -1))
-    pan_south = mo.ui.button(label="▼", on_click=lambda _: _pan(0, 1))
+        return _handler
+
+    pan_west = mo.ui.button(label="◀", on_click=_fire("pan_w"))
+    pan_east = mo.ui.button(label="▶", on_click=_fire("pan_e"))
+    pan_north = mo.ui.button(label="▲", on_click=_fire("pan_n"))
+    pan_south = mo.ui.button(label="▼", on_click=_fire("pan_s"))
     pan_cluster = mo.hstack(
         [pan_west, pan_east, pan_north, pan_south], justify="start", gap=0.1
     )
 
-    def _on_zoom_fit(_):
-        _s = get_source()
-        if _s is None:
-            return
-        _w, _h = _s.dimensions
-        set_vp(
-            ViewportState(
-                center=(_w / 2.0, _h / 2.0),
-                downsample=max(_s.level_downsamples),
-                size=get_vp().size,
-            )
-        )
-
-    zoom_fit_button = mo.ui.button(label="Zoom to fit", on_click=_on_zoom_fit)
+    zoom_fit_button = mo.ui.button(label="Zoom to fit", on_click=_fire("zoom_fit"))
+    # A COMMAND, not a readout: the wheel changes the real magnification
+    # continuously and this slider is not rebuilt to follow it (rebuilding
+    # would reset the rest of the toolbar). The live figure is in the header
+    # and in the status line under the viewer.
     zoom_slider = mo.ui.slider(
         start=1.0,
         stop=max(_max_ds, 1.0),
         step=0.5,
         value=max(_max_ds, 1.0),
-        label="zoom (downsample)",
+        label="set zoom (downsample)",
         show_value=True,
-        on_change=lambda v: set_vp(dc_replace(get_vp(), downsample=max(float(v), 1.0))),
+        on_change=_fire("zoom"),
     )
 
     dragmode_radio = mo.ui.radio(
@@ -785,16 +902,6 @@ def _(
     )
     measure_checkbox = mo.ui.checkbox(label="measure mode")
     circle_checkbox = mo.ui.checkbox(label="box as circle")
-
-    def _fire(name):
-        # Handlers are registered by later cells (they need roi_plot, which
-        # does not exist yet when this toolbar is built).
-        def _handler(_btn):
-            _fn = ui_actions.get(name)
-            if _fn is not None:
-                _fn(_btn)
-
-        return _handler
 
     add_roi_button = mo.ui.button(label="Add ROI", on_click=_fire("add_roi"))
     send_button = mo.ui.button(
@@ -824,46 +931,151 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    ViewportState,
+    dc_replace,
+    get_source,
+    get_vp,
+    move_camera,
+    ui_actions,
+):
+    # Camera actions for the toolbar buttons. Kept out of the toolbar cell on
+    # purpose (see the comment there): this cell reads the live viewport, so it
+    # re-runs whenever the view moves, and it must therefore build no UI.
+    def _pan(dx, dy):
+        # step = 25% of the viewport, in level-0 coordinates
+        _vp = get_vp()
+        _sx = _vp.size[0] * 0.25 * _vp.downsample
+        _sy = _vp.size[1] * 0.25 * _vp.downsample
+        move_camera(
+            dc_replace(
+                _vp, center=(_vp.center[0] + dx * _sx, _vp.center[1] + dy * _sy)
+            )
+        )
+
+    def _on_zoom_fit(_):
+        _s = get_source()
+        if _s is None:
+            return
+        _w, _h = _s.dimensions
+        move_camera(
+            ViewportState(
+                center=(_w / 2.0, _h / 2.0),
+                downsample=max(_s.level_downsamples),
+                size=get_vp().size,
+            )
+        )
+
+    def _on_zoom(v):
+        if get_source() is None:
+            return
+        move_camera(dc_replace(get_vp(), downsample=max(float(v), 1.0)))
+
+    ui_actions["pan_w"] = lambda _: _pan(-1, 0)
+    ui_actions["pan_e"] = lambda _: _pan(1, 0)
+    ui_actions["pan_n"] = lambda _: _pan(0, -1)
+    ui_actions["pan_s"] = lambda _: _pan(0, 1)
+    ui_actions["zoom_fit"] = _on_zoom_fit
+    ui_actions["zoom"] = _on_zoom
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    apply_display_pipeline,
+    OSD_AVAILABLE,
+    OSD_ERROR,
+    get_source,
+    get_tiles,
+    make_viewer,
+    mo,
+):
+    # THE viewer: an OpenSeadragon surface fed by the loopback tile server.
+    # Real wheel-zoom, real drag-pan, real detail — the browser fetches 256px
+    # JPEG tiles straight from the slide pyramid instead of receiving one flat
+    # re-rendered bitmap per move.
+    #
+    # *** THIS CELL'S DEPENDENCY SET IS LOAD-BEARING. ***
+    # It depends on SLIDE IDENTITY ONLY. Every other control (tool, overlay,
+    # brightness/contrast/gamma, channel view, ROI list, camera commands) is a
+    # trait SET on the already-running widget by the cells below. Re-running
+    # this cell destroys the widget and its comm — silently, with no exception
+    # — so any control that leaked into this signature would present as "my
+    # zoom keeps resetting" or "the widget stopped reporting", diagnosed
+    # nowhere near the cause.
+    # For the same reason this cell must NEVER read osd_viewer.value.
+    _src = get_source()
+    _tiles = get_tiles()
+    osd_viewer = None
+    _view = mo.md("")
+    if _src is None:
+        _view = mo.callout(
+            mo.md("Open a slide from the sidebar to begin."), kind="info"
+        )
+    elif _tiles is not None:
+        try:
+            osd_viewer = mo.ui.anywidget(
+                make_viewer(_src, _tiles["tile_source"], height=680)
+            )
+            _view = osd_viewer
+        except Exception as _exc:  # broken anywidget install, comm failure
+            osd_viewer = None
+            _view = mo.callout(
+                mo.md(
+                    f"**OpenSeadragon viewer could not start:** `{_exc}`. "
+                    "Set `HESCOPE_DISABLE_OSD=1` and restart to use the "
+                    "legacy plotly viewer instead."
+                ),
+                kind="danger",
+            )
+    elif not OSD_AVAILABLE:
+        _view = mo.callout(
+            mo.md(
+                f"**Interactive viewer unavailable** ({OSD_ERROR}). Showing the "
+                "legacy plotly surface below: its wheel-zoom and drag only "
+                "rescale an already-rendered bitmap, so use the toolbar zoom / "
+                "pan controls to move the actual data window. Install the "
+                "`anywidget` package to get mouse zoom and pan."
+            ),
+            kind="warn",
+        )
+    _view
+    return (osd_viewer,)
+
+
+@app.cell(hide_code=True)
+def _(
     apply_display_pipeline,
     brightness_slider,
     channel_dropdown,
     contrast_slider,
     dragmode_radio,
     draw_scale_bar,
-    fit_reference,
     gamma_slider,
     get_source,
-    get_stain_ref,
+    get_tiles,
     get_vp,
-    macenko_normalize,
     make_roi_figure,
     mo,
     overlay_checkbox,
     overlay_rois,
     render_viewport,
     selected_index,
-    set_stain_ref,
-    stain_norm_checkbox,
-    tissue_fraction_proxy,
 ):
-    # THE unified viewer: exactly ONE plotly figure. Wheel-zoom, pan (mouse
-    # mode "pan" or plotly modebar) and ROI drawing (box / lasso) all happen
-    # on this surface. The image shown is the ADJUSTED viewport (display
-    # pipeline + ROI outlines); axis extents equal the viewport size in
-    # pixels, so selection coordinates map 1:1 to viewport pixels regardless
-    # of client-side zoom — parse_plotly_selection / current_selection keep
-    # working unchanged. uirevision is keyed on the viewport state: plotly
-    # client zoom survives overlay/adjustment re-renders, while server-driven
-    # moves (pan buttons, downsample slider, zoom-to-fit, annotation jump)
-    # reset the view to the freshly rendered region.
+    # LEGACY FALLBACK viewer, used only when the OpenSeadragon path is
+    # unavailable (no anywidget, missing vendored bundle, HESCOPE_DISABLE_OSD,
+    # or the tile server refused to start). One plotly figure showing the
+    # server-rendered viewport; its zoom/pan are cosmetic — moving the data
+    # window still means changing ViewportState through the toolbar.
+    #
+    # roi_plot stays bound at module scope in BOTH branches (None when
+    # OpenSeadragon is driving), because AGENTS.md documents it as a kernel
+    # global: an agent poking the old name should get None, not NameError.
     _src = get_source()
-    _vp = get_vp()
-    if _src is None:
+    if _src is None or get_tiles() is not None:
         roi_plot = None
-        viewer_view = mo.callout(
-            mo.md("Open a slide from the sidebar to begin."), kind="info"
-        )
+        fallback_view = mo.md("")
     else:
+        _vp = get_vp()
         _viewport_img = render_viewport(_src, _vp)  # unadjusted capture base
         _display_img = apply_display_pipeline(
             _viewport_img,
@@ -883,18 +1095,204 @@ def _(
         _uirev = (
             f"vp-{_vp.center[0]:.0f}-{_vp.center[1]:.0f}-{_vp.downsample:g}"
         )
+        # No overscan here on purpose: render_viewport_overscan would let the
+        # cosmetic drag reveal real pixels, but draw_scale_bar positions the
+        # bar relative to the image's own bottom-right corner, so on an
+        # overscan frame it lands outside the visible viewport.
         _fig = make_roi_figure(
             _display_img,
             dragmode=dragmode_radio.value or "select",
             uirevision=_uirev,
         )
-        # roi_plot is exposed at module scope (None before a slide is open)
-        # so the zero-click get_current_selection tool can read its live
-        # selection via raw_plotly_selection(roi_plot).
         roi_plot = mo.ui.plotly(_fig, config=getattr(_fig, "_config", None))
-        viewer_view = roi_plot
-    viewer_view
+        fallback_view = roi_plot
+    fallback_view
     return (roi_plot,)
+
+
+@app.cell(hide_code=True)
+def _(
+    DisplayParams,
+    brightness_slider,
+    channel_dropdown,
+    circle_checkbox,
+    contrast_slider,
+    dragmode_radio,
+    ensure_server,
+    gamma_slider,
+    get_tiles,
+    measure_checkbox,
+    osd_viewer,
+    overlay_checkbox,
+    overlay_rois,
+    rois_to_payload,
+    selected_index,
+):
+    # Python -> widget COMMANDS. Every one of these is a trait set on the
+    # already-running viewer, never a rebuild, so changing a control keeps the
+    # user exactly where they were looking. Setting a trait to its current
+    # value is a no-op in traitlets, so this cell re-running (it does, on every
+    # viewport report) sends nothing over the wire.
+    if osd_viewer is not None:
+        # Tool: the widget owns the pointer, so the plotly dragmode vocabulary
+        # is translated here rather than leaking into the toolbar.
+        if measure_checkbox.value:
+            _tool = "measure"
+        elif (dragmode_radio.value or "select") == "pan":
+            _tool = "pan"
+        elif dragmode_radio.value == "lasso":
+            _tool = "lasso"
+        elif circle_checkbox.value:
+            _tool = "circle"  # draws an ellipse preview, still EMITS a rect
+        else:
+            _tool = "rect"
+        osd_viewer.tool = _tool
+
+        # Continuous sliders -> CSS filter on the tile canvas (instant, no
+        # round trip, browser tile cache untouched). The SVG ROI overlay is a
+        # sibling of that canvas, so outlines and the scale bar keep their
+        # true colours.
+        osd_viewer.display = {
+            "brightness": float(brightness_slider.value or 1.0),
+            "contrast": float(contrast_slider.value or 1.0),
+            "gamma": float(gamma_slider.value or 1.0),
+        }
+
+        # ROI outlines live in RAW LEVEL-0 COORDINATES in an SVG overlay, so
+        # they stay 2px crisp at 40x and cost no server round trip.
+        osd_viewer.rois = rois_to_payload(overlay_rois, selected_index)
+        osd_viewer.overlay_visible = bool(overlay_checkbox.value)
+
+        # Channel view is a per-pixel colour transform CSS cannot express, so
+        # it is baked into the tiles: a new tile source for the same slide.
+        # The widget re-opens preserving the viewport.
+        _tiles = get_tiles() or {}
+        _key = _tiles.get("key")
+        if _key:
+            try:
+                _srv = ensure_server()
+                if _srv.get(_key) is not None:
+                    _ts = dict(
+                        _srv.tile_source_dict(
+                            _key,
+                            display=DisplayParams(
+                                channel=channel_dropdown.value or "rgb"
+                            ),
+                        )
+                    )
+                    _ts["width"] = _tiles.get("width")
+                    _ts["height"] = _tiles.get("height")
+                    osd_viewer.tile_source = _ts
+            except Exception:
+                pass  # keep the current tiles rather than blanking the viewer
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    format_measurement,
+    get_source,
+    measure_box,
+    osd_viewer,
+    parse_osd_measure,
+    set_measure_msg,
+    set_vp,
+    viewer_bus,
+    viewport_changed,
+    viewport_state_from_report,
+):
+    # Widget -> Python REPORTS. This is what keeps ViewportState in sync with
+    # what the user is actually looking at, so the navigator rectangle, the
+    # magnification readout, jump_viewport_for_bbox and the agent contract's
+    # viewport_downsample all stay meaningful after a mouse gesture.
+    #
+    # It deliberately does NOT read get_vp: writing the state it also read
+    # would be a reactive self-loop. The "last applied" values live in the
+    # plain viewer_bus dict, which the dataflow graph cannot see.
+    if osd_viewer is not None:
+        _val = osd_viewer.value or {}
+        _src = get_source()
+        if _src is not None:
+            _new_vp = viewport_state_from_report(
+                _val.get("viewport"), _src.dimensions
+            )
+            if _new_vp is not None and viewport_changed(viewer_bus["vp"], _new_vp):
+                viewer_bus["vp"] = _new_vp
+                set_vp(_new_vp)
+            # Measure mode: the widget emits kind="measure", which
+            # parse_osd_selection refuses on purpose (a measurement is a UI
+            # readout and must never reach the agent contract as an ROI).
+            _sel = _val.get("selection") or {}
+            _seq = _sel.get("seq")
+            if _seq is not None and _seq != viewer_bus["sel_seq"]:
+                viewer_bus["sel_seq"] = _seq
+                _pts = parse_osd_measure(_sel)
+                if _pts is not None:
+                    set_measure_msg(
+                        (
+                            "info",
+                            format_measurement(
+                                measure_box(_pts[0], _pts[1], _src.mpp)
+                            ),
+                        )
+                    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(get_cam, osd_viewer, viewer_bus):
+    # Programmatic camera moves (pan buttons, zoom slider, zoom-to-fit, "View"
+    # on a session ROI, annotation click-to-jump) reach the widget here.
+    #
+    # The token guard is required, not defensive: this cell also re-runs on
+    # every viewport report, and re-issuing the last goto each time would drag
+    # the view back and fight the user's mouse.
+    _cmd = get_cam()
+    if osd_viewer is not None and _cmd is not None:
+        _bbox, _token = _cmd
+        if _token is not viewer_bus["cam_token"]:
+            viewer_bus["cam_token"] = _token
+            try:
+                osd_viewer.goto(_bbox)
+            except Exception:
+                pass  # a camera command must never break the notebook
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    current_selection,
+    get_source,
+    get_vp,
+    osd_current_selection,
+    osd_viewer,
+    raw_plotly_selection,
+    roi_plot,
+):
+    # THE ONE PLACE that decides which viewing surface is authoritative.
+    #
+    # The two paths are NOT interchangeable and mixing them is silent:
+    # OpenSeadragon reports LEVEL-0 coordinates already, while a plotly
+    # selection is in viewport pixels and must go through viewport_transform.
+    # Feeding one to the other's converter produces plausible-looking bboxes
+    # that pass every shape check and land in the database. Hence: one branch,
+    # one helper each, and nothing else in the notebook re-derives this.
+    def live_selection():
+        _src = get_source()
+        if _src is None:
+            return None
+        if osd_viewer is not None:
+            return osd_current_selection(_src, get_vp(), osd_viewer.value)
+        if roi_plot is not None:
+            # raw_plotly_selection reads the private _selection_data attr: for
+            # an image-only figure .value is the (empty) selected-points list,
+            # not the selection dict (marimo 0.23).
+            return current_selection(
+                _src, get_vp(), raw_plotly_selection(roi_plot)
+            )
+        return None
+
+    return (live_selection,)
 
 
 @app.cell(hide_code=True)
