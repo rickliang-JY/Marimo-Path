@@ -92,6 +92,7 @@ def make_filter_controls(
         [project_dropdown, sample_type_input, search_button, browse_switch],
         justify="start",
         gap=2,
+        wrap=True,
     )
     return layout, project_dropdown, sample_type_input, search_button, browse_switch
 

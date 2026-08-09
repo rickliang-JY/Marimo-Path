@@ -1374,18 +1374,26 @@ def _(Path, mo):
 
     get_tcga_records, set_tcga_records = mo.state([])
     get_tcga_msg, set_tcga_msg = mo.state(None)  # (kind, text) or None
-    get_tcga_progress, set_tcga_progress = mo.state(None)  # (done, total)|None
+    # Plain thread-shared channels for the background download worker.
+    # mo.state setters do not trigger reactive UI updates when called from
+    # foreign threads, and a synchronous download would block the kernel
+    # (no cell can re-render mid-download), so the worker writes here and
+    # the 1s refresh ticker in the status cell renders/consumes these
+    # values on the main thread.
+    tcga_dl = {"thread": None, "progress": None, "msg": None, "open_path": None}
+    # 1s auto-refresh ticker (value read by the status cell -> re-render)
+    tcga_ticker = mo.ui.refresh(options=["1s"], default_interval="1s")
     return (
         TCGA_DATA_DIR,
         get_tcga_msg,
-        get_tcga_progress,
         get_tcga_records,
         set_tcga_msg,
-        set_tcga_progress,
         set_tcga_records,
         tcga_catalog,
         tcga_client,
+        tcga_dl,
         tcga_panel,
+        tcga_ticker,
     )
 
 
@@ -1444,21 +1452,19 @@ def _(
 @app.cell(hide_code=True)
 def _(
     TCGA_DATA_DIR,
-    get_tcga_progress,
     get_tcga_records,
     mo,
-    open_slide_path,
     set_tcga_msg,
-    set_tcga_progress,
-    set_tcga_records,
     tcga_catalog,
     tcga_client,
+    tcga_dl,
     tcga_panel,
 ):
     tcga_results_table = tcga_panel.make_results_table(get_tcga_records())
 
     def _on_download_open(_):
-        if get_tcga_progress() is not None:
+        _t = tcga_dl["thread"]
+        if _t is not None and _t.is_alive():
             set_tcga_msg(("warn", "Download already in progress."))
             return
         _sel = tcga_results_table.value
@@ -1466,38 +1472,41 @@ def _(
             set_tcga_msg(("warn", "Select a slide row first."))
             return
         _fid = str(_sel[0]["file_id"])
-        try:
-            # integrity check source: md5 carried by the table row if any,
-            # otherwise look it up in the local catalog by file_id
-            _md5 = _sel[0].get("md5sum")
-            if not _md5:
-                _md5 = next(
-                    (
-                        _r.md5sum
-                        for _r in tcga_catalog.search(limit=100000)
-                        if _r.file_id == _fid and _r.md5sum
+        # integrity check source: md5 carried by the table row if any,
+        # otherwise look it up in the local catalog by file_id
+        _md5 = _sel[0].get("md5sum") or next(
+            (
+                _r.md5sum
+                for _r in tcga_catalog.search(limit=100000)
+                if _r.file_id == _fid and _r.md5sum
+            ),
+            None,
+        )
+        tcga_dl.update(progress=(0, None), msg=None, open_path=None)
+
+        def _work():
+            try:
+                _path = tcga_client.download_slide(
+                    _fid,
+                    TCGA_DATA_DIR / _fid,
+                    progress_cb=lambda _d, _t: tcga_dl.__setitem__(
+                        "progress", (_d, _t)
                     ),
-                    None,
+                    expected_md5=_md5,
                 )
-            set_tcga_progress((0, None))
-            _path = tcga_client.download_slide(
-                _fid,
-                TCGA_DATA_DIR / _fid,
-                progress_cb=lambda _d, _t: set_tcga_progress((_d, _t)),
-                expected_md5=_md5,
-            )
-            tcga_catalog.mark_downloaded(_fid, str(_path))
-            set_tcga_records(
-                tcga_panel.merge_download_state(
-                    get_tcga_records(), tcga_catalog.search(limit=100000)
-                )
-            )
-            open_slide_path(str(_path), source_kind="tcga")
-            set_tcga_msg(("success", f"Downloaded and opened {_path.name}"))
-        except Exception as _exc:  # network / HTTP error: never crash
-            set_tcga_msg(("danger", f"Download failed: {_exc}"))
-        finally:
-            set_tcga_progress(None)
+                tcga_catalog.mark_downloaded(_fid, str(_path))
+                # consumed on the main thread by the status cell (ticker)
+                tcga_dl["open_path"] = str(_path)
+                tcga_dl["msg"] = ("success", f"Downloaded and opened {_path.name}")
+            except Exception as _exc:  # network / HTTP error: never crash
+                tcga_dl["msg"] = ("danger", f"Download failed: {_exc}")
+            finally:
+                tcga_dl["progress"] = None
+
+        import threading
+
+        tcga_dl["thread"] = threading.Thread(target=_work, daemon=True)
+        tcga_dl["thread"].start()
 
     tcga_download_button = mo.ui.button(
         label="Download & Open", kind="success", on_click=_on_download_open
@@ -1507,9 +1516,47 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(get_tcga_msg, get_tcga_progress, tcga_catalog, tcga_panel):
-    tcga_status_view = tcga_panel.status_view(
-        get_tcga_msg(), get_tcga_progress(), tcga_catalog.stats()
+def _(
+    get_tcga_msg,
+    get_tcga_records,
+    mo,
+    open_slide_path,
+    set_tcga_msg,
+    set_tcga_records,
+    tcga_catalog,
+    tcga_dl,
+    tcga_panel,
+    tcga_ticker,
+):
+    # 1s ticker (created in the state cell): re-renders this cell so
+    # progress written by the background download worker (plain tcga_dl
+    # dict) becomes visible, and completion side effects (open slide,
+    # refresh table, show message) run on the main thread where mo.state
+    # updates are reactive.
+    tcga_ticker.value  # dependency: re-run on every tick
+
+    if tcga_dl["open_path"]:
+        _p = tcga_dl["open_path"]
+        tcga_dl["open_path"] = None
+        open_slide_path(_p, source_kind="tcga")
+        set_tcga_records(
+            tcga_panel.merge_download_state(
+                get_tcga_records(), tcga_catalog.search(limit=100000)
+            )
+        )
+    if tcga_dl["msg"]:
+        set_tcga_msg(tcga_dl["msg"])
+        tcga_dl["msg"] = None
+
+    tcga_status_view = mo.hstack(
+        [
+            tcga_panel.status_view(
+                get_tcga_msg(), tcga_dl["progress"], tcga_catalog.stats()
+            ),
+            tcga_ticker,
+        ],
+        justify="space-between",
+        align="start",
     )
     return (tcga_status_view,)
 

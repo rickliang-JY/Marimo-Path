@@ -292,7 +292,8 @@ class GDCClient:
                         url,
                         headers={"Range": f"bytes={pos}-{end}"},
                         stream=True,
-                        timeout=self.timeout,
+                        # (connect, read): tolerate slow-link stalls
+                        timeout=(self.timeout, max(self.timeout, 300)),
                     )
                     if resp.status_code == 429 or resp.status_code >= 500:
                         if resp.status_code in (429, 503):
@@ -365,7 +366,13 @@ class GDCClient:
                 delay_hint = None
             resp = None
             try:
-                resp = requests.get(url, stream=True, timeout=self.timeout)
+                resp = requests.get(
+                    url,
+                    stream=True,
+                    # (connect, read): large slides over slow links can
+                    # stall well beyond the default between reads.
+                    timeout=(self.timeout, max(self.timeout, 300)),
+                )
                 if resp.status_code == 429 or resp.status_code >= 500:
                     if resp.status_code in (429, 503):
                         delay_hint = _retry_after_seconds(resp.headers)
