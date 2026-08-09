@@ -67,6 +67,7 @@ __all__ = [
     "make_viewer",
     "ROI_STROKE",
     "ROI_STROKE_SELECTED",
+    "SEL_STROKE",
 ]
 
 OSD_VERSION = "5.0.1"
@@ -79,6 +80,8 @@ OSD_DIR = Path(__file__).resolve().parent / "static" / "vendor" / "openseadragon
 #: export path cannot drift apart visually.
 ROI_STROKE = "#ff3c3c"
 ROI_STROKE_SELECTED = "#3cc83c"
+#: Dashed outline of the committed-but-not-yet-added selection.
+SEL_STROKE = "#1e90ff"
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +129,7 @@ _WIDGET_JS = r"""
 const NS = "http://www.w3.org/2000/svg";
 const ROI_STROKE = "#ff3c3c";
 const ROI_STROKE_SELECTED = "#3cc83c";
+const SEL_STROKE = "#1e90ff";
 // Screen-pixel budgets for freehand capture. A vertex every 2 screen px keeps
 // the polygon bounded by how far the mouse TRAVELLED rather than by how often
 // the browser happened to fire mousemove; 1 screen px of Douglas-Peucker
@@ -206,8 +210,16 @@ export default {
       "pointer-events:none;overflow:hidden;";
     const gRoot = document.createElementNS(NS, "g");
     const gRois = document.createElementNS(NS, "g");
+    /* The COMMITTED selection: what the user just finished drawing, kept on
+       screen until they draw another one. Without it the outline vanished the
+       instant the mouse came up, so there was no way to see what had been
+       selected before pressing "Add ROI". Driven by the `selection` trait
+       rather than by local state, so it shows exactly the geometry Python
+       (and therefore the agent) will act on. */
+    const gSel = document.createElementNS(NS, "g");
     const gDraft = document.createElementNS(NS, "g");
     gRoot.appendChild(gRois);
+    gRoot.appendChild(gSel);
     gRoot.appendChild(gDraft);
     svg.appendChild(gRoot);
     root.appendChild(svg);
@@ -405,6 +417,21 @@ export default {
       gRois.style.pointerEvents = "auto";
     }
 
+    /* The committed selection, redrawn from the trait. Dashed like the draft
+       (it is not a saved ROI yet) but in its own colour, so "what I just
+       selected" is never confused with the solid outlines of ROIs already in
+       the list. */
+    function renderSelection() {
+      while (gSel.firstChild) gSel.removeChild(gSel.firstChild);
+      const sel = model.get("selection");
+      if (!sel || !sel.kind || !sel.points_level0) return;
+      if (sel.kind === "measure") return;  // a measurement is not a selection
+      const node = shapeFor(
+        { kind: sel.kind, points: sel.points_level0 }, SEL_STROKE, true
+      );
+      if (node) gSel.appendChild(node);
+    }
+
     function renderDraft() {
       while (gDraft.firstChild) gDraft.removeChild(gDraft.firstChild);
       if (!draft) return;
@@ -467,6 +494,9 @@ export default {
       const d = draft;
       draft = null;
       renderDraft();
+      /* emit() below sets the `selection` trait, and the change handler
+         repaints gSel -- so the outline survives the mouse-up instead of
+         disappearing with the draft. */
       if (d.tool === "lasso") {
         let pts = d.pts;
         if (pts.length < 3) return;
@@ -494,6 +524,12 @@ export default {
         seq: selSeq,
       });
       model.save_changes();
+      /* Repaint directly rather than waiting for change:selection. A model
+         does not reliably re-fire a change event to the code that set it, so
+         relying on the handler here left the outline erased with the draft --
+         which is precisely the bug this call fixes. The handler stays for
+         changes that originate in Python. */
+      renderSelection();
     }
 
     /* --------------------------- viewer -------------------------------- */
@@ -599,6 +635,8 @@ export default {
     model.on("change:tool", applyTool);
     model.on("change:rois", renderRois);
     model.on("change:overlay_visible", renderRois);
+    model.on("change:selection", renderSelection);
+    renderSelection();
     model.on("change:display", applyDisplay);
     model.on("change:command_seq", function () { ackSeq = num(model.get("command_seq"), 0); });
     model.on("change:mpp", function () { if (lastReport) updateScaleBar(lastReport.ds); });

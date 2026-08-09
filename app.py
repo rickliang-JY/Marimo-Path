@@ -124,13 +124,12 @@ def _():
             return False, f"{type(_exc).__name__}: {_exc}"
 
     OSD_AVAILABLE, OSD_ERROR = _probe_osd()
-
     return (
         AgentBridge,
         DisplayParams,
         OSD_AVAILABLE,
-        OSD_ERROR,
         Path,
+        ROI,
         SlideRefs,
         ViewportState,
         analysis_capabilities,
@@ -156,26 +155,22 @@ def _():
         make_marimo_tool,
         make_prob_metric,
         make_query_annotations_tool,
-        make_slide_info_tool,
         make_roi_figure,
+        make_slide_info_tool,
         make_viewer,
         measure_box,
         mo,
         navigator_image,
         open_slide,
+        os,
         osd_current_selection,
-        osd_selection_to_roi,
         parse_osd_measure,
-        parse_osd_selection,
-        parse_plotly_selection,
         qc_report,
-        raw_osd_selection,
         raw_plotly_selection,
         render_heatmap,
         render_viewport,
         roi_from_db_row,
         rois_to_payload,
-        selection_to_roi,
         serve_slide,
         tempfile,
         tissue_fraction_proxy,
@@ -376,7 +371,7 @@ def _(live_selection, make_live_selection_tool):
     # fallback); this cell only wraps it in the tool contract, so there is
     # exactly ONE place that decides which viewer is authoritative.
     get_current_selection = make_live_selection_tool(live_selection)
-    return (get_current_selection,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -396,7 +391,7 @@ def _(
     annotate_roi = make_annotate_roi_tool(lambda: db)
     query_annotations = make_query_annotations_tool(lambda: db, get_slide_id)
     get_slide_info = make_slide_info_tool(lambda: get_source(), lambda: db, get_slide_id)
-    return annotate_roi, get_slide_info, query_annotations
+    return
 
 
 @app.cell(hide_code=True)
@@ -789,7 +784,7 @@ def _(
             )
         ]
     roi_panel = mo.vstack([mo.md("**ROIs**"), *_rows, clear_rois_button])
-    return roi_panel, roi_delete_buttons, roi_view_buttons
+    return (roi_panel,)
 
 
 @app.cell(hide_code=True)
@@ -958,14 +953,7 @@ def _(get_source, mo, ui_actions):
 
 
 @app.cell(hide_code=True)
-def _(
-    ViewportState,
-    dc_replace,
-    get_source,
-    get_vp,
-    move_camera,
-    ui_actions,
-):
+def _(ViewportState, dc_replace, get_source, get_vp, move_camera, ui_actions):
     # Camera actions for the toolbar buttons. Kept out of the toolbar cell on
     # purpose (see the comment there): this cell reads the live viewport, so it
     # re-runs whenever the view moves, and it must therefore build no UI.
@@ -1014,16 +1002,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(
-    apply_display_pipeline,
-    OSD_AVAILABLE,
-    OSD_ERROR,
-    get_source,
-    get_tiles,
-    make_viewer,
-    mo,
-    os,
-):
+def _(OSD_AVAILABLE, get_source, get_tiles, make_viewer, mo, os):
     # THE viewer: an OpenSeadragon surface fed by the loopback tile server.
     # Real wheel-zoom, real drag-pan, real detail — the browser fetches 256px
     # JPEG tiles straight from the slide pyramid instead of receiving one flat
@@ -2081,6 +2060,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    ROI,
     detect_nuclei,
     extract_patch,
     get_payload,
@@ -2089,7 +2069,6 @@ def _(
     live_selection,
     mo,
     qc_report,
-    ROI,
     set_analysis_result,
 ):
     # "Analyze current selection" (Analysis accordion): runs nuclei detection
@@ -2504,7 +2483,7 @@ def _(MODELS_DIR, analysis_capabilities, json):
         except Exception as _exc:
             return json.dumps({"error": f"{type(_exc).__name__}: {_exc}"})
 
-    return (get_analysis_capabilities,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -2547,7 +2526,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _():
     # Theme CSS lives in assets/theme.css, loaded via
     # marimo.App(css_file=...) at the top of this file. A style-only
     # mo.Html cell is dropped by the marimo 0.23 frontend (empty output,
@@ -2558,8 +2537,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     # Always-visible agent connection guide (open by default).
-    mo.md(
-        """
+    mo.md("""
     ### Connect your agent
 
     1. **Install the skill.** On agents that support Agent Skills (Kimi Code,
@@ -2599,8 +2577,7 @@ def _(mo):
        agent wrote them.
     8. **AGENTS.md** at the repo root is the full contract for agents; an
        agent entering the project directory picks it up automatically.
-    """
-    )
+    """)
     return
 
 

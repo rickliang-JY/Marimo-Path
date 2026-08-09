@@ -159,6 +159,23 @@ function finish() {
   root.__hescope.drawRect.apply(null, __DRAW__);
   await wait(200);
   out.selection = JSON.parse(JSON.stringify(model.get("selection")));
+  /* The outline must SURVIVE the mouse-up: it used to be erased with the
+     draft, leaving the user no way to see what they had selected before
+     pressing "Add ROI". Count dashed shapes still in the overlay, and prove
+     they are not just leftover draft nodes by checking the trait handler
+     repaints after a programmatic change too. */
+  {
+    const dashed = Array.from(root.querySelectorAll("svg *"))
+      .filter(n => (n.getAttribute && n.getAttribute("stroke-dasharray")));
+    out.dashed_after_draw = dashed.length;
+    out.dashed_strokes = dashed.map(n => n.getAttribute("stroke"));
+    model.set("selection", { kind: "rect",
+                             points_level0: [[100, 100], [400, 400]], seq: 999 });
+    model._fire("change:selection");
+    await wait(150);
+    out.dashed_after_trait_set = Array.from(root.querySelectorAll("svg *"))
+      .filter(n => (n.getAttribute && n.getAttribute("stroke-dasharray"))).length;
+  }
 
   model.set("display", { brightness: 1.2, contrast: 0.9, gamma: 2.0 });
   model._fire("change:display");
@@ -306,3 +323,33 @@ def test_display_filter_touches_the_canvas_only(browser_result):
     assert "brightness(1.2)" in f and "contrast(0.9)" in f and "gamma" in f
     # tinting the overlay would recolour the ROI outlines and the scale bar
     assert browser_result["overlay_filter"] == ""
+
+
+# --- the selection outline must persist after the drag ends ---------------
+
+
+def test_selection_outline_survives_mouse_up(browser_result):
+    """Regression: onDragEnd cleared the draft, so the dashed outline vanished
+    the instant the user released the mouse and nothing showed what had been
+    selected."""
+    assert browser_result["dashed_after_draw"] >= 1, (
+        "no dashed outline left in the overlay after the drag finished"
+    )
+
+
+def test_selection_outline_is_visually_distinct_from_saved_rois(browser_result):
+    from hescope.osdviewer import ROI_STROKE, SEL_STROKE
+
+    strokes = browser_result["dashed_strokes"]
+    assert SEL_STROKE in strokes, (
+        f"the committed selection should be drawn in {SEL_STROKE}; got {strokes}"
+    )
+    assert ROI_STROKE not in strokes, (
+        "the selection outline must not reuse the saved-ROI colour"
+    )
+
+
+def test_selection_outline_repaints_when_the_trait_changes(browser_result):
+    assert browser_result["dashed_after_trait_set"] >= 1, (
+        "setting the selection trait from Python did not repaint the outline"
+    )
