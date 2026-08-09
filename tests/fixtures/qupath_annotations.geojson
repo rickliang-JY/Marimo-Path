@@ -1,0 +1,113 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "a1b2c3d4-0000-4000-8000-000000000001",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [[1200, 800], [1800, 820], [1750, 1400], [1180, 1360], [1200, 800]]
+        ]
+      },
+      "properties": {
+        "objectType": "annotation",
+        "classification": {"name": "Tumor", "colorRGB": -3670016},
+        "isLocked": false
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "a1b2c3d4-0000-4000-8000-000000000002",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[300, 300], [900, 300], [900, 700], [300, 700], [300, 300]]]
+      },
+      "properties": {
+        "objectType": "annotation",
+        "classification": {"name": "Stroma"},
+        "name": "region 2"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "a1b2c3d4-0000-4000-8000-000000000003",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [[2000, 2000], [2600, 2000], [2600, 2600], [2000, 2600], [2000, 2000]],
+          [[2200, 2200], [2400, 2200], [2400, 2400], [2200, 2400], [2200, 2200]]
+        ]
+      },
+      "properties": {
+        "objectType": "annotation",
+        "classification": {"name": "Necrosis"},
+        "comment": "TRAP: interior ring (a hole). Importing only the outer ring silently changes what the pathologist drew."
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "a1b2c3d4-0000-4000-8000-000000000004",
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [[[4000, 100], [4300, 100], [4300, 400], [4000, 400], [4000, 100]]],
+          [[[4500, 100], [4800, 100], [4800, 400], [4500, 400], [4500, 100]]]
+        ]
+      },
+      "properties": {
+        "objectType": "annotation",
+        "classification": {"name": "Tumor"},
+        "comment": "TRAP: two disjoint parts in ONE feature."
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "a1b2c3d4-0000-4000-8000-000000000005",
+      "geometry": {"type": "Point", "coordinates": [5000, 5000]},
+      "properties": {
+        "objectType": "annotation",
+        "classification": {"name": "Mitosis"},
+        "comment": "TRAP: zero-area geometry. Has no ROI equivalent here."
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "a1b2c3d4-0000-4000-8000-000000000006",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [[6000, 100], [6200, 400], [6400, 200]]
+      },
+      "properties": {
+        "objectType": "annotation",
+        "comment": "TRAP: open geometry, and no classification either."
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "a1b2c3d4-0000-4000-8000-000000000007",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[7000, 7000], [7000, 7000], [7000, 7000], [7000, 7000]]]
+      },
+      "properties": {
+        "objectType": "annotation",
+        "classification": {"name": "Artifact"},
+        "comment": "TRAP: degenerate, zero-area polygon."
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "a1b2c3d4-0000-4000-8000-000000000008",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[8000.5, 100.25], [8400.75, 100.25], [8200.5, 500.5], [8000.5, 100.25]]]
+      },
+      "properties": {
+        "objectType": "detection",
+        "classification": {"name": "Tumor"},
+        "comment": "TRAP: objectType is detection, not annotation, and coordinates are sub-pixel floats."
+      }
+    }
+  ]
+}

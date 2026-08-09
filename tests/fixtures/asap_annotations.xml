@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<!--
+  ASAP / CAMELYON-style annotation file, as produced by ASAP's annotation tool
+  and used by the CAMELYON16/17 ground truth. Kept as a fixture for the ASAP
+  XML importer.
+
+  Shape vocabulary: Type="Polygon" | "Rectangle" | "Dot" | "Spline".
+  Coordinates are level-0 pixels, Order gives the vertex sequence, and the
+  PartOfGroup / Annotation Group pair carries the class.
+-->
+<ASAP_Annotations>
+  <Annotations>
+    <Annotation Name="Annotation 0" Type="Polygon" PartOfGroup="Tumor" Color="#F4FA58">
+      <Coordinates>
+        <Coordinate Order="0" X="1200.0" Y="800.0" />
+        <Coordinate Order="1" X="1800.0" Y="820.0" />
+        <Coordinate Order="2" X="1750.0" Y="1400.0" />
+        <Coordinate Order="3" X="1180.0" Y="1360.0" />
+      </Coordinates>
+    </Annotation>
+
+    <Annotation Name="Annotation 1" Type="Rectangle" PartOfGroup="Stroma" Color="#64FE2E">
+      <Coordinates>
+        <Coordinate Order="0" X="300.0" Y="300.0" />
+        <Coordinate Order="1" X="900.0" Y="300.0" />
+        <Coordinate Order="2" X="900.0" Y="700.0" />
+        <Coordinate Order="3" X="300.0" Y="700.0" />
+      </Coordinates>
+    </Annotation>
+
+    <!-- TRAP: Order attributes are NOT in document order. An importer that
+         trusts document order instead of sorting by Order gets a self
+         intersecting polygon that still passes every shape check. -->
+    <Annotation Name="Annotation 2" Type="Polygon" PartOfGroup="Necrosis" Color="#F4FA58">
+      <Coordinates>
+        <Coordinate Order="2" X="2600.0" Y="2600.0" />
+        <Coordinate Order="0" X="2000.0" Y="2000.0" />
+        <Coordinate Order="3" X="2000.0" Y="2600.0" />
+        <Coordinate Order="1" X="2600.0" Y="2000.0" />
+      </Coordinates>
+    </Annotation>
+
+    <!-- TRAP: a Dot has a single vertex and no area. -->
+    <Annotation Name="Annotation 3" Type="Dot" PartOfGroup="Mitosis" Color="#FF0000">
+      <Coordinates>
+        <Coordinate Order="0" X="5000.0" Y="5000.0" />
+      </Coordinates>
+    </Annotation>
+
+    <!-- TRAP: group "None" is ASAP's unclassified default; it must not become
+         a literal label called "None". -->
+    <Annotation Name="Annotation 4" Type="Polygon" PartOfGroup="None" Color="#F4FA58">
+      <Coordinates>
+        <Coordinate Order="0" X="9000.0" Y="200.0" />
+        <Coordinate Order="1" X="9400.0" Y="200.0" />
+        <Coordinate Order="2" X="9200.0" Y="600.0" />
+      </Coordinates>
+    </Annotation>
+  </Annotations>
+
+  <AnnotationGroups>
+    <Group Name="Tumor" PartOfGroup="None" Color="#F4FA58">
+      <Attributes />
+    </Group>
+    <Group Name="Stroma" PartOfGroup="None" Color="#64FE2E">
+      <Attributes />
+    </Group>
+    <Group Name="Necrosis" PartOfGroup="None" Color="#F4FA58">
+      <Attributes />
+    </Group>
+    <Group Name="Mitosis" PartOfGroup="None" Color="#FF0000">
+      <Attributes />
+    </Group>
+  </AnnotationGroups>
+</ASAP_Annotations>
