@@ -981,10 +981,16 @@ def _(
             return
         move_camera(dc_replace(get_vp(), downsample=max(float(v), 1.0)))
 
-    ui_actions["pan_w"] = lambda _: _pan(-1, 0)
-    ui_actions["pan_e"] = lambda _: _pan(1, 0)
-    ui_actions["pan_n"] = lambda _: _pan(0, -1)
-    ui_actions["pan_s"] = lambda _: _pan(0, 1)
+    # `fn=_pan` binds the function OBJECT now. A bare `lambda _: _pan(...)`
+    # defers the lookup to click time, and by then marimo's cell-private name
+    # mangling (_pan -> _cell_<id>_pan) has taken it out of scope: every arrow
+    # button raised `NameError: name '_cell_ROlb_pan' is not defined`. The
+    # entries below are safe because they store the function object directly
+    # rather than a lambda that names it.
+    ui_actions["pan_w"] = lambda _v, fn=_pan: fn(-1, 0)
+    ui_actions["pan_e"] = lambda _v, fn=_pan: fn(1, 0)
+    ui_actions["pan_n"] = lambda _v, fn=_pan: fn(0, -1)
+    ui_actions["pan_s"] = lambda _v, fn=_pan: fn(0, 1)
     ui_actions["zoom_fit"] = _on_zoom_fit
     ui_actions["zoom"] = _on_zoom
     return
