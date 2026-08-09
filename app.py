@@ -92,14 +92,25 @@ def _():
         viewport_png_bytes,
     )
 
-    # The main viewing surface is OpenSeadragon (hescope/osdviewer.py) fed by
-    # the loopback tile server (hescope/tileserver.py): real wheel-zoom, real
-    # mouse-drag pan, ROI drawing in level-0 coordinates. It needs anywidget
-    # plus the vendored OpenSeadragon bundle, so probe BOTH once here. When the
-    # probe fails the notebook falls back to the legacy plotly surface, whose
-    # zoom/pan are cosmetic (they rescale an already-rendered bitmap).
-    # HESCOPE_DISABLE_OSD=1 forces that fallback deliberately.
+    # The OpenSeadragon surface (hescope/osdviewer.py) fed by the loopback tile
+    # server (hescope/tileserver.py) gives real wheel-zoom, real mouse-drag pan
+    # and ROI drawing in level-0 coordinates. It is OPT-IN: set
+    # HESCOPE_ENABLE_OSD=1 to use it. The default is the legacy plotly surface,
+    # whose zoom/pan are cosmetic (they rescale an already-rendered bitmap) but
+    # which is known to work.
+    #
+    # Why opt-in, and why this must not be flipped casually: a widget that
+    # constructs fine in Python can still fail to MOUNT in the browser, and
+    # nothing server-side can tell. When that happens with OpenSeadragon
+    # driving, the plotly surface is suppressed and the user is left with a
+    # dead viewer -- no ROI tool, no drag, and toolbar buttons that command a
+    # widget which is not there. Until an automated test drives the real
+    # marimo page and proves the widget mounts and reports back, the default
+    # stays on the surface we can verify from Python.
     def _probe_osd():
+        _flag = os.environ.get("HESCOPE_ENABLE_OSD", "").strip().lower()
+        if _flag not in ("1", "true", "yes", "on"):
+            return False, "not enabled (set HESCOPE_ENABLE_OSD=1 to try it)"
         if os.environ.get("HESCOPE_DISABLE_OSD", "").strip().lower() in (
             "1", "true", "yes", "on"
         ):
@@ -1006,8 +1017,14 @@ def _(
     _src = get_source()
     _tiles = get_tiles()
     osd_viewer = None
+    # Renders nothing by default: with OpenSeadragon opt-in and off, the
+    # legacy cell below owns the viewer. This cell must never be the reason
+    # the page shows an empty viewing area -- every branch that suppresses
+    # the fallback has to put something actionable here instead.
     _view = mo.md("")
-    if _src is None:
+    if _src is None and not OSD_AVAILABLE:
+        _view = mo.md("")  # the legacy cell already prompts to open a slide
+    elif _src is None:
         _view = mo.callout(
             mo.md("Open a slide from the sidebar to begin."), kind="info"
         )
@@ -1016,25 +1033,40 @@ def _(
             osd_viewer = mo.ui.anywidget(
                 make_viewer(_src, _tiles["tile_source"], height=680)
             )
-            _view = osd_viewer
+            # The escape hatch travels WITH the widget. A widget that fails to
+            # mount in the browser raises nothing in Python, so this text is
+            # the only thing the user would see in that case -- without it the
+            # symptom is a dead rectangle and no way to know what to do.
+            _view = mo.vstack(
+                [
+                    osd_viewer,
+                    mo.md(
+                        "<sub>OpenSeadragon viewer (experimental). If this area "
+                        "is blank or does not respond to the mouse, restart "
+                        "without `HESCOPE_ENABLE_OSD` to return to the classic "
+                        "viewer.</sub>"
+                    ),
+                ]
+            )
         except Exception as _exc:  # broken anywidget install, comm failure
             osd_viewer = None
             _view = mo.callout(
                 mo.md(
                     f"**OpenSeadragon viewer could not start:** `{_exc}`. "
-                    "Set `HESCOPE_DISABLE_OSD=1` and restart to use the "
-                    "legacy plotly viewer instead."
+                    "Restart without `HESCOPE_ENABLE_OSD` to use the classic "
+                    "viewer."
                 ),
                 kind="danger",
             )
-    elif not OSD_AVAILABLE:
+    elif OSD_AVAILABLE:
+        # Enabled, slide open, but no tile source: the tile server refused to
+        # start. The legacy cell renders in this state (it keys off tiles being
+        # None), so say why rather than leaving an unexplained downgrade.
         _view = mo.callout(
             mo.md(
-                f"**Interactive viewer unavailable** ({OSD_ERROR}). Showing the "
-                "legacy plotly surface below: its wheel-zoom and drag only "
-                "rescale an already-rendered bitmap, so use the toolbar zoom / "
-                "pan controls to move the actual data window. Install the "
-                "`anywidget` package to get mouse zoom and pan."
+                "**Tile server unavailable**, so the classic viewer is shown "
+                "below. Its wheel-zoom and drag are cosmetic — use the toolbar "
+                "zoom and pan controls to move the data window."
             ),
             kind="warn",
         )
