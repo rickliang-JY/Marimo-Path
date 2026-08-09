@@ -183,7 +183,8 @@ skills/he-scope/        Agent Skills 包(SKILL.md)
 tools/make_demo_slide.py  合成 H&E 演示切片生成器
 tests/                  pytest 套件(离线;GDC API 用真实录制响应 mock)
 docs/                   使用指南、路线图、战略与文献文档
-image/                  README 用图(项目 logo)
+assets/theme.css        应用样式表,经 marimo.App(css_file=...) 加载
+image/                  logo 与标题栏图标(README 用图 + Marimo-icon.svg)
 data/                   下载的 TCGA 切片 + catalog + hescope.db(gitignored)
 agent_out/              agent 产物:patch PNG + roi_history.jsonl(gitignored)
 ```

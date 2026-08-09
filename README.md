@@ -205,7 +205,8 @@ tools/make_demo_slide.py  Synthetic H&E demo-slide generator
 tests/                  pytest suite (offline; the GDC API is mocked with a
                         real recorded response)
 docs/                   User guide, roadmap, strategy and literature documents
-image/                  README assets (project logo)
+assets/theme.css        App stylesheet, loaded via marimo.App(css_file=...)
+image/                  Logo and app-bar icon (README assets + Marimo-icon.svg)
 data/                   Downloaded TCGA slides + catalog + hescope.db (gitignored)
 agent_out/              Agent artifacts: patch PNGs + roi_history.jsonl (gitignored)
 ```

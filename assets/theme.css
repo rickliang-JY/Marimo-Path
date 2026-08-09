@@ -1,0 +1,59 @@
+/* HE-Scope theme (loaded via marimo.App(css_file=...) in app.py).
+   Note: a style-only mo.Html cell is dropped by the marimo frontend, which
+   is why this lives in a real css_file instead of a notebook cell.
+
+   Selector basis (marimo 0.23.16):
+   - `marimo-accordion`, `marimo-sidebar`, `marimo-callout-output` are
+     marimo's own custom elements;
+   - accordion section headers render as <h3><button> inside
+     `marimo-accordion` (radix-ui accordion markup);
+   - `.hescope-*` classes are our own wrapper divs/spans (header app bar,
+     toolbar, agent status strip) and are immune to marimo internals.
+   Deliberately no global `*` / `body` rules; visual language: muted warm
+   neutrals (#f7f5f0 family), 1px hairline separators, generous padding,
+   no gradients or saturated fills. */
+
+/* App bar: warm low-saturation strip with a hairline bottom separator. */
+.hescope-app-bar {
+  background: #f7f5f0;
+  border-bottom: 1px solid #ddd8d0;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+}
+/* Agent status strip: pushed to the far right of the app-bar flex row. */
+.hescope-agent-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: #8a8578;
+  white-space: nowrap;
+}
+/* Toolbar: same warm hairline treatment as the app bar; compact padding. */
+.hescope-toolbar {
+  border: 1px solid #ddd8d0;
+  border-radius: 6px;
+  background: #faf9f7;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+}
+/* Accordion: tighten the title/content rhythm (radix <h3>/<button>). */
+marimo-accordion h3 {
+  margin: 0;
+}
+marimo-accordion button {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+/* Sidebar panels: consistent, slightly tighter stacking. */
+marimo-sidebar {
+  padding-right: 4px;
+}
+/* Sidebar collapse: marimo only shrinks the aside width (68px) and leaves
+   content visible -> squeezed text/buttons spill out. Clip during the width
+   transition and hide the content pane when collapsed; the expand toggle
+   (first child, absolute top-right) stays visible. */
+aside.app-sidebar {
+  overflow: hidden;
+}
+aside.app-sidebar[style*="68px"] > div:nth-child(2) {
+  visibility: hidden;
+}

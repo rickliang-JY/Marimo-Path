@@ -21,7 +21,7 @@ jsonl agent bridge keep working.
 import marimo
 
 __generated_with = "0.23.16"
-app = marimo.App(width="full")
+app = marimo.App(width="full", css_file="assets/theme.css")
 
 
 @app.cell(hide_code=True)
@@ -409,7 +409,7 @@ def _(
     loader_panel = mo.vstack(
         [
             mo.md("**Open slide**"),
-            mo.hstack([path_input, open_button], justify="start", gap=0.5),
+            mo.hstack([path_input, open_button], justify="start", align="end", gap=0.5),
             demo_button,
             file_upload,
         ]
@@ -445,7 +445,7 @@ def _(mo):
     # changes what is displayed — selection coordinates and any downstream
     # analysis still read the raw slide pixels.
     stain_norm_checkbox = mo.ui.checkbox(
-        value=False, label="stain normalize (Macenko, display-only)"
+        value=False, label="stain normalize (Macenko)"
     )
     display_panel = mo.vstack(
         [
@@ -656,8 +656,26 @@ def _(display_panel, loader_panel, mo, navigator_panel, roi_panel):
 
 
 @app.cell(hide_code=True)
-def _(db_status_badge, get_source, get_vp, magnification_for, mo):
-    # Compact header row: app title + slide info + DB status badge.
+def _(Path, db_status_badge, get_source, get_vp, magnification_for, mo):
+    # Compact header row: app icon + title + slide info + DB status badge.
+    # Icon resolves relative to app.py itself (bundled asset, NOT the
+    # runtime data dir); _app_dir is cell-private so derive it locally.
+    try:
+        _here = Path(__file__).resolve().parent
+    except NameError:
+        # marimo kernel context
+        _here = Path.cwd()
+    _icon_path = _here / "image" / "Marimo-icon.svg"
+    if not _icon_path.exists():
+        _icon_path = _here / "image" / "Marimo-icon.png"
+    if _icon_path.exists():
+        # Rounded 36px brand mark in the app bar. Graceful no-icon fallback
+        # when the image/ folder is absent (e.g. pip wheel install).
+        _icon = mo.image(
+            str(_icon_path), alt="HE-Scope icon", width=36, height=36, rounded=True
+        )
+    else:
+        _icon = mo.md("")
     _src = get_source()
     if _src is None:
         _info = "No slide open"
@@ -676,6 +694,7 @@ def _(db_status_badge, get_source, get_vp, magnification_for, mo):
         _info = f"{_src.name} | {_w} x {_h} px | {_mpp_s} | {_mag_s}"
     _header_row = mo.hstack(
         [
+            _icon,
             mo.md("**HE-Scope** — H&E viewer + code-agent bridge"),
             mo.md(_info),
             mo.md(f"`{db_status_badge}`"),
@@ -2033,61 +2052,10 @@ def _(
 
 @app.cell(hide_code=True)
 def _(mo):
-    # Theme CSS (injected late so it wins over earlier cell markup).
-    #
-    # Selector basis (marimo 0.23.16):
-    #  - `marimo-accordion`, `marimo-sidebar`, `marimo-callout-output` are
-    #    marimo's own custom elements, confirmed via the server-rendered
-    #    `.text` of mo.accordion()/mo.sidebar()/mo.callout() (the frontend
-    #    upgrades them in-place, keeping the tag names);
-    #  - accordion section headers render as <h3><button> inside
-    #    `marimo-accordion` (radix-ui accordion markup);
-    #  - `.hescope-*` classes are OUR OWN wrapper divs/spans (header app
-    #    bar, toolbar, agent status strip) and are immune to marimo
-    #    internals.
-    # Deliberately no global `*` / `body` rules; visual language: muted warm
-    # neutrals (#f7f5f0 family), 1px hairline separators, generous padding,
-    # no gradients or saturated fills.
-    mo.Html(
-        """
-<style>
-/* App bar: warm low-saturation strip with a hairline bottom separator. */
-.hescope-app-bar {
-  background: #f7f5f0;
-  border-bottom: 1px solid #ddd8d0;
-  padding: 10px 14px;
-  margin-bottom: 10px;
-}
-/* Agent status strip: pushed to the far right of the app-bar flex row. */
-.hescope-agent-status {
-  margin-left: auto;
-  font-size: 12px;
-  color: #8a8578;
-  white-space: nowrap;
-}
-/* Toolbar: same warm hairline treatment as the app bar; compact padding. */
-.hescope-toolbar {
-  border: 1px solid #ddd8d0;
-  border-radius: 6px;
-  background: #faf9f7;
-  padding: 6px 10px;
-  margin-bottom: 6px;
-}
-/* Accordion: tighten the title/content rhythm (radix <h3>/<button>). */
-marimo-accordion h3 {
-  margin: 0;
-}
-marimo-accordion button {
-  padding-top: 6px;
-  padding-bottom: 6px;
-}
-/* Sidebar panels: consistent, slightly tighter stacking. */
-marimo-sidebar {
-  padding-right: 4px;
-}
-</style>
-"""
-    )
+    # Theme CSS lives in assets/theme.css, loaded via
+    # marimo.App(css_file=...) at the top of this file. A style-only
+    # mo.Html cell is dropped by the marimo 0.23 frontend (empty output,
+    # rules never applied), so the stylesheet must not live in a cell.
     return
 
 
