@@ -105,3 +105,59 @@ def test_magnification_for():
     assert magnification_for(2.0, 1.0) == pytest.approx(10.0)
     assert magnification_for(2.0, 4.0) == pytest.approx(2.5)
     assert magnification_for(0.25, 1.0) == pytest.approx(80.0)
+
+
+# --- R01-2: get_latest_selection must never raise --------------------------
+
+
+_GOOD_LINE = (
+    '{"slide_name":"a.png","slide_dimensions":[10,10],"mpp":null,'
+    '"magnification":null,"roi":{"kind":"rect","points_level0":[[0,0],[1,1]],'
+    '"bbox_level0":[0,0,1,1]},"patch_path":"p.png","stats":{},'
+    '"created_at":"2026-01-01T00:00:00+00:00","roi_id":null}'
+)
+
+
+def test_history_skips_corrupt_lines(tmp_path):
+    """A process killed mid-write leaves a truncated final line; it must not
+    make the whole history unreadable."""
+    from hescope.agent_bridge import AgentBridge
+
+    bridge = AgentBridge(tmp_path)
+    (tmp_path / "roi_history.jsonl").write_text(
+        _GOOD_LINE + "\n" + '{"slide_name":"b.png","slide_dim\n',
+        encoding="utf-8",
+    )
+    hist = bridge.history()
+    assert len(hist) == 1
+    assert hist[0].slide_name == "a.png"
+    assert bridge.latest().slide_name == "a.png"
+
+
+def test_get_latest_selection_never_raises(tmp_path):
+    from hescope.agent_bridge import AgentBridge, make_marimo_tool
+
+    bridge = AgentBridge(tmp_path)
+    (tmp_path / "roi_history.jsonl").write_text(
+        '{"slide_name":"b.png","slide_dim\n', encoding="utf-8"
+    )
+    # the only line is corrupt -> no payload, but a string, never an exception
+    assert make_marimo_tool(lambda: bridge)() == "NO_SELECTION"
+
+    class Boom:
+        def latest(self):
+            raise RuntimeError("bridge exploded")
+
+    out = make_marimo_tool(lambda: Boom())()
+    assert json.loads(out)["error"].startswith("RuntimeError")
+
+
+def test_get_current_selection_never_raises():
+    from hescope.agent_bridge import make_live_selection_tool
+
+    def boom():
+        raise ValueError("malformed plotly selection")
+
+    out = make_live_selection_tool(boom)()
+    assert json.loads(out)["error"].startswith("ValueError")
+    assert make_live_selection_tool(lambda: None)() == "NO_SELECTION"

@@ -30,7 +30,7 @@ from scipy import ndimage as ndi
 from skimage.color import rgb2gray, rgb2hed
 from skimage.filters import threshold_otsu
 from skimage.measure import label, regionprops
-from skimage.morphology import remove_small_objects
+from .nuclei import remove_small_objects_strict
 from skimage.transform import resize
 
 from .qc import blur_score, tissue_mask
@@ -103,7 +103,7 @@ def _nuclei_features(rgb: np.ndarray) -> list[float]:
     binary = h_channel > thr
     if not binary.any():
         return [0.0, 0.0, 0.0]
-    binary = remove_small_objects(binary, min_size=_NUCLEI_MIN_SIZE_PX)
+    binary = remove_small_objects_strict(binary, _NUCLEI_MIN_SIZE_PX)
     if not binary.any():
         return [0.0, 0.0, 0.0]
     labels = label(binary)

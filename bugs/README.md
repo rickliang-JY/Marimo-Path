@@ -9,7 +9,7 @@ regressions a previous round claimed to have fixed.
 
 | Round | Date | Findings | Status |
 | --- | --- | --- | --- |
-| [round-01](2026-08-09-round-01.md) | 2026-08-09 | 6 | in progress |
+| [round-01](2026-08-09-round-01.md) | 2026-08-09 | 7 | fixed |
 
 ## Conventions
 
@@ -33,3 +33,17 @@ regressions a previous round claimed to have fixed.
   numbered and carry no status.
 - Also record **what was checked and found clean**. A review that only lists
   problems does not tell the next round where to stop looking.
+- Record **corrections in place**, as a marked note rather than a silent edit,
+  whenever a finding's evidence or scope turns out to be wrong. Round 01 had
+  one of each: evidence built from inputs the code cannot receive, and a
+  deprecation found at one call site out of three.
+
+## Start every round with
+
+```bash
+pytest -q -W "error::FutureWarning"   # deprecations the toolchain already knows about
+python app.py                         # every notebook cell, once
+```
+
+Reading for a pattern misses call sites; the first command found three of round
+01's issues that a careful read had not.

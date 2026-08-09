@@ -267,10 +267,25 @@ class TifffileSource:
         sx1 = min(lw, lx + w)
         sy1 = min(lh, ly + h)
         if sx1 > sx0 and sy1 > sy0:
-            block = arr[sy0:sy1, sx0:sx1, :] if arr.ndim >= 3 else arr[sy0:sy1, sx0:sx1]
-            block = np.asarray(block)
+            # Slice through the SAME axis mapping the rest of this class uses
+            # (_y_idx/_x_idx). Assuming axes 0 and 1 would silently read the
+            # wrong axes for any series that does not lead with Y, X.
+            slicer: list = [slice(None)] * arr.ndim
+            slicer[self._y_idx] = slice(sy0, sy1)
+            slicer[self._x_idx] = slice(sx0, sx1)
+            block = np.asarray(arr[tuple(slicer)])
+            if (self._y_idx, self._x_idx) != (0, 1) and block.ndim >= 2:
+                rest = [
+                    i for i in range(block.ndim)
+                    if i not in (self._y_idx, self._x_idx)
+                ]
+                block = np.transpose(block, (self._y_idx, self._x_idx, *rest))
+            if block.ndim > 3:  # collapse any trailing axes into channels
+                block = block.reshape(block.shape[0], block.shape[1], -1)
             if block.ndim == 2:
                 block = np.stack([block] * 3, axis=-1)
+            if block.shape[-1] == 1:
+                block = np.repeat(block, 3, axis=-1)
             if block.shape[-1] > 3:
                 block = block[..., :3]
             crop = Image.fromarray(block.astype(np.uint8), "RGB")

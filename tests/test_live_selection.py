@@ -209,3 +209,18 @@ def test_selection_stats_default_temp_dir(source):
     out = selection_stats(source, sel)
     assert os.path.isfile(out["patch_path"])
     assert "live_" in os.path.basename(out["patch_path"])
+
+
+# --- R01-3: the lasso branch must be guarded like the box branch -----------
+
+
+def test_lasso_malformed_returns_none():
+    from hescope.viewer import parse_plotly_selection
+
+    # box branch already guarded; lasso must behave identically
+    assert parse_plotly_selection({"range": {"x": [None, 5], "y": [0, 5]}}) is None
+    assert parse_plotly_selection({"lasso": {"x": [0, 1, None], "y": [0, 1, 2]}}) is None
+    assert parse_plotly_selection({"lasso": {"x": 5, "y": 7}}) is None
+    # a well-formed lasso still parses
+    ok = parse_plotly_selection({"lasso": {"x": [0, 10, 5], "y": [0, 0, 10]}})
+    assert ok["kind"] == "lasso" and len(ok["points"]) == 3

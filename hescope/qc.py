@@ -19,7 +19,9 @@ import PIL.Image
 from scipy import ndimage as ndi
 from skimage.color import rgb2hsv
 from skimage.filters import threshold_otsu
-from skimage.morphology import binary_closing, disk, remove_small_objects
+from skimage.morphology import closing, disk
+
+from .nuclei import remove_small_objects_strict
 
 #: Blur threshold: blur_score below this on a ~256 px patch => is_blurry.
 BLUR_THRESHOLD: float = 100.0
@@ -41,9 +43,11 @@ def tissue_mask(img: PIL.Image.Image) -> np.ndarray:
     mask = sat > thr
     if not mask.any():
         return np.zeros(sat.shape, dtype=bool)
-    mask = binary_closing(mask, footprint=disk(2))
+    # `closing` is the documented successor to `binary_closing`, which
+    # scikit-image removes in 0.28; on a boolean array the two are identical.
+    mask = closing(mask, footprint=disk(2))
     mask = ndi.binary_fill_holes(mask)
-    mask = remove_small_objects(mask, min_size=64)
+    mask = remove_small_objects_strict(mask, 64)
     return mask.astype(bool)
 
 

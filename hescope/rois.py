@@ -42,30 +42,50 @@ class ROI:
             max(0, int(math.ceil(y1))),
         )
 
-    def mask(self, size: tuple[int, int], offset: tuple[float, float]) -> "np.ndarray":
+    def mask(
+        self,
+        size: tuple[int, int],
+        offset: tuple[float, float],
+        scale: float | tuple[float, float] = 1.0,
+    ) -> "np.ndarray":
         """Boolean mask of shape (h, w). Pixel (px, py) maps to level-0
-        coordinate offset + (px, py)."""
+        coordinate ``offset + (px * sx, py * sy)``.
+
+        ``scale`` is level-0 pixels per mask pixel, as a scalar or an
+        (sx, sy) pair. It defaults to 1.0, i.e. the mask grid is level-0
+        itself. Pass the patch's actual scale when masking a patch from
+        :func:`extract_patch`, which reads from a downsampled pyramid level
+        and may shrink further to honour ``max_size`` -- building a level-0
+        mask against those pixels would misalign it.
+        """
         w, h = size
         ox, oy = offset
+        sx, sy = (scale, scale) if isinstance(scale, (int, float)) else scale
+        sx = float(sx) or 1.0
+        sy = float(sy) or 1.0
         if self.kind == "circle":
             (cx, cy), (ex, ey) = self.points
             r = math.hypot(ex - cx, ey - cy)
             yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
-            xx += ox
-            yy += oy
+            # mask pixel -> level-0, so a non-uniform scale stays exact
+            xx = ox + xx * sx
+            yy = oy + yy * sy
             return (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
         img = Image.new("L", (w, h), 0)
         draw = ImageDraw.Draw(img)
-        pts = [(px - ox, py - oy) for px, py in self.points]
+
+        def _to_px(p: tuple[float, float]) -> tuple[float, float]:
+            return ((p[0] - ox) / sx, (p[1] - oy) / sy)
+
         if self.kind == "rect":
             (x0, y0), (x1, y1) = self.points
             pts = [
-                (min(x0, x1) - ox, min(y0, y1) - oy),
-                (max(x0, x1) - ox, max(y0, y1) - oy),
+                _to_px((min(x0, x1), min(y0, y1))),
+                _to_px((max(x0, x1), max(y0, y1))),
             ]
             draw.rectangle(pts, fill=1)
         else:  # polygon
-            draw.polygon(pts, fill=1)
+            draw.polygon([_to_px(p) for p in self.points], fill=1)
         return np.asarray(img, dtype=bool)
 
 
@@ -105,21 +125,52 @@ def extract_patch(
     return patch
 
 
+def roi_shape_mask(patch: "Image.Image", roi: ROI) -> "np.ndarray":
+    """Boolean mask of ``roi``'s shape on ``patch``'s pixel grid.
+
+    ``patch`` is assumed to be the ROI's bounding box as produced by
+    :func:`extract_patch`, which reads from a downsampled pyramid level, so
+    the scale is derived from bbox size / patch size rather than assumed to
+    be 1. Returns an all-True mask for a degenerate bbox.
+    """
+    w, h = patch.size
+    x0, y0, x1, y1 = roi.bbox()
+    bw, bh = x1 - x0, y1 - y0
+    if bw <= 0 or bh <= 0 or w <= 0 or h <= 0:
+        return np.ones((h, w), dtype=bool)
+    return roi.mask((w, h), (float(x0), float(y0)), (bw / w, bh / h))
+
+
 def roi_stats(patch: "Image.Image", roi: ROI | None = None) -> dict:
     """Statistics for an ROI patch image.
 
     Keys: width_px, height_px, mean_rgb, he_deconvolution
     {hematoxylin_mean, eosin_mean} (skimage rgb2hed), tissue_fraction
-    (fraction of pixels with luminance < 0.9*255). H/E means are computed
-    over tissue pixels, falling back to all pixels if there are none."""
+    (fraction of pixels with luminance < 0.9*255).
+
+    When ``roi`` is given, every statistic is restricted to the ROI's actual
+    shape, so a lasso or circle no longer reports its bounding box: pixels
+    outside the drawn outline are excluded, and ``tissue_fraction`` is
+    measured within the ROI. H/E means are computed over tissue pixels
+    inside the ROI, falling back to the whole ROI when it holds no tissue,
+    and to the whole patch when the shape mask is empty. With ``roi=None``
+    the patch is used as-is (the bounding box), which is also exact for
+    rectangle ROIs since the patch *is* their bbox."""
     from skimage.color import rgb2hed
 
     arr = np.asarray(patch.convert("RGB"), dtype=np.float64)
     h, w = arr.shape[:2]
     lum = 0.2126 * arr[..., 0] + 0.7152 * arr[..., 1] + 0.0722 * arr[..., 2]
     tissue = lum < 0.9 * 255.0
-    tissue_fraction = float(tissue.mean()) if tissue.size else 0.0
-    sel = tissue if tissue.any() else np.ones((h, w), dtype=bool)
+
+    shape = None if roi is None else roi_shape_mask(patch, roi)
+    if shape is None or not shape.any():
+        shape = np.ones((h, w), dtype=bool)
+    n_shape = int(shape.sum())
+
+    in_roi = tissue & shape
+    tissue_fraction = float(in_roi.sum()) / n_shape if n_shape else 0.0
+    sel = in_roi if in_roi.any() else shape
 
     mean_rgb = [float(arr[..., c][sel].mean()) for c in range(3)]
 

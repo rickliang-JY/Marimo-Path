@@ -103,3 +103,66 @@ def test_roi_stats_keys():
     white = roi_stats(Image.new("RGB", (20, 20), (255, 255, 255)))
     assert white["tissue_fraction"] == 0.0
     assert white["he_deconvolution"]["hematoxylin_mean"] >= 0.0
+
+
+# --- R01-1: roi_stats must respect the ROI shape, not just its bbox --------
+
+
+def _triangle_patch():
+    """Patch == the bbox of a triangle lasso: purple inside, brown outside."""
+    from PIL import ImageDraw
+
+    tri = ROI(kind="polygon", points=((0.0, 0.0), (99.0, 0.0), (0.0, 99.0)))
+    img = Image.new("RGB", (99, 99), (140, 110, 40))  # brown, outside
+    ImageDraw.Draw(img).polygon(
+        [(0, 0), (99, 0), (0, 99)], fill=(110, 40, 140)  # purple, inside
+    )
+    return tri, img
+
+
+def test_roi_stats_respects_roi_shape():
+    tri, patch = _triangle_patch()
+    # the triangle fills only about half of its own bounding box
+    from hescope.rois import roi_shape_mask
+
+    m = roi_shape_mask(patch, tri)
+    assert 0.45 < float(m.mean()) < 0.55
+
+    shaped = roi_stats(patch, tri)
+    assert shaped["mean_rgb"] == pytest.approx([110.0, 40.0, 140.0], abs=0.5)
+
+    # without the roi the bbox is used, which mixes in the brown outside
+    bbox_only = roi_stats(patch)
+    assert bbox_only["mean_rgb"] != pytest.approx([110.0, 40.0, 140.0], abs=0.5)
+    assert (
+        shaped["he_deconvolution"]["hematoxylin_mean"]
+        > bbox_only["he_deconvolution"]["hematoxylin_mean"]
+    )
+
+
+def test_roi_stats_mask_scales_to_downsampled_patch():
+    """extract_patch downsamples; the shape mask must scale with it."""
+    tri, patch = _triangle_patch()
+    small = patch.resize((33, 33), Image.NEAREST)  # 3x downsample of the bbox
+    shaped = roi_stats(small, tri)
+    assert shaped["mean_rgb"] == pytest.approx([110.0, 40.0, 140.0], abs=6.0)
+    assert shaped["width_px"] == 33 and shaped["height_px"] == 33
+
+
+def test_roi_stats_rect_unchanged_by_roi_arg():
+    """A rect's patch IS its bbox, so passing the roi must change nothing."""
+    arr = np.zeros((40, 60, 3), dtype=np.uint8)
+    arr[:20] = (200, 120, 170)
+    arr[20:] = (255, 255, 255)
+    patch = Image.fromarray(arr, "RGB")
+    rect = ROI(kind="rect", points=((0.0, 0.0), (60.0, 40.0)))
+    assert roi_stats(patch, rect) == roi_stats(patch)
+
+
+def test_roi_mask_scale_matches_manual_downsample():
+    circle = ROI(kind="circle", points=((50.0, 50.0), (75.0, 50.0)))  # r=25
+    full = circle.mask((100, 100), (0.0, 0.0))
+    half = circle.mask((50, 50), (0.0, 0.0), 2.0)  # 2 level-0 px per mask px
+    assert half.shape == (50, 50)
+    # same disc, half the linear resolution -> same area fraction
+    assert float(half.mean()) == pytest.approx(float(full.mean()), abs=0.02)

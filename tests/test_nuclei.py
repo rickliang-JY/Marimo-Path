@@ -83,3 +83,23 @@ def test_deterministic():
     l2, s2 = detect_nuclei(img)
     assert np.array_equal(l1, l2)
     assert s1 == s2
+
+
+# --- R01-5: min_size boundary must stay strict (< min_size), not <= --------
+
+
+def test_min_size_boundary_is_strict():
+    """skimage's successor parameter drops components <= the threshold; the
+    original min_size dropped only strictly smaller ones. Pin the original."""
+    import numpy as np
+
+    from hescope.nuclei import remove_small_objects_strict
+
+    a = np.zeros((20, 20), dtype=bool)
+    a[1, 1:5] = True   # a 4-pixel component
+    a[10, 10:13] = True  # a 3-pixel component
+    kept = remove_small_objects_strict(a, 4)
+    assert kept[1, 1:5].all()      # exactly 4 -> kept (area < 4 is dropped)
+    assert not kept[10, 10:13].any()  # 3 -> dropped
+    # nothing is removed below the trivial threshold
+    assert remove_small_objects_strict(a, 1).sum() == a.sum()

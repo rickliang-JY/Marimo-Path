@@ -1514,9 +1514,12 @@ def _(
                     expected_md5=_md5,
                 )
                 tcga_catalog.mark_downloaded(_fid, str(_path))
-                # consumed on the main thread by the status cell (ticker)
+                # consumed on the main thread by the status cell (ticker).
+                # Report only what this thread actually did: opening happens
+                # later on the main thread and can still fail, so the final
+                # message is written there.
                 tcga_dl["open_path"] = str(_path)
-                tcga_dl["msg"] = ("success", f"Downloaded and opened {_path.name}")
+                tcga_dl["msg"] = ("success", f"Downloaded {_path.name}")
             except Exception as _exc:  # network / HTTP error: never crash
                 tcga_dl["msg"] = ("danger", f"Download failed: {_exc}")
             finally:
@@ -1536,6 +1539,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    Path,
     get_tcga_msg,
     get_tcga_records,
     mo,
@@ -1557,12 +1561,27 @@ def _(
     if tcga_dl["open_path"]:
         _p = tcga_dl["open_path"]
         tcga_dl["open_path"] = None
-        open_slide_path(_p, source_kind="tcga")
-        set_tcga_records(
-            tcga_panel.merge_download_state(
-                get_tcga_records(), tcga_catalog.search(limit=100000)
+        _name = Path(_p).name
+        # A verified download can still be unopenable (no backend handles
+        # that SVS variant). Report that honestly instead of letting the
+        # exception break this cell and leave the worker's message claiming
+        # success.
+        try:
+            open_slide_path(_p, source_kind="tcga")
+            tcga_dl["msg"] = ("success", f"Downloaded and opened {_name}")
+        except Exception as _exc:
+            tcga_dl["msg"] = (
+                "danger",
+                f"Downloaded {_name}, but opening it failed: {_exc}",
             )
-        )
+        try:
+            set_tcga_records(
+                tcga_panel.merge_download_state(
+                    get_tcga_records(), tcga_catalog.search(limit=100000)
+                )
+            )
+        except Exception:
+            pass  # table refresh is cosmetic; never break the status cell
     if tcga_dl["msg"]:
         set_tcga_msg(tcga_dl["msg"])
         tcga_dl["msg"] = None

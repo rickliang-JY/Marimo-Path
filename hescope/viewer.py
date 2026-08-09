@@ -159,8 +159,13 @@ def parse_plotly_selection(value: dict | None) -> dict | None:
         }
     lasso = value.get("lasso") or value.get("lasso_points")
     if isinstance(lasso, dict) and "x" in lasso and "y" in lasso:
-        xs, ys = lasso["x"], lasso["y"]
-        pts = [(float(x), float(y)) for x, y in zip(xs, ys)]
+        # same guard as the box branch above: a null/non-numeric coordinate
+        # or a non-iterable axis means "no usable selection", not a crash
+        try:
+            xs, ys = lasso["x"], lasso["y"]
+            pts = [(float(x), float(y)) for x, y in zip(xs, ys)]
+        except (TypeError, ValueError, IndexError):
+            return None
         if len(pts) >= 3:
             return {"kind": "lasso", "points": pts}
     return None

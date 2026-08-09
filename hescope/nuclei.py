@@ -20,8 +20,32 @@ from skimage.color import rgb2hed
 from skimage.feature import peak_local_max
 from skimage.filters import threshold_otsu
 from skimage.measure import label, regionprops
-from skimage.morphology import remove_small_objects
 from skimage.segmentation import watershed
+
+
+def remove_small_objects_strict(binary: "np.ndarray", min_size: int) -> "np.ndarray":
+    """Drop connected components smaller than ``min_size`` pixels.
+
+    Replaces ``skimage.morphology.remove_small_objects(ar, min_size=...)``,
+    whose ``min_size`` parameter is deprecated in scikit-image 0.26 and
+    removed in 2.0. The successor is not a rename: ``max_size`` drops
+    components *smaller than or equal to* the threshold (and defaults to 64),
+    where ``min_size`` dropped only the strictly smaller ones. Doing this
+    explicitly keeps the original strict ``area < min_size`` boundary, so
+    nuclei counts do not shift under us.
+
+    Uses ``ndi.label``'s default cross structure, which is the same
+    4-connectivity as skimage's ``connectivity=1`` default.
+    """
+    if min_size <= 1:
+        return binary
+    lab, n = ndi.label(binary)
+    if n == 0:
+        return binary
+    sizes = np.bincount(lab.ravel())
+    keep = sizes >= min_size
+    keep[0] = False  # background label
+    return keep[lab]
 
 
 @dataclass(frozen=True)
@@ -76,7 +100,7 @@ def detect_nuclei(
         return np.zeros((h, w), dtype=np.int32), _empty_stats()
 
     # Morphology cleanup: drop specks, fill holes.
-    clean = remove_small_objects(binary, min_size=int(min_size_px))
+    clean = remove_small_objects_strict(binary, int(min_size_px))
     clean = ndi.binary_fill_holes(clean)
     if not clean.any():
         return np.zeros((h, w), dtype=np.int32), _empty_stats()

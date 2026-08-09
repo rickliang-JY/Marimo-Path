@@ -184,14 +184,25 @@ class AgentBridge:
         return hist[-1] if hist else None
 
     def history(self) -> list[ROIPayload]:
+        """Every submitted payload, oldest first.
+
+        Unparseable lines are skipped rather than aborting the read: the
+        history file is append-only, so a process killed mid-write leaves a
+        truncated final line, and one bad line must not make the whole
+        history (and `get_latest_selection`) permanently unreadable.
+        """
         if not self._history_path.exists():
             return []
         out: list[ROIPayload] = []
         with open(self._history_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if line:
+                if not line:
+                    continue
+                try:
                     out.append(ROIPayload.from_json(line))
+                except Exception:
+                    continue
         return out
 
 
@@ -201,8 +212,13 @@ def make_marimo_tool(bridge_getter: Callable[[], AgentBridge]) -> Callable[[], s
     code agent."""
 
     def get_latest_selection() -> str:
-        payload = bridge_getter().latest()
-        return payload.to_json() if payload is not None else "NO_SELECTION"
+        # Never raises, like the other five tools: an unreadable history or
+        # a bridge failure returns an "error" JSON object instead.
+        try:
+            payload = bridge_getter().latest()
+            return payload.to_json() if payload is not None else "NO_SELECTION"
+        except Exception as exc:
+            return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
     return get_latest_selection
 
@@ -393,8 +409,13 @@ def make_live_selection_tool(getter: Callable[[], dict | None]) -> Callable[[], 
     """
 
     def get_current_selection() -> str:
-        sel = getter()
-        return json.dumps(sel) if sel is not None else "NO_SELECTION"
+        # Never raises: a malformed figure selection or a mapping failure
+        # returns an "error" JSON object instead of propagating.
+        try:
+            sel = getter()
+            return json.dumps(sel) if sel is not None else "NO_SELECTION"
+        except Exception as exc:
+            return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
     return get_current_selection
 

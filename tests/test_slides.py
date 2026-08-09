@@ -86,3 +86,39 @@ def test_open_slide_falls_back_to_pillow(slide_path):
     src = open_slide(slide_path)
     assert isinstance(src, PillowSource)
     assert src.dimensions == (2000, 1500)
+
+
+# --- R01-6: read_region must slice through _y_idx/_x_idx, not assume [0, 1] -
+
+
+def _fake_tifffile_source(arr, y_idx, x_idx):
+    """A TifffileSource with its axis mapping set and zarr stubbed out, so the
+    region-slicing logic can be exercised without a real pyramidal TIFF."""
+    from hescope.slides import TifffileSource
+
+    src = object.__new__(TifffileSource)
+    src._y_idx, src._x_idx = y_idx, x_idx
+    src.level_downsamples = (1.0,)
+    src._zarr = lambda level: arr  # type: ignore[assignment]
+    return src
+
+
+def test_read_region_respects_axis_order():
+    import numpy as np
+
+    # Interleaved YXS (the common Aperio layout): 4 rows, 6 cols, 3 samples.
+    yxs = np.zeros((4, 6, 3), dtype=np.uint8)
+    for x in range(6):
+        yxs[:, x, :] = x * 10
+    got = np.asarray(_fake_tifffile_source(yxs, 0, 1).read_region((2, 1), 0, (3, 2)))
+    assert got.shape == (2, 3, 3)
+    assert list(got[0, :, 0]) == [20, 30, 40]  # columns x = 2, 3, 4
+
+    # Planar SYX: same picture, samples first. The axis mapping must be
+    # followed, and the result reordered back to (Y, X, C).
+    syx = np.transpose(yxs, (2, 0, 1)).copy()
+    assert syx.shape == (3, 4, 6)
+    got2 = np.asarray(_fake_tifffile_source(syx, 1, 2).read_region((2, 1), 0, (3, 2)))
+    assert got2.shape == (2, 3, 3)
+    assert list(got2[0, :, 0]) == [20, 30, 40]
+    assert (got2 == got).all()
