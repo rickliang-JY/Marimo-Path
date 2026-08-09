@@ -4,73 +4,80 @@
 
 # HE-Scope
 
-**marimo-native + agent-native 的病理 H&E 全切片(WSI)观测与人-agent 闭环分析平台。**
+**A marimo-native, agent-native H&E whole-slide viewer with a human–agent analysis loop.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue.svg)
 ![marimo](https://img.shields.io/badge/marimo-%E2%89%A50.23-8B5FA8.svg)
 ![tests](https://img.shields.io/badge/tests-276%20passed-brightgreen.svg)
 
+**English** · [简体中文](README.zh-CN.md)
+
 </div>
 
-在浏览器里浏览超大切片、圈选 ROI,code agent(经 marimo-pair)实时读取圈选、
-运行分析栈、回写标注——人和 agent 在同一份数据上闭环协作。
+Browse gigapixel pathology slides in the browser, circle a region, and let your
+code agent read that selection live — through [marimo-pair](https://github.com/marimo-team/marimo-pair) —
+run the analysis stack on it, and write annotations back. Human and agent work
+the same data, in the same kernel, in a closed loop.
 
-> **English summary.** HE-Scope is an H&E pathology whole-slide viewer built
-> as a marimo notebook, designed from the ground up for pairing with a code
-> agent: a deep-zoom viewport with zero-click ROI capture, six module-scope
-> agent tools (live selection, submitted payloads, capability/slide
-> introspection, annotation write-back and query), an offline analysis stack
-> (nuclei detection, QC, stain normalization, heatmaps, weakly-supervised
-> training), a pathology foundation-model encoder factory with a strict
-> license policy, TCGA/GDC slide download, an interaction trace table, and
-> GeoJSON export for QuPath interop. Install with `pip install -e .`, launch
-> with `hescope app`, and pair your agent via the marimo-pair skill or the
-> bundled `skills/he-scope` skill. MIT licensed.
+HE-Scope is a single marimo notebook (`app.py`) backed by a plain Python package
+(`hescope/`). Everything the agent touches is module-scope code, so the whole
+analysis stack works headless, with no UI in the way.
 
-## 特性
+## Features
 
-- **统一 viewer**:deep-zoom 视口(金字塔最优层 + resize),缩放/平移/导航缩略图,
-  亮度/对比度/gamma 调节与 H&E 通道视图,ROI 叠加与物理尺寸测量。单图完成所有操作。
-- **ROI 闭环**:框选/套索/圆形圈选直接映射到 level-0 坐标;"Send to code agent"
-  一键导出 patch PNG + 统计(均值 RGB、H&E 解卷积、组织占比)并持久化;
-  agent 读取 → 分析 → 回写标注,全程落库可追溯。
-- **6 个 agent 工具**(notebook 模块级,marimo-pair 直连):
-  `get_current_selection()`(零点击 live 圈选)、`get_latest_selection()`、
-  `get_analysis_capabilities()`、`get_slide_info()`、`annotate_roi()`(回写)、
-  `query_annotations()`。契约详见 [AGENTS.md](AGENTS.md)。
-- **TCGA / GDC 接入**:免 token 检索开放访问 TCGA 切片,本地 SQLite catalog 缓存,
-  100MB–2GB SVS 并行分块下载(断点不续传、完成跳过、md5 校验),tifffile/zarr
-  内存安全读取。
-- **分析栈**(纯模块级代码,无需 UI):细胞核检测、QC 报告、Macenko/Reinhard
-  染色归一化、56 维手工特征、全片网格指标 + heatmap 叠加、弱监督
-  LogisticRegression 训练(标注 → 模型 → 概率 heatmap)。
-- **FM encoder factory**(`hescope.embeddings`):GPFM(MIT,默认)、
-  H-optimus-0(Apache-2.0)、UNI2-h(CC-BY-NC-ND,仅学术对照、永不为默认)、
-  ResNet18(ImageNet)本地回退;注册表零重依赖可导入,权重懒加载。
-- **interactions 轨迹**:圈选查看、ROI 提交、标注回写、工具调用、human-gate
-  决策统一落 `interactions` 表(完全异常安全)。
-- **GeoJSON 导出**:标注一键导出 QuPath 兼容 FeatureCollection。
-- **降级模式**:无数据库 / 无 openslide / 无网络时应用照常运行,降级以
-  callout 呈现,绝不崩 notebook。
+- **One unified viewer.** A deep-zoom viewport (best pyramid level + resize)
+  with pan/zoom, a navigator thumbnail, brightness/contrast/gamma controls,
+  H&E channel views, ROI overlays and physical-size measurement — all on a
+  single figure.
+- **The ROI loop.** Box, lasso and circle selections map straight to level-0
+  coordinates. "Send to code agent" exports a patch PNG plus statistics (mean
+  RGB, H&E deconvolution, tissue fraction) and persists them; the agent reads,
+  analyzes and writes annotations back, all traceable in the database.
+- **Six agent tools**, module-scope in the notebook and reachable directly over
+  marimo-pair: `get_current_selection()` (zero-click live selection),
+  `get_latest_selection()`, `get_analysis_capabilities()`, `get_slide_info()`,
+  `annotate_roi()` (write-back) and `query_annotations()`. Full contract in
+  [AGENTS.md](AGENTS.md).
+- **TCGA / GDC access.** Token-free search over open-access TCGA slides, a local
+  SQLite catalog cache, parallel chunked download of 100 MB–2 GB SVS files (no
+  resume, completed files skipped, md5 verified), and memory-safe reads through
+  tifffile/zarr.
+- **Analysis stack** — plain module-scope code, no UI required: nuclei
+  detection, QC reports, Macenko/Reinhard stain normalization, 56 hand-crafted
+  features, whole-slide metric grids with heatmap overlay, and weakly-supervised
+  LogisticRegression training (annotations → model → probability heatmap).
+- **FM encoder factory** (`hescope.embeddings`): GPFM (MIT, the default),
+  H-optimus-0 (Apache-2.0), UNI2-h (CC-BY-NC-ND, academic comparison only and
+  never the default) and a local ResNet18 (ImageNet) fallback. The registry
+  imports with no heavy dependencies; weights load lazily.
+- **Interaction trace.** Selection views, ROI submissions, label write-backs,
+  tool calls and human-gate decisions all land in the `interactions` table, and
+  recording is fully exception-safe.
+- **GeoJSON export.** One click turns annotations into a QuPath-compatible
+  FeatureCollection.
+- **Graceful degradation.** No database, no OpenSlide, or no network — the app
+  still runs. Every degradation surfaces as a callout instead of crashing the
+  notebook.
 
-## 环境配置
+## Getting started
 
-需要 **Python ≥ 3.10**。推荐用虚拟环境隔离(仓库 `.gitignore` 已忽略 `.venv/`)。
+Requires **Python ≥ 3.10**. A virtual environment is recommended; `.venv/` is
+already gitignored.
 
-### 1. 建虚拟环境并安装
+### 1. Create an environment and install
 
 <details open>
-<summary><b>uv(推荐,最快)</b></summary>
+<summary><b>uv (recommended, fastest)</b></summary>
 
 ```bash
-uv venv --python 3.11                 # 创建 .venv
-uv pip install -e ".[test]"           # 核心依赖 + pytest
+uv venv --python 3.11                 # creates .venv
+uv pip install -e ".[test]"           # core dependencies + pytest
 ```
 </details>
 
 <details>
-<summary><b>标准 venv + pip</b></summary>
+<summary><b>Standard venv + pip</b></summary>
 
 ```bash
 python -m venv .venv
@@ -81,137 +88,150 @@ pip install -e ".[test]"
 ```
 </details>
 
-> 依赖以 **`pyproject.toml`** 为单一事实来源;`requirements.txt` 只是转发到
-> `-e .` 的兼容入口。
+> **`pyproject.toml` is the single source of truth** for dependencies.
+> `requirements.txt` is only a compatibility shim that forwards to `-e .`.
 
-### 2. 可选依赖(按需)
+### 2. Optional extras
 
-| extra | 装什么 | 解锁什么 |
+| Extra | Installs | Unlocks |
 | --- | --- | --- |
-| `.[wsi]` | `openslide-python` | 真实 WSI 格式(.svs / .ndpi / .mrxs)的原生读取 |
-| `.[ml]` | `scikit-learn` `joblib` `torch` `torchvision` `timm` | 弱监督训练 + FM embedding |
-| `.[test]` | `pytest` | 测试套件 |
+| `.[wsi]` | `openslide-python` | Native reads of real WSI formats (.svs / .ndpi / .mrxs) |
+| `.[ml]` | `scikit-learn` `joblib` `torch` `torchvision` `timm` | Weakly-supervised training + FM embeddings |
+| `.[test]` | `pytest` | The test suite |
 
 ```bash
-uv pip install -e ".[wsi,ml,test]"      # 一次装全
+uv pip install -e ".[wsi,ml,test]"      # everything at once
 ```
 
-**只想要训练、不想装 torch**(省 ~1GB):单独装 `scikit-learn joblib` 即可,
-`hescope.ml` 的训练/预测/概率热力图全部可用,只有 FM embedding 走懒加载降级。
+**Want training without torch?** Install just `scikit-learn joblib` and save
+roughly 1 GB. All of `hescope.ml` — training, prediction, probability heatmaps —
+works; only FM embedding falls back through its lazy-loading path.
 
-**Windows 装 OpenSlide**:`openslide-python` 只是绑定,还需要 OpenSlide 本体
-动态库。最省事的方式是同时装官方预编译二进制包,免去手工配 DLL 路径:
+**OpenSlide on Windows.** `openslide-python` is only the binding and still needs
+the OpenSlide native library. The least painful route is to install the official
+prebuilt binaries alongside it, which avoids configuring DLL paths by hand:
 
 ```bash
 uv pip install openslide-bin openslide-python
 ```
 
-> 不装 OpenSlide 也能跑:`hescope.slides` 会自动回退到 tifffile/zarr 后端做
-> 区域级读取(内存安全),只是覆盖的专有格式少一些。
+> You can skip OpenSlide entirely: `hescope.slides` falls back to a
+> tifffile/zarr backend for memory-safe region reads. You simply cover fewer
+> proprietary formats.
 
-### 3. 启动
-
-```bash
-hescope app                 # = marimo edit app.py --no-token
-hescope app --port 2718 --host 127.0.0.1     # 显式指定端口/地址
-```
-
-浏览器打开提示地址(默认 `http://localhost:2718`)后,按 **Cmd/Ctrl + `.`**
-隐藏代码 cell(app view)。首次使用点 **"Generate & open demo slide"**
-生成一张 6000×4000 合成 H&E 演示切片,即可体验全部功能。
-
-> **必须先激活虚拟环境再执行 `hescope app`。** 该命令用 `os.execvp` 把自己
-> 替换成 `marimo`,靠 `PATH` 查找可执行文件;直接调 `.venv/Scripts/hescope.exe`
-> 而不激活环境时,`PATH` 里没有 `marimo`,会报
-> `error: could not launch marimo: [Errno 2] No such file or directory`。
-> 激活后即正常。等价的手动写法:`marimo edit app.py --no-token`。
-
-必须用 `marimo edit`(不能用 `marimo run`):run 模式是只读的,服务端会对
-`/api/sessions` 与 `/execute` 返回 401,marimo-pair 无法附加。app view 只是
-隐藏代码的显示开关,会话仍是 edit session,不影响 agent 连接。
-
-### 4. agent 侧配对(任选其一)
+### 3. Launch
 
 ```bash
-npx skills add marimo-team/marimo-pair   # 通用 marimo 配对 skill
-# 或直接把仓库内置 skill 指给你的 agent:skills/he-scope/SKILL.md
+hescope app                                  # = marimo edit app.py --no-token
+hescope app --port 2718 --host 127.0.0.1     # explicit port / host
 ```
 
-配对后 agent 可直接调用上述 6 个工具,完成
-读圈选 → 分析 → 回写标注 → 训练 的闭环。
+Open the printed address (`http://localhost:2718` by default), then press
+**Cmd/Ctrl + `.`** to hide the code cells (app view). On first use, click
+**"Generate & open demo slide"** to synthesize a 6000×4000 H&E demo slide and
+exercise every feature immediately.
 
-### 5. 无头自检
+> **Activate the virtual environment before running `hescope app`.** The command
+> replaces itself with `marimo` via `os.execvp`, which resolves the executable
+> through `PATH`. Calling `.venv/Scripts/hescope.exe` without activating leaves
+> `marimo` off `PATH` and fails with
+> `error: could not launch marimo: [Errno 2] No such file or directory`.
+> Activating fixes it. The equivalent manual command is
+> `marimo edit app.py --no-token`.
+
+Use `marimo edit`, not `marimo run`. Run mode is read-only — the server returns
+401 for `/api/sessions` and `/execute` — so marimo-pair cannot attach. App view
+is only a display toggle that hides code; the session stays an edit session and
+agent pairing is unaffected.
+
+### 4. Pair your agent
 
 ```bash
-pytest                          # 全部离线运行,无需网络
-python app.py                   # 顺序执行所有 cell 一次(冒烟测试)
-hescope init                    # 建库(默认 data/hescope.db)
-hescope ingest /path/to/slides -r && hescope list   # 批量登记 + 查看
+npx skills add marimo-team/marimo-pair   # the general marimo pairing skill
+# or point your agent at the bundled skill: skills/he-scope/SKILL.md
 ```
 
-### 已验证环境
+Once paired, the agent can call the six tools above and run the full loop: read
+selection → analyze → write annotations back → train.
 
-以下组合已在本仓库实测通过(`pytest` → **276 passed, 1 skipped**;
-跳过的是一条只在 POSIX 下成立的权限位测试):
+### 5. Headless self-check
 
-| 组件 | 版本 |
+```bash
+pytest                          # fully offline, no network needed
+python app.py                   # executes every cell once (smoke test)
+hescope init                    # create the database (default data/hescope.db)
+hescope ingest /path/to/slides -r && hescope list   # bulk register + inspect
+```
+
+### Verified environment
+
+The combination below was tested in this repository — `pytest` reports
+**276 passed, 1 skipped**, the skip being a permission-bit test that only holds
+on POSIX:
+
+| Component | Version |
 | --- | --- |
 | Windows 11 / Python | 3.11 |
 | marimo | 0.23.16 |
 | numpy · scipy · scikit-image | 2.4.6 · 1.17.1 · 0.26.0 |
-| torch(CPU) · torchvision · timm | 2.13.0+cpu · 0.28.0 · 1.0.28 |
+| torch (CPU) · torchvision · timm | 2.13.0+cpu · 0.28.0 · 1.0.28 |
 | scikit-learn · joblib | 1.9.0 · 1.5.3 |
-| openslide-python · openslide 本体 | 1.4.6 · 4.0.1 |
+| openslide-python · OpenSlide library | 1.4.6 · 4.0.1 |
 | zarr · tifffile · SQLAlchemy | 3.1.6 · 2026.3.3 · 2.0.51 |
 
-## 文档地图
+## Documentation
 
-| 文档 | 内容 |
+| Document | Contents |
 | --- | --- |
-| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | 中文使用指南:界面操作、agent 联动、数据持久化、FAQ |
-| [AGENTS.md](AGENTS.md) | code agent 配对契约:启动、硬性规则、工具清单、payload schema、回写示例 |
-| [skills/he-scope/SKILL.md](skills/he-scope/SKILL.md) | Agent Skills 标准格式的仓库内置 skill |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | 实施路线图与已完成阶段 |
-| [docs/STRATEGY.md](docs/STRATEGY.md) | 战略决策:学术目标、开源路线、FM license 红线 |
-| [docs/PAPERS.md](docs/PAPERS.md) | 学术文献综述与写作素材库 |
-| [docs/OVERNIGHT-REPORT.md](docs/OVERNIGHT-REPORT.md) | 最近一次 overnight 研发报告 |
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | User guide: interface, agent pairing, data persistence, FAQ ([中文](docs/USER_GUIDE.zh-CN.md)) |
+| [AGENTS.md](AGENTS.md) | Code-agent contract: startup, hard rules, tool list, payload schemas, write-back examples |
+| [skills/he-scope/SKILL.md](skills/he-scope/SKILL.md) | The bundled skill, in standard Agent Skills format |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Implementation roadmap and completed phases ([中文](docs/ROADMAP.zh-CN.md)) |
+| [docs/STRATEGY.md](docs/STRATEGY.md) | Strategy: academic goals, open-source path, the FM license red line ([中文](docs/STRATEGY.zh-CN.md)) |
+| [docs/PAPERS.md](docs/PAPERS.md) | Literature review and writing material ([中文](docs/PAPERS.zh-CN.md)) |
+| [docs/OVERNIGHT-REPORT.md](docs/OVERNIGHT-REPORT.md) | The most recent overnight development report ([中文](docs/OVERNIGHT-REPORT.zh-CN.md)) |
 
-## 仓库布局
+## Repository layout
 
 ```
-app.py                  marimo notebook 应用(UI 组装;随包分发,hescope app 启动)
-hescope/                Python 包:slides / rois / viewer / agent_bridge / db /
-                        tcga / 分析栈(nuclei, qc, stain, features, grid,
-                        heatmap, ml)/ embeddings(FM factory)/ geojson / cli
-skills/he-scope/        Agent Skills 包(SKILL.md)
-tools/make_demo_slide.py  合成 H&E 演示切片生成器
-tests/                  pytest 套件(离线;GDC API 用真实录制响应 mock)
-docs/                   使用指南、路线图、战略与文献文档
-image/                  README 用图(项目 logo)
-data/                   下载的 TCGA 切片 + catalog + hescope.db(gitignored)
-agent_out/              agent 产物:patch PNG + roi_history.jsonl(gitignored)
+app.py                  The marimo notebook app (UI assembly; shipped with the
+                        package and launched by `hescope app`)
+hescope/                Python package: slides / rois / viewer / agent_bridge /
+                        db / tcga, the analysis stack (nuclei, qc, stain,
+                        features, grid, heatmap, ml), embeddings (FM factory),
+                        geojson, cli
+skills/he-scope/        Agent Skills package (SKILL.md)
+tools/make_demo_slide.py  Synthetic H&E demo-slide generator
+tests/                  pytest suite (offline; the GDC API is mocked with a
+                        real recorded response)
+docs/                   User guide, roadmap, strategy and literature documents
+image/                  README assets (project logo)
+data/                   Downloaded TCGA slides + catalog + hescope.db (gitignored)
+agent_out/              Agent artifacts: patch PNGs + roi_history.jsonl (gitignored)
 ```
 
-## 排障
+## Troubleshooting
 
-| 症状 | 原因 / 处理 |
+| Symptom | Cause / fix |
 | --- | --- |
-| `error: could not launch marimo: [Errno 2] No such file or directory` | 虚拟环境没激活,`PATH` 里找不到 `marimo`。激活后重试,或直接跑 `marimo edit app.py --no-token`。 |
-| agent 连不上 notebook | 三项必查:① 用 `--no-token` 启动;② 浏览器页面保持打开;③ cells 已执行(marimo 0.23 惰性加载,globals 在跑完之前不存在)。 |
-| `get_current_selection()` 返回 `NO_SELECTION` | 图上还没拖框/套索,或 cells 未运行。实时选区用 `get_current_selection()`,已提交历史用 `get_latest_selection()`。 |
-| 打不开 `.svs` / `.ndpi` | 装 `openslide-bin openslide-python`;不装则自动回退 tifffile/zarr,专有格式覆盖较少。 |
-| `train_from_annotations` 报 `ValueError` | 标注不足:至少 2 个不同 label,每个 label 至少 2 个 patch。且需要数据库可用。 |
-| 热力图 / 训练报缺 sklearn | `uv pip install scikit-learn joblib`(无需 torch)。 |
-| TCGA 检索无结果或超时 | GDC 开放数据免 token,但需要外网;并发数可用 `HESCOPE_DL_WORKERS`(1–16,默认 8)调整,设 1 退回单线程。 |
-| 想换数据库 | 设 `HESCOPE_DB_URL`(如 `postgresql://user:pass@host:5432/hescope`),或 `hescope --db <URL> init`。 |
+| `error: could not launch marimo: [Errno 2] No such file or directory` | The virtual environment is not activated, so `marimo` is not on `PATH`. Activate it and retry, or run `marimo edit app.py --no-token` directly. |
+| The agent cannot connect to the notebook | Check three things: ① started with `--no-token`; ② the browser tab is still open; ③ the cells have run — marimo 0.23 loads lazily and the globals do not exist until they do. |
+| `get_current_selection()` returns `NO_SELECTION` | Nothing has been dragged on the figure yet, or the cells have not run. Live selections come from `get_current_selection()`; submitted history from `get_latest_selection()`. |
+| `.svs` / `.ndpi` will not open | Install `openslide-bin openslide-python`. Without it the tifffile/zarr fallback takes over, which covers fewer proprietary formats. |
+| `train_from_annotations` raises `ValueError` | Not enough labeled data: you need at least 2 distinct labels with at least 2 patches each, and a reachable database. |
+| Heatmaps or training complain about missing sklearn | `uv pip install scikit-learn joblib` (no torch required). |
+| TCGA search returns nothing or times out | GDC open data needs no token but does need internet access. Tune concurrency with `HESCOPE_DL_WORKERS` (1–16, default 8); set it to 1 to fall back to a single stream. |
+| Switching databases | Set `HESCOPE_DB_URL` (e.g. `postgresql://user:pass@host:5432/hescope`), or run `hescope --db <URL> init`. |
 
 ## License
 
-本项目本体以 **MIT License** 发布(见 [LICENSE](LICENSE))。
+The project itself is released under the **MIT License** (see [LICENSE](LICENSE)).
 
-病理 foundation model 的**权重各有独立 license**,不受本项目 MIT 覆盖。
-`hescope.embeddings` 注册表强制执行 license 红线:只有可商用且非 gated 的
-编码器才有资格成为默认(当前默认 GPFM,MIT);CC-BY-NC-ND 模型(如 UNI2-h)
-仅登记用于学术对照,**永远不进入默认路径**;H-optimus-0(Apache-2.0)为
-可商用替代;ResNet18(ImageNet)为无 license 顾虑的本地回退。使用任何 FM
-权重前请遵守其各自条款。
+**Pathology foundation-model weights carry their own separate licenses** and are
+not covered by this project's MIT license. The `hescope.embeddings` registry
+enforces a license red line: only commercially usable, non-gated encoders are
+eligible to be the default (currently GPFM, MIT). CC-BY-NC-ND models such as
+UNI2-h are registered for academic comparison only and **never enter the default
+path**. H-optimus-0 (Apache-2.0) is the commercially usable alternative, and
+ResNet18 (ImageNet) is the license-free local fallback. Comply with each set of
+terms before using any FM weights.

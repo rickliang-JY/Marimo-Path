@@ -1,153 +1,185 @@
-# HE-Scope 使用指南
+# HE-Scope user guide
 
-H&E 病理图像观测平台 —— 基于 marimo 的交互式全切片查看器，支持圈选 ROI、
-标注管理、TCGA 公共数据接入，并可与 code agent(Kimi Code / Claude Code /
-Codex / Hermes 等)实时联动。
+**English** · [简体中文](USER_GUIDE.zh-CN.md)
 
----
-
-## 目录
-
-1. [快速开始](#1-快速开始)
-2. [界面分区与操作](#2-界面分区与操作)
-3. [圈选(ROI)与测量](#3-圈选roi与测量)
-4. [标注与数据库](#4-标注与数据库)
-5. [TCGA 公共数据](#5-tcga-公共数据)
-6. [分析功能(统计 / QC / 热力图 / 训练分类器)](#6-分析功能统计--qc--热力图--训练分类器)
-7. [与 code agent 联动](#7-与-code-agent-联动)
-8. [常见问题(FAQ)](#8-常见问题faq)
-9. [数据存储位置一览](#9-数据存储位置一览)
-10. [降级模式](#10-降级模式)
-11. [后续路线](#11-后续路线)
+An H&E pathology image viewing platform — an interactive marimo whole-slide
+viewer with ROI selection, annotation management and TCGA public-data access,
+able to pair live with a code agent (Kimi Code / Claude Code / Codex / Hermes
+and others).
 
 ---
 
-## 1. 快速开始
+## Contents
+
+1. [Quick start](#1-quick-start)
+2. [Layout and controls](#2-layout-and-controls)
+3. [ROIs and measurement](#3-rois-and-measurement)
+4. [Annotations and the database](#4-annotations-and-the-database)
+5. [TCGA public data](#5-tcga-public-data)
+6. [Analysis: statistics / QC / heatmaps / training a classifier](#6-analysis-statistics--qc--heatmaps--training-a-classifier)
+7. [Pairing with a code agent](#7-pairing-with-a-code-agent)
+8. [FAQ](#8-faq)
+9. [Where data lives](#9-where-data-lives)
+10. [Degraded modes](#10-degraded-modes)
+11. [What comes next](#11-what-comes-next)
+
+---
+
+## 1. Quick start
 
 ```bash
 cd project
-pip install -e .        # 依赖以 pyproject.toml 为准;requirements.txt 是兼容入口
-hescope app             # = marimo edit app.py --no-token(开发模式,agent 联动需要)
+pip install -e .        # pyproject.toml is the source of truth; requirements.txt is a shim
+hescope app             # = marimo edit app.py --no-token (edit mode, required for agent pairing)
 
-# 等价的手动写法(在仓库根目录):
-# marimo edit app.py --no-token      # 开发模式
-# marimo run app.py                  # 纯使用模式(不暴露代码编辑器)
+# The equivalent manual commands, from the repository root:
+# marimo edit app.py --no-token      # edit mode
+# marimo run app.py                  # pure viewing mode (no code editor exposed)
 ```
 
-浏览器打开提示的地址(默认 `http://localhost:2718`)。
+Open the printed address in your browser (`http://localhost:2718` by default).
 
-> **注意**:`--no-token` 很重要——这是 marimo-pair 自动发现会话的前提
-> (详见第 7 节)。在可信环境内使用。
+> **Note:** `--no-token` matters — it is what lets marimo-pair discover the
+> session automatically (see section 7). Use it in a trusted environment.
 
-第一次使用时,点击 **"Generate & open demo slide"** 按钮,平台会在本地
-生成一张 6000×4000 的合成 H&E 演示切片(约 15 秒),随后所有功能都可以
-立即体验。
-
----
-
-## 2. 界面分区与操作
-
-应用为"左侧边栏 + 主区"布局。**全应用只有一张主图**:缩放、平移、圈选
-都在同一张图上完成。
-
-### 2.1 左侧边栏(Sidebar)
-自上而下四个区块:
-- **Open slide(加载切片)**:三种方式打开图像——Demo slide 一键生成
-  合成 H&E 演示切片;粘贴本地路径(.svs / .tiff / .ndpi / .png / .jpg)
-  点 Open;或直接上传文件。打开的切片自动登记到数据库(若启用)。
-- **Display(显示调节)**:brightness / contrast / gamma 滑杆、
-  channel view 通道视图(`rgb`、单通道 `r/g/b` 灰度、`hematoxylin` /
-  `eosin` H&E 颜色反卷积通道)、show ROI overlays 开关。仅影响显示,
-  不改数据,也不影响选区坐标。
-- **Navigator(导航器)**:200px 缩略图,红框指示当前视野位置;开启
-  overlay 后标出所有 ROI 的位置。
-- **ROIs(会话 ROI 列表)**:本次会话圈选的 ROI,可按序号删除或清空。
-
-### 2.2 主区顶部:标题行与工具条(Toolbar)
-- **标题行**:应用名、当前切片名/尺寸/mpp/等效放大倍率、数据库状态
-  徽标(已连后端名或 `DB-free`)。
-- **工具条**:所有会话中常用操作集中在这一条紧凑工具条里——
-  鼠标模式(pan 平移 / box select 框选 / lasso 套索)、zoom(downsample)
-  滑杆、Zoom to fit、平移方向按钮组(◀ ▶ ▲ ▼,步进 1/4 视野)、
-  measure mode、box as circle、Add ROI、Send to code agent。
-
-### 2.3 统一视图(Unified viewer)
-主区唯一的一张大图(plotly):
-- **滚轮缩放、拖拽平移**(鼠标模式选 pan,或用图上的模式栏)为纯视觉
-  操作,选区坐标始终是视图像素坐标,不受影响;
-- **圈选**:鼠标模式选 box select 或 lasso 后直接在大图上拖拽(见第 3 节);
-- 已有 ROI 轮廓直接叠加显示在这张图上(红色;标注浏览器选中的为绿色)。
-
-### 2.4 状态行与折叠面板
-大图下方是状态行(视野中心/放大倍率、测量结果、提示信息)。再往下是
-默认折叠的面板:**Annotations**(标注浏览器 + 编辑 + 导出)、
-**Agent console**(agent 提示、提交历史、agent 运行记录)、
-**TCGA browser**(检索/下载,含进度条)。最底部是**agent 联动指南**
-(默认展开,教你怎么把 notebook 连上 code agent)。
-
-> 调节管线顺序:读取区域 → 缩放 → 亮度/对比度/gamma → 通道视图 →
-> 叠加 ROI 轮廓。patch 提取与统计始终基于**未调节**的原图数据,
-> 保证选区坐标与颜色真实。
+On first use, click **"Generate & open demo slide"**. The platform generates a
+6000×4000 synthetic H&E demo slide locally (about 15 seconds), after which every
+feature is immediately available.
 
 ---
 
-## 3. 圈选(ROI)与测量
+## 2. Layout and controls
 
-### 3.1 圈选操作
-1. 在工具条选择鼠标模式:**box select(矩形)** 或 **lasso(套索多边形)**;
-2. 直接在主图上拖拽圈选(可先滚轮放大再圈,坐标自动换算);
-3. (可选)勾选 **box as circle**,框选将被解释为内切圆;
-4. 点击工具条的 **Add ROI** 将其加入左侧边栏的 ROI 列表;列表中可
-   按序号删除或清空。
+The app is a left sidebar plus a main area. **The whole app has exactly one main
+figure**: zooming, panning and selecting all happen on it.
 
-所有坐标自动换算回 level-0(原图全分辨率)像素坐标。
+### 2.1 Sidebar
 
-### 3.2 发送给 code agent
-点击工具条的 **Send to code agent**:
-- 自动提取圈选区域 patch(PNG)、计算统计(均值 RGB、H&E 反卷积强度、
-  组织占比等);
-- 生成结构化 payload,写入历史(`agent_out/roi_history.jsonl`);
-- 数据库启用时同步写入 `rois` 表并记录一次 `agent_runs`;
-- **Agent console** 面板展示给 agent 的提示文本与完整 JSON。
+Four blocks, top to bottom:
 
-### 3.3 测量模式
-勾选工具条的 **measure mode** 后,框选不会被存为 ROI,点 **Add ROI**
-时直接显示物理尺寸:
+- **Open slide.** Three ways to open an image: generate the synthetic H&E demo
+  slide in one click; paste a local path (.svs / .tiff / .ndpi / .png / .jpg)
+  and press Open; or upload a file directly. Opened slides are registered in the
+  database automatically when it is enabled.
+- **Display.** Brightness / contrast / gamma sliders, channel view (`rgb`,
+  single-channel `r`/`g`/`b` grayscale, and the `hematoxylin` / `eosin` H&E
+  color-deconvolution channels), and a "show ROI overlays" toggle. These affect
+  display only — never the data, and never selection coordinates.
+- **Navigator.** A 200px thumbnail with a red box marking the current viewport;
+  with overlays on, it also marks every ROI position.
+- **ROIs.** The ROIs selected in this session; delete by index or clear all.
+
+### 2.2 Title row and toolbar
+
+- **Title row:** app name, current slide name / dimensions / mpp / equivalent
+  magnification, and a database status badge (the connected backend's name, or
+  `DB-free`).
+- **Toolbar:** every frequently used control in one compact strip — mouse mode
+  (pan / box select / lasso), a zoom (downsample) slider, Zoom to fit, pan
+  direction buttons (◀ ▶ ▲ ▼, stepping a quarter viewport), measure mode, box as
+  circle, Add ROI, and Send to code agent.
+
+### 2.3 The unified viewer
+
+The single large plotly figure in the main area:
+
+- **Scroll to zoom, drag to pan** (with mouse mode set to pan, or via the mode
+  bar on the figure). These are purely visual: selection coordinates are always
+  view-pixel coordinates and are unaffected.
+- **Selection:** set mouse mode to box select or lasso, then drag directly on
+  the figure (see section 3).
+- Existing ROI outlines are overlaid on this same figure — red, or green for the
+  one selected in the annotation browser.
+
+### 2.4 Status line and collapsible panels
+
+Below the figure is a status line (viewport center / magnification, measurement
+results, hints). Below that sit panels collapsed by default: **Annotations**
+(browser + editor + export), **Agent console** (agent prompt, submission
+history, agent run records) and **TCGA browser** (search / download, with a
+progress bar). At the very bottom is the **agent pairing guide**, expanded by
+default, which walks you through connecting the notebook to a code agent.
+
+> Adjustment pipeline order: read region → resize → brightness/contrast/gamma →
+> channel view → overlay ROI outlines. Patch extraction and statistics always
+> work from the **unadjusted** source data, so selection coordinates and colors
+> stay faithful.
+
+---
+
+## 3. ROIs and measurement
+
+### 3.1 Making a selection
+
+1. Pick a mouse mode in the toolbar: **box select** or **lasso**.
+2. Drag directly on the main figure — you may zoom in first, and coordinates are
+   converted automatically.
+3. Optionally tick **box as circle**, and the box is interpreted as its inscribed
+   circle.
+4. Click **Add ROI** in the toolbar to add it to the sidebar ROI list, where you
+   can delete by index or clear all.
+
+All coordinates are converted back to level-0 (full-resolution) pixels.
+
+### 3.2 Sending to a code agent
+
+Click **Send to code agent** in the toolbar:
+
+- The selected region's patch is extracted (PNG) and statistics are computed
+  (mean RGB, H&E deconvolution intensities, tissue fraction, ...).
+- A structured payload is generated and appended to the history
+  (`agent_out/roi_history.jsonl`).
+- With the database enabled, the ROI is also written to the `rois` table and one
+  `agent_runs` row is recorded.
+- The **Agent console** panel shows the prompt text presented to the agent along
+  with the full JSON.
+
+### 3.3 Measure mode
+
+With **measure mode** ticked in the toolbar, a box selection is not stored as an
+ROI; pressing **Add ROI** displays physical dimensions instead:
 
 ```
 512.0 x 384.0 px = 128.0 x 96.0 um (diag 160.0 um)
 ```
 
-已知 mpp 时显示微米;未知时仅显示像素。取消勾选即恢复正常圈选。
+Micrometers are shown when mpp is known, pixels only when it is not. Untick to
+return to normal selection.
 
 ---
 
-## 4. 标注与数据库
+## 4. Annotations and the database
 
-### 4.1 标注浏览器(Annotation browser)
-数据库启用时,这里列出当前切片的所有已持久化 ROI(来自 Send to code
-agent)。核心交互:
+### 4.1 Annotation browser
 
-- **点击任意一行 → 视野自动跳转**:居中到该 ROI,缩放至占视野约 80%,
-  并在叠加层中绿色高亮;
-- **编辑**:选中行后修改 label(如 tumor / stroma / necrosis)和 notes,
-  点 Save annotation;
-- **删除**:Delete ROI;
-- **导出**:JSON / CSV 一键下载全部标注。
+With the database enabled, this lists every persisted ROI for the current slide
+(those that came from Send to code agent). The core interactions:
 
-### 4.2 Agent 运行记录(Agent runs)
-每次 Send to code agent 都会记录:工具名、状态、关联 ROI、模型、时间、
-输出摘要。这张表也是 **agent 回写分析结果**的地方(见 7.4)。
+- **Click any row → the viewport jumps.** It centers on that ROI, zooms so the
+  ROI fills about 80% of the view, and highlights it green in the overlay.
+- **Edit:** with a row selected, change its label (tumor / stroma / necrosis,
+  ...) and notes, then press Save annotation.
+- **Delete:** Delete ROI.
+- **Export:** download all annotations as JSON or CSV in one click.
 
-### 4.3 命令行批量入库
+### 4.2 Agent runs
+
+Every Send to code agent records the tool name, status, associated ROI, model,
+timestamp and an output summary. This table is also where **the agent writes
+analysis results back** (see 7.4).
+
+### 4.3 Bulk registration from the command line
+
 ```bash
-python -m hescope.cli init                      # 建表
-python -m hescope.cli ingest /path/to/slides -r # 递归登记整个目录
-python -m hescope.cli list                      # 查看已登记切片
+python -m hescope.cli init                      # create tables
+python -m hescope.cli ingest /path/to/slides -r # register a whole tree recursively
+python -m hescope.cli list                      # list registered slides
 ```
 
-### 4.4 换数据库
-默认 SQLite 零配置。切换 PostgreSQL/MySQL 只需设环境变量:
+### 4.4 Changing databases
+
+SQLite is the zero-configuration default. Switching to PostgreSQL/MySQL is just
+an environment variable:
 
 ```bash
 export HESCOPE_DB_URL="postgresql://user:pass@host:5432/hescope"
@@ -156,236 +188,291 @@ marimo edit app.py --no-token
 
 ---
 
-## 5. TCGA 公共数据
+## 5. TCGA public data
 
-### 5.1 检索
-滚到 TCGA 面板:选择癌种项目(TCGA-BRCA / LUAD / LUSC / COAD / KIRC /
-GBM / OV / ALL),可选填样本类型(如 `Primary Tumor`),点 **Search GDC**。
-结果入本地目录库,表格展示文件名、病例号、样本类型、大小、是否已下载。
+### 5.1 Search
 
-### 5.2 下载与打开
-选中一行 → **Download & Open**:
-- 出现**进度条**,实时显示 `Downloading… 128.4 / 532.0 MB (24%)`;
-- 下载中重复点击会被拦截(提示已在下载);
-- 完成后自动切换进 viewer,一切圈选/标注功能立即可用。
+Scroll to the TCGA panel, choose a cancer project (TCGA-BRCA / LUAD / LUSC /
+COAD / KIRC / GBM / OV / ALL), optionally enter a sample type (such as
+`Primary Tumor`), and press **Search GDC**. Results enter the local catalog and
+the table shows file name, case ID, sample type, size and download state.
 
-> **注意**:多数 TCGA 切片为 100MB–2GB,首次下载需要等待;文件缓存在
-> `data/tcga/`,第二次打开秒载。GDC 开放数据**无需 token**。
+### 5.2 Download and open
 
-**并行下载**:下载默认使用 8 路 HTTP Range 并发请求(GDC 接口原生支持),
-高延迟网络下可显著提速。可用环境变量 `HESCOPE_DL_WORKERS` 调整并发数
-(默认 8,限制在 1–16;设为 1 则退回传统单线程下载)。下载中的临时文件
-名为 `<文件名>.part`,只有在校验(文件大小,以及 GDC 提供的 md5)通过后
-才会改名为正式文件;中断的 `.part` 不会续传,重新下载会从头开始,而
-已完成的文件总是直接跳过。若并发下载中途出错,会自动回退为普通单流
-下载,无需手动干预。
+Select a row → **Download & Open**:
 
----
+- A **progress bar** appears, updating live:
+  `Downloading… 128.4 / 532.0 MB (24%)`.
+- Clicking again mid-download is blocked with a "already downloading" notice.
+- On completion the viewer switches to the new slide, and every selection and
+  annotation feature is immediately available.
 
-## 6. 分析功能(统计 / QC / 热力图 / 训练分类器)
+> **Note:** most TCGA slides are 100 MB–2 GB, so the first download takes a
+> while. Files are cached under `data/tcga/`, and opening them again is instant.
+> GDC open data needs **no token**.
 
-主区下方的折叠面板里有一个 **Analysis** 面板(在 Annotations 旁边),
-提供四类分析能力。所有分析都做**优雅降级**:没圈选、没标注、没模型时
-只会给出提示(callout),不会崩溃。
-
-### 6.1 分析当前选区(Analyze current selection)
-在统一视图上拖一个框/套索,然后点 **Analyze current selection**:
-- 对选区 patch 运行**细胞核检测**(H&E 反卷积 + Otsu + 分水岭分割),
-  输出细胞核数量、密度(个/mm²,切片有 mpp 时)、平均面积、覆盖率;
-- 同时输出 **QC 报告**:组织占比、清晰度(blur score)、是否模糊、亮度;
-- 结果以紧凑表格 + 提示条展示。
-没有实时选区时,自动退回分析**最近一次提交的 ROI**;两者都没有时按钮
-下方会给出提示。
-
-### 6.2 染色归一化开关(Macenko)
-左侧边栏 **Display** 面板新增 **stain normalize (Macenko, display-only)**
-复选框:勾选后视图图像会做 Macenko 染色归一化。参考统计量只在**第一张
-非空白视图图像**上拟合一次并缓存;仅影响**显示**,不改变圈选坐标和
-后续分析读取的原始像素。
-
-### 6.3 热力图(Heatmap)
-Analysis 面板里选择:
-- **metric**:`tissue_fraction`(组织占比)、`nuclei_density`(每 tile
-  细胞核计数,tile 较大时自动降采样控制开销)、以及训练好模型后的
-  `model_prob:<标签>`(该标签的预测概率);
-- **model**:从 `data/models/` 下已训练的模型中选择(训练见 6.4);
-- **tile size**:128 / 256 / 512。
-点 **Run heatmap** 开始全片扫块计算,有进度提示;运行中重复点击会被
-拦截。结果以 viridis 伪彩叠加在切片缩略图上,显示在 Analysis 面板里;
-勾选 **show heatmap on navigator** 后,左侧导航图也会换成热力图叠加版
-(再点取消即恢复)。计算出的网格与参数保留在会话状态中。
-
-### 6.4 训练分类器(Train from annotations)
-输入模型名,点 **Train from annotations**:用标注面板里打过标签的 ROI
-patch 训练一个 StandardScaler + LogisticRegression 弱监督分类器
-(需要每个标签至少 2 个样本、至少 2 个不同标签)。成功后以表格展示
-标签、样本数、交叉验证准确率(cv_accuracy);数据不足时以警告提示具体
-原因。**需要数据库可用**(DB-free 模式下会提示无法训练)。训练完成后
-热力图的 model 下拉框会自动刷新。
-
-### 6.5 agent 可以调什么
-内核全局新增零参数工具 `get_analysis_capabilities()`:返回 JSON,包含
-可用分析列表、`torch_embedding_available`(纯 find_spec 探测,不会触发
-模型权重下载)和已训练模型列表;永不抛异常(失败时返回
-`{"error": ...}`)。分析函数本身在 `hescope` 包顶层直接可用:
-`hescope.detect_nuclei`、`hescope.qc_report`、
-`hescope.macenko_normalize`、`hescope.compute_grid`、
-`hescope.render_heatmap`、`hescope.train_from_annotations`、
-`hescope.predict_patch` 等,agent 可按 `../AGENTS.md` 第 8 节的契约直接调用。
+**Parallel download.** Downloads use 8 concurrent HTTP Range requests by default
+(natively supported by the GDC endpoint), which helps considerably on
+high-latency links. `HESCOPE_DL_WORKERS` tunes the concurrency (default 8,
+clamped to 1–16; set it to 1 to fall back to a traditional single-threaded
+download). The in-progress temporary file is named `<filename>.part` and is only
+renamed to the final file after verification passes — file size, plus the md5
+that GDC provides. An interrupted `.part` is **not** resumed; a fresh download
+starts from the beginning, while already-completed files are always skipped. If
+a concurrent download errors partway through, it automatically falls back to an
+ordinary single-stream download with no manual intervention.
 
 ---
 
-## 7. 与 code agent 联动
+## 6. Analysis: statistics / QC / heatmaps / training a classifier
 
-这是平台的核心特色:**agent 能直接进入运行中的 notebook,读取你圈选的
-内容,并把分析结果写回界面**。
+Among the collapsible panels below the main area is an **Analysis** panel (next
+to Annotations) offering four kinds of analysis. All of them degrade gracefully:
+with no selection, no annotations or no model they show a callout rather than
+crashing.
 
-### 7.1 原理
-官方 skill [marimo-pair](https://github.com/marimo-team/marimo-pair) 让
-code agent 连接正在运行的 marimo 内核,在其中执行 Python。HE-Scope 在
-内核全局中预置了工具函数,agent 按名调用即可。
+### 6.1 Analyze current selection
 
-### 7.2 一次性配置
+Drag a box or lasso on the unified viewer, then press **Analyze current
+selection**:
+
+- **Nuclei detection** runs on the selected patch (H&E deconvolution + Otsu +
+  watershed segmentation), reporting nuclei count, density (per mm² when the
+  slide has mpp), mean area and coverage.
+- A **QC report** is produced at the same time: tissue fraction, blur score,
+  whether it is blurry, and brightness.
+- Results are shown as a compact table plus a status strip.
+
+With no live selection it falls back to analyzing the **most recently submitted
+ROI**; with neither available, a hint appears under the button.
+
+### 6.2 Stain normalization toggle (Macenko)
+
+The sidebar **Display** panel has a **stain normalize (Macenko, display-only)**
+checkbox. When ticked, the view image is Macenko-normalized. The reference
+statistics are fitted once on the **first non-blank view image** and cached. This
+affects **display only** — selection coordinates and the raw pixels read by
+downstream analysis are unchanged.
+
+### 6.3 Heatmaps
+
+In the Analysis panel, choose:
+
+- **metric:** `tissue_fraction`, `nuclei_density` (nuclei count per tile,
+  automatically downsampled for large tiles to control cost), and — once a model
+  is trained — `model_prob:<label>` (predicted probability for that label).
+- **model:** one of the trained models under `data/models/` (training in 6.4).
+- **tile size:** 128 / 256 / 512.
+
+Press **Run heatmap** to scan the whole slide tile by tile, with progress shown;
+clicking again while it runs is blocked. The result is overlaid on the slide
+thumbnail in viridis false color inside the Analysis panel. Tick **show heatmap
+on navigator** and the sidebar navigator switches to the heatmap overlay too
+(untick to restore). The computed grid and its parameters stay in session state.
+
+### 6.4 Train from annotations
+
+Enter a model name and press **Train from annotations**: the labeled ROI patches
+from the annotation panel train a StandardScaler + LogisticRegression
+weakly-supervised classifier (requiring at least 2 samples per label and at
+least 2 distinct labels). On success a table shows labels, sample counts and
+cross-validation accuracy (`cv_accuracy`); with insufficient data a warning
+explains exactly why. **A database is required** — DB-free mode reports that
+training is unavailable. After training, the heatmap model dropdown refreshes
+automatically.
+
+### 6.5 What the agent can call
+
+A zero-argument tool `get_analysis_capabilities()` is added to the kernel
+globals. It returns JSON listing the available analyses,
+`torch_embedding_available` (a pure `find_spec` probe that never triggers a
+weight download) and the trained models. It never raises — on failure it returns
+`{"error": ...}`. The analysis functions themselves are available directly at the
+`hescope` top level: `hescope.detect_nuclei`, `hescope.qc_report`,
+`hescope.macenko_normalize`, `hescope.compute_grid`, `hescope.render_heatmap`,
+`hescope.train_from_annotations`, `hescope.predict_patch` and others. Agents can
+call them directly per the contract in `../AGENTS.md` section 8.
+
+---
+
+## 7. Pairing with a code agent
+
+This is the platform's core feature: **an agent can enter the running notebook,
+read what you have selected, and write analysis results back into the
+interface**.
+
+### 7.1 How it works
+
+The official skill
+[marimo-pair](https://github.com/marimo-team/marimo-pair) lets a code agent
+connect to a running marimo kernel and execute Python inside it. HE-Scope
+pre-installs tool functions in the kernel globals; the agent calls them by name.
+
+### 7.2 One-time setup
+
 ```bash
-# 任何支持 Agent Skills 的 agent(Kimi Code / Codex / ...):
+# Any agent supporting Agent Skills (Kimi Code / Codex / ...):
 npx skills add marimo-team/marimo-pair
 
 # Claude Code:
 /plugin marketplace add marimo-team/marimo-pair
 /plugin install marimo-pair@marimo-pair
 ```
-仓库根目录的 `../AGENTS.md` 是写给 agent 的契约文档——agent 进入项目目录
-后会自动读取,无需你手工教它。
 
-### 7.3 启动与连接
-1. 用 `marimo edit app.py --no-token` 启动,**浏览器保持打开**;
-2. 首次打开时 marimo 是惰性加载(cells 未执行),在界面上点一次
-   Run(或让 agent 自己触发运行);
-3. 在你的 agent 里直接说,例如:
-   > "连接我的 marimo notebook,看看我现在圈选了什么"
+`../AGENTS.md` at the repository root is the contract written for agents — an
+agent entering the project directory reads it automatically, so you do not have
+to teach it by hand.
 
-agent 会发现服务器、连上内核,然后就可以使用了。
+### 7.3 Starting and connecting
 
-> **为什么必须用 `marimo edit` 而不是 `marimo run`?**
-> `marimo run` 是只读模式:官方在服务端禁用了代码执行接口
-> (`/api/sessions` 与 `/execute` 都要求 edit 权限,run 模式返回
-> 401),marimo-pair 原理上无法附加到 run 模式的会话。如果你想要
-> 隐藏所有 cell 的纯净 app 界面:启动后点右下角工具栏的眼睛图标
-> (Toggle app view)或按 Cmd/Ctrl + `.` ——界面与 run 模式完全
-> 一致,但会话仍是 edit session,agent 连接不受影响。本应用所有
-> cell 默认已 `hide_code`,代码区默认不显示。
+1. Start with `marimo edit app.py --no-token` and **keep the browser open**.
+2. On first load marimo is lazy (cells have not executed) — press Run once in
+   the UI, or let the agent trigger the run itself.
+3. Then just say to your agent, for example:
+   > "Connect to my marimo notebook and see what I have selected."
 
-### 7.4 agent 可用的入口(内核全局函数)
+The agent discovers the server, attaches to the kernel, and is ready.
 
-| 入口 | 作用 |
+> **Why `marimo edit` and not `marimo run`?**
+> `marimo run` is read-only: the code-execution endpoints are disabled
+> server-side (`/api/sessions` and `/execute` both require edit permission and
+> return 401 in run mode), so marimo-pair fundamentally cannot attach to a
+> run-mode session. If you want a clean app interface with every cell hidden:
+> after starting, click the eye icon in the bottom-right toolbar (Toggle app
+> view) or press Cmd/Ctrl + `.`. The interface becomes identical to run mode,
+> but the session is still an edit session and agent connection is unaffected.
+> Every cell in this app is `hide_code` by default, so the code area is hidden
+> already.
+
+### 7.4 Entry points available to the agent (kernel globals)
+
+| Entry point | Purpose |
 |---|---|
-| `get_current_selection()` | **零点击**:你在图上拖框/套索的**当前实时选区**(坐标、bbox、缩放),没圈时返回 `NO_SELECTION` |
-| `get_latest_selection()` | 最近一次 **Send to code agent** 提交的完整 payload(JSON:坐标、patch 路径、H&E 统计) |
-| `agent_bridge` | 提交历史(`agent_bridge.history()`)、patch 文件目录 |
-| `db.roi_repo` / `db.run_repo` | (数据库启用时)标注与 agent 运行记录 |
-| `open_slide(path)` | 让 agent 自己打开一张切片 |
-| `get_analysis_capabilities()` | 可用分析能力 + 已训练模型的 JSON(见 6.5;永不抛异常) |
+| `get_current_selection()` | **Zero-click**: the box/lasso you are dragging on the figure right now (coordinates, bbox, zoom). Returns `NO_SELECTION` when nothing is selected. |
+| `get_latest_selection()` | The complete payload from the most recent **Send to code agent** (JSON: coordinates, patch path, H&E statistics). |
+| `agent_bridge` | Submission history (`agent_bridge.history()`) and the patch file directory. |
+| `db.roi_repo` / `db.run_repo` | Annotations and agent run records (when the database is enabled). |
+| `open_slide(path)` | Lets the agent open a slide itself. |
+| `get_analysis_capabilities()` | JSON of available analysis capabilities plus trained models (see 6.5; never raises). |
 
-**典型闭环**:
-1. 你在图上圈一块可疑区域(不用点任何按钮);
-2. 对 agent 说:"分析我圈的地方"→ agent 调 `get_current_selection()`,
-   拿到坐标和 patch 图像进行分析;
-3. agent 通过 `db.run_repo.record(...)` 把结论写回;
-4. 你在 **Agent runs** 面板直接看到 agent 的分析结果。
+**The typical loop:**
 
-### 7.5 一个真实示例
+1. You circle a suspicious region on the figure — no button press needed.
+2. You tell the agent "analyze what I circled" → it calls
+   `get_current_selection()`, gets the coordinates and the patch image, and
+   analyzes them.
+3. The agent writes its conclusion back via `db.run_repo.record(...)`.
+4. You see the agent's analysis directly in the **Agent runs** panel.
+
+### 7.5 A real example
+
 ```
-你:  (在图上拖一个框)
-你:  "这块区域是什么?对比一下我标注过的 tumor 区域"
-agent: [调用 get_current_selection() → 拿到 bbox + patch]
-       [调用 db.roi_repo.search(label="tumor") → 拿到历史标注]
-       [分析对比,调用 db.run_repo.record(...) 写回结论]
-你:  (在 Agent runs 面板看到结论;在标注浏览器点选跳转复查)
+You:    (drag a box on the figure)
+You:    "What is this region? Compare it with the tumor areas I annotated."
+Agent:  [calls get_current_selection() -> gets bbox + patch]
+        [calls db.roi_repo.search(label="tumor") -> gets past annotations]
+        [analyzes, compares, calls db.run_repo.record(...) to write back]
+You:    (read the conclusion in the Agent runs panel; click through in the
+         annotation browser to re-inspect)
 ```
 
 ---
 
-## 8. 常见问题(FAQ)
+## 8. FAQ
 
-### 换了一个 agent,之前的记录还在吗?
-**在。** 所有持久数据都存在平台侧,与用哪个 agent 无关:
+### I switched agents — are my previous records still there?
 
-| 数据 | 位置 | 换 agent 后 |
+**Yes.** All persistent data lives on the platform side, independent of which
+agent you use:
+
+| Data | Location | After switching agents |
 |---|---|---|
-| 标注(ROI、label、notes) | `data/hescope.db` 的 `rois` 表 | 完整保留 |
-| agent 运行记录 | `data/hescope.db` 的 `agent_runs` 表(含 `model` 字段,可区分是哪个 agent 写的) | 完整保留 |
-| 圈选 patch 图像 | `agent_out/patches/*.png` | 完整保留 |
-| 提交历史 | `agent_out/roi_history.jsonl` | 完整保留 |
-| TCGA 目录与已下载切片 | `data/tcga/` | 完整保留 |
+| Annotations (ROI, label, notes) | The `rois` table in `data/hescope.db` | Fully retained |
+| Agent run records | The `agent_runs` table in `data/hescope.db` (its `model` field distinguishes which agent wrote it) | Fully retained |
+| Selected patch images | `agent_out/patches/*.png` | Fully retained |
+| Submission history | `agent_out/roi_history.jsonl` | Fully retained |
+| TCGA catalog and downloaded slides | `data/tcga/` | Fully retained |
 
-无论 Kimi Code、Claude Code、Codex 还是 Hermes,连上同一个运行中的
-notebook(或同一项目目录),看到的都是同一份记录。
+Whether it is Kimi Code, Claude Code, Codex or Hermes, connecting to the same
+running notebook (or the same project directory) shows the same records.
 
-**会丢的只有会话内临时状态**:未点 Send 的实时选区、未提交的 ROI 列表
-——它们随 notebook 重启消失。所以重要的圈选记得 **Send to code agent**
-落盘。
+**Only in-session transient state is lost**: a live selection you never sent, and
+an ROI list you never submitted — both disappear when the notebook restarts. So
+remember to **Send to code agent** for selections that matter.
 
-### 换电脑/多人共享呢?
-复制整个项目目录(重点是 `data/` 和 `agent_out/`)即可完整迁移;
-或者把 `HESCOPE_DB_URL` 指向一个 PostgreSQL 服务器,多人多端共享同一
-标注库(切片文件仍需共享存储)。
+### What about a different machine, or sharing with others?
 
-### agent 说连不上 / 找不到我的 notebook?
-检查三点:① 是否用 `--no-token` 启动;② 浏览器页面是否开着;
-③ cells 是否已运行(页面上有输出才算)。agent 端确认装了 marimo-pair
-skill。
+Copy the whole project directory (`data/` and `agent_out/` are the important
+parts) for a complete migration. Alternatively, point `HESCOPE_DB_URL` at a
+PostgreSQL server so several people on several machines share one annotation
+store — slide files still need shared storage.
 
-### agent 调 `get_current_selection()` 返回 NO_SELECTION?
-两种可能:你确实还没在图上圈(先拖个框);或者 cells 尚未运行。
-注意:**实时选区**用 `get_current_selection()`,**已提交的历史**用
-`get_latest_selection()`,两者不同。
+### The agent says it cannot connect / cannot find my notebook
 
-### 没有网络/没有 openslide/数据库坏了还能用吗?
-都能。见下一节降级模式。
+Check three things: ① did you start with `--no-token`; ② is the browser page
+still open; ③ have the cells run (there must be output on the page). On the agent
+side, confirm the marimo-pair skill is installed.
+
+### The agent calls `get_current_selection()` and gets NO_SELECTION
+
+Two possibilities: you genuinely have not selected anything yet (drag a box
+first), or the cells have not run. Note the distinction: **live selection** is
+`get_current_selection()`, **submitted history** is `get_latest_selection()`.
+
+### Does it work with no network / no OpenSlide / a broken database?
+
+All of them work. See the next section.
 
 ---
 
-## 9. 数据存储位置一览
+## 9. Where data lives
 
 ```
 project/
 ├── data/
-│   ├── hescope.db            # 主库:slides / rois / agent_runs(SQLite 默认)
+│   ├── hescope.db            # main store: slides / rois / agent_runs (SQLite by default)
 │   └── tcga/
-│       ├── catalog.db        # TCGA 检索目录缓存
-│       └── <file_id>/*.svs   # 已下载的切片
+│       ├── catalog.db        # TCGA search catalog cache
+│       └── <file_id>/*.svs   # downloaded slides
 ├── agent_out/
-│   ├── roi_history.jsonl     # 每次 Send 的完整 payload(追加写)
-│   └── patches/*.png         # 圈选区域图像
-└── assets/demo_he.png        # 演示切片(可重新生成)
+│   ├── roi_history.jsonl     # the full payload of every Send (append-only)
+│   └── patches/*.png         # selected region images
+└── assets/demo_he.png        # the demo slide (regenerable)
 ```
 
-`data/` 与 `agent_out/` 均被 git 忽略,删除即清空全部记录。
+`data/` and `agent_out/` are both gitignored; deleting them wipes every record.
 
 ---
 
-## 10. 降级模式
+## 10. Degraded modes
 
-平台按"任何环境都能跑"设计,三个维度独立降级:
+The platform is designed to run in any environment, degrading independently
+along three axes:
 
-| 缺失 | 表现 | 仍可用 |
+| Missing | What you see | Still available |
 |---|---|---|
-| 数据库不可达 | 顶部黄色提示条;标注/agent runs 面板显示不可用 | 看图、圈选、测量、TCGA、jsonl 桥接 |
-| 无 openslide | 自动改用 tifffile 后端读 SVS(区域级读取,内存安全) | 全部功能 |
-| 无网络 | TCGA 检索不可用(提示条) | 本地切片全部功能 |
+| Database unreachable | A yellow notice at the top; the annotation and agent-runs panels report unavailable | Viewing, selection, measurement, TCGA, the jsonl bridge |
+| No OpenSlide | Automatically reads SVS through the tifffile backend (region-level reads, memory-safe) | Everything |
+| No network | TCGA search unavailable (notice shown) | Every feature for local slides |
 
 ---
 
-## 11. 后续路线
+## 11. What comes next
 
-规划中、尚未实现的增强(按优先级):
-- **BigQuery 队列筛选**:接 ISB-CGC 公共数据集,按临床/分子条件
-  (分期、分型、表达量)筛选 TCGA 切片队列,替代按项目翻文件;
-- **云存储后端**:GCS/S3 上的切片直读与标注库托管;
-- **更多 agent 入口**:MCP server 封装、批量分析流水线;
-- **多用户协作**:PostgreSQL + 共享存储的标注协同。
+Planned but not yet implemented, in priority order:
+
+- **BigQuery cohort filtering:** connect ISB-CGC public datasets to filter TCGA
+  slide cohorts by clinical/molecular criteria (stage, subtype, expression),
+  replacing per-project file browsing.
+- **Cloud storage backends:** direct reads of slides on GCS/S3 and a hosted
+  annotation store.
+- **More agent entry points:** an MCP server wrapper and batch analysis
+  pipelines.
+- **Multi-user collaboration:** PostgreSQL plus shared storage for collaborative
+  annotation.
 
 ---
 
-*技术细节参见 `../README.md`;agent 接入契约参见 `../AGENTS.md`;
-本指南对应平台版本见 git 仓库 master 分支。*
+*Technical detail is in `../README.md`; the agent contract is in
+`../AGENTS.md`. The platform version this guide describes is the master branch
+of the git repository.*

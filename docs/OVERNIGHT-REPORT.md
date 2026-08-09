@@ -1,39 +1,97 @@
-# HE-Scope 过夜任务成果报告（2026-08-08 夜 → 08-09 晨）
+# HE-Scope overnight task report (night of 2026-08-08 → morning of 08-09)
 
-## 任务回顾
-用户三大指令：①调研 pathology agent 论文现状；②基于论文定下一步方向（学术 benchmark + 开源六维度迭代）；③LoopX 结合或自研 loop engineering skill 的决策。要求：先整体计划，再按计划修改。
+**English** · [简体中文](OVERNIGHT-REPORT.zh-CN.md)
 
-## 执行过程
-- **Stage 1**：6 路并行研究蜂群（病理 agent / 基础模型 / benchmark / 人机协作 / 开源生态 / LoopX 精读），60+ 次有效搜索 + 仓库精读，原始报告在 `/mnt/agents/output/research/r1~r6-*.md`；
-- **Stage 2**：两份综合文档——`PAPERS.md`（550 行文献综述，146 处引用）、`STRATEGY.md`（304 行战略决策，含里程碑表）；
-- **Stage 3**：`ROADMAP.md` §6 更新为最终决策；
-- **Stage 4**：两路并行实施（worktree 隔离）+ 合并；
-- **Stage 5**：真实 marimo-pair 内核 live 验证 A–E 全 PASS；**246 tests 全绿**（208 → 246）。
+## Task recap
 
-## 核心研究结论（速览）
-1. **领域**：2025–2026 病理 agent 爆发（PathChat 系、SPARK、PathFinder 等）；PathAgentBench 关键负结果——纯 agent 证据定位 mIoU<0.09、命中率 2%，「找证据」是最大短板，恰是我们人-agent 闭环的切入点；
-2. **novelty 定位**：「首个以标注数据库为中心的人-agent 闭环 WSI 分析系统」；最大威胁 TissueLab（必须做会话反馈入库消融对照）；
-3. **学术三目标**：A=PathAgentBench human-in-the-loop 变体（k 次人圈 ROI 曲线）；B=「AUROC vs 人类交互预算」标注效率协议（独家数据优势）；C=eva+HEST parity 背书；
-4. **FM 选型**：GPFM（MIT）默认 / UNI2-h 仅学术 / H-optimus-0（Apache）商用；CC-BY-NC-ND 红线；
-5. **LoopX**：不接为依赖（双事实源冲突、过年轻）；自研 DB 薄 loop 层 + he-scope-loop SKILL.md，6 周跟踪其 provider RFC 复评；
-6. **开源空位**：「marimo-native + agent-native」无人占据；Trident(.h5)/QuPath(GeoJSON) 共生策略；JOSS 论文绑引用。
+Three instructions from the user: ① survey the current state of pathology agent
+papers; ② decide the next direction based on that literature (an academic
+benchmark plus six-dimension open-source iteration); ③ decide whether to adopt
+LoopX or build our own loop-engineering skill. The requirement was to produce an
+overall plan first, then make changes according to it.
 
-## 已实施修改（master，git log 可查）
-- **hescope/embeddings.py**：FM encoder factory——GPFM/UNI2-h/H-optimus-0/resnet18 注册表（license/gated 元数据）、默认红线（nc-nd 永不进默认）、懒加载（import 零 torch 零网络）、`embed_tiles`；
-- **hescope/ml.py**：`HESCOPE_EMBEDDER` 可选 embedding backend（训练/heatmap/predict 全路径），失败自动回退 56 维 + warning，ModelInfo 记录 encoder/dim（向后兼容）；
-- **hescope/db.py**：`interactions` 交互轨迹表 v1（6 种 kind，数据飞轮/自动化偏倚研究奠基）+ `InteractionRepo`；
-- **三个新 agent 工具**（live 验证通过）：`annotate_roi`（回写标注）、`query_annotations`（查标注库）、`get_slide_info()`；全部记录 interactions；
-- **hescope/geojson.py**：QuPath 兼容 GeoJSON 导出（classification 从 label 映射）；
-- **skills/he-scope/SKILL.md**：仓库内置 agent skill（Trident 模式）：pair 步骤、6 工具 schema、读圈选→分析→回写→训练工作流、loop 模式指引；
-- AGENTS.md / app.py 工具说明同步更新。
+## Execution
 
-## 待用户决策项（按 STRATEGY.md 里程碑表）
-1. **W3–4 是否开工**：GPFM 真机加载验证（需 GPU——走 molab spike 还是等本地环境？）+ 学术目标 A 的 k=0 基线复现（需确认 PathAgentBench GitHub 数据是否已放出）；
-2. **molab 链路 spike** 排期（HE-Scope 上 molab + 本地 agent pair 连通）；
-3. **loop 薄层**（campaigns/gates 表 + CLI + he-scope-loop skill）开工时机；
-4. 是否推 GitHub 开源（uvx 首跑体验 + pooch 示例数据是 P0 前置项）。
+- **Stage 1** — a six-way parallel research swarm (pathology agents / foundation
+  models / benchmarks / human-AI collaboration / open-source ecosystem / a close
+  reading of LoopX), 60+ effective searches plus close reading of the
+  repository. Raw reports are in `/mnt/agents/output/research/r1~r6-*.md`.
+- **Stage 2** — two synthesis documents: `PAPERS.md` (550 lines of literature
+  review, 146 citations) and `STRATEGY.md` (304 lines of strategic decisions,
+  including a milestone table).
+- **Stage 3** — `ROADMAP.md` §6 updated with the final decision.
+- **Stage 4** — two-way parallel implementation (isolated in worktrees), then
+  merge.
+- **Stage 5** — live validation against a real marimo-pair kernel, A–E all PASS;
+  **246 tests green** (up from 208).
 
-## 已知限制
-- GPFM 真实加载路径未经真机验证（timm hf-hub，mock 测试已覆盖代码路径）；
-- send 工具的设计行为：rois 列表非空时重发最后一个 ROI，live 选区回退仅在空列表时触发（文档化行为）；
-- 研究备忘：生存预测/TMB/分割主攻/PathVQA 已明确排除（理由见 STRATEGY.md §1）。
+## Core research conclusions at a glance
+
+1. **The field.** Pathology agents exploded across 2025–2026 (the PathChat
+   family, SPARK, PathFinder and others). PathAgentBench carries a key negative
+   result: pure agents locate evidence at mIoU < 0.09 with a 2% hit rate.
+   "Finding the evidence" is the biggest weakness, and that is exactly where our
+   human–agent loop enters.
+2. **Novelty positioning.** "The first annotation-database-centric human–agent
+   closed-loop WSI analysis system." The largest threat is TissueLab, so an
+   ablation contrasting session feedback written back to the database is
+   mandatory.
+3. **Three academic goals.** A = a human-in-the-loop variant of PathAgentBench
+   (a curve over k human-circled ROIs); B = an annotation-efficiency protocol,
+   "AUROC vs human interaction budget", where we hold an exclusive data
+   advantage; C = eva + HEST parity as an endorsement.
+4. **FM selection.** GPFM (MIT) as default, UNI2-h for academic use only,
+   H-optimus-0 (Apache) for commercial use; CC-BY-NC-ND is the red line.
+5. **LoopX.** Not adopted as a dependency — it would create two conflicting
+   sources of truth and it is too young. Instead: our own thin DB-backed loop
+   layer plus a `he-scope-loop` SKILL.md, with a re-evaluation of their provider
+   RFC tracked at six weeks.
+6. **Open-source gap.** "marimo-native + agent-native" is unoccupied. The
+   strategy is symbiosis with Trident (.h5) and QuPath (GeoJSON), with a JOSS
+   paper to anchor citations.
+
+## Changes already implemented (on master, visible in `git log`)
+
+- **hescope/embeddings.py** — the FM encoder factory: a
+  GPFM / UNI2-h / H-optimus-0 / resnet18 registry with license and gated
+  metadata, the default red line (nc-nd never becomes the default), lazy loading
+  (importing pulls in neither torch nor the network), and `embed_tiles`.
+- **hescope/ml.py** — `HESCOPE_EMBEDDER` as an optional embedding backend across
+  the whole path (training / heatmap / predict), automatic fallback to the
+  56-dimension features with a warning on failure, and `ModelInfo` recording
+  encoder and dim (backward compatible).
+- **hescope/db.py** — the `interactions` trace table v1 (6 kinds, laying the
+  groundwork for the data flywheel and automation-bias research) plus
+  `InteractionRepo`.
+- **Three new agent tools** (validated live): `annotate_roi` (write annotations
+  back), `query_annotations` (query the annotation store) and
+  `get_slide_info()`. All of them record interactions.
+- **hescope/geojson.py** — QuPath-compatible GeoJSON export (classification
+  mapped from label).
+- **skills/he-scope/SKILL.md** — the repo-local agent skill (Trident pattern):
+  pairing steps, schemas for the 6 tools, the read-selection → analyze →
+  write-back → train workflow, and loop-mode guidance.
+- AGENTS.md and the app.py tool documentation updated to match.
+
+## Open decisions for the user (per the milestone table in STRATEGY.md)
+
+1. **Whether to start W3–4**: real-hardware validation of GPFM loading (needs a
+   GPU — via a molab spike, or wait for a local environment?) plus reproducing
+   the k=0 baseline for academic goal A (needs confirmation that the
+   PathAgentBench GitHub data has been released).
+2. Scheduling the **molab link spike** (HE-Scope on molab paired with a local
+   agent).
+3. When to start the **thin loop layer** (campaigns/gates tables + CLI +
+   `he-scope-loop` skill).
+4. Whether to open-source on GitHub — a smooth `uvx` first run and pooch sample
+   data are P0 prerequisites.
+
+## Known limitations
+
+- The real GPFM loading path has not been validated on real hardware (timm
+  hf-hub; mock tests cover the code path).
+- Designed behavior of the send tool: when the ROI list is non-empty it resends
+  the last ROI, and the live-selection fallback only triggers on an empty list.
+  This is documented behavior.
+- Research note: survival prediction, TMB, segmentation as a main thrust and
+  PathVQA have all been explicitly ruled out (rationale in STRATEGY.md §1).

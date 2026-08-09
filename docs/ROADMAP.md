@@ -1,125 +1,220 @@
-# HE-Scope 战略路线存档
+# HE-Scope strategic roadmap archive
 
-> 存档日期：2026-08-08
-> 状态：战略讨论结论汇总，尚未开工。下一步是先整体检验现有能力，再决定从哪一项开始。
+**English** · [简体中文](ROADMAP.zh-CN.md)
 
----
-
-## 1. 背景：HE-Scope 现状
-
-marimo 病理 H&E 全切片图像观测平台（`/mnt/agents/output/project`，master @ b802f24，208 tests 全绿）：
-
-- 统一 plotly viewer（缩放/平移/圈选一体）+ sidebar + 单 Navigator 缩略图；
-- ROI 闭环：圈选 → level-0 坐标映射 → 原图重裁 patch（非截图）→ DB 持久化 → agent payload；
-- agent 桥（marimo-pair，需 `marimo edit` 模式）：`get_current_selection()`（零点击）、`get_latest_selection()`、`get_analysis_capabilities()`；
-- TCGA/GDC 接入：搜索、并行分块下载（断点续传、md5 校验）、catalog；
-- 分析栈（借鉴 slideflow）：Macenko/Reinhard 染色归一、细胞核检测、QC、56 维特征、可选 ResNet18 embedding、heatmap、LogisticRegression 弱监督训练；
-- DB：SQLAlchemy（slides / rois / agent_runs），可降级 DB-free 模式。
+> Archived: 2026-08-08
+> Status: a summary of strategy-discussion conclusions; work has not started.
+> The next step is to review existing capabilities as a whole, then decide which
+> item to begin with.
 
 ---
 
-## 2. 核心战略判断
+## 1. Background: where HE-Scope stands
 
-**不打静态基础模型榜。** 2025–2026 病理基础模型榜（CONCH、Virchow2、Prov-GigaPath、UNI2-h、H-optimus-1 等）由 10 万~310 万张切片、6 亿~11 亿参数的模型霸榜，胜负手是数据和算力，我们没有入场券，也不应自研冲榜。
+A marimo H&E whole-slide image viewing platform
+(`/mnt/agents/output/project`, master @ b802f24, 208 tests green):
 
-**HE-Scope 的护城河是「人-agent-数据库闭环」**：人圈 ROI → agent 读坐标+原图 patch → 分析写回 DB → 标注变训练数据。这个 loop 是静态 benchmark 测不出的资产。
-
-**借势而非自研**：CONCH/UNI 等模型开放了 tile embedding（HuggingFace），直接接入即可把感知端从 ResNet18 升到准 SOTA 水准，零训练成本。
-
----
-
-## 3. 三阶段路线
-
-### Phase A — 感知升级（性价比最高，建议最先做）
-- 接入 UNI 或 CONCH tile embedding 作为 backend，替换/并存现有 ResNet18；
-- 现有 56 维特征 + LogisticRegression 训练管线、heatmap 管线全部复用，只换特征提取器；
-- 预期：few-shot 标注训练从"能演示"升到线性探测 AUROC 0.95+ 档次；
-- **GPU 来源：molab（见 §5），本地无 GPU 不再是阻塞项。**
-
-### Phase B — agent loop 正式化 + LoopX 接入（见 §4）
-- 工具补全：agent 可写回标注、触发训练、查 DB 历史、请求人工复核；
-- 每次交互（人圈选→agent 分析→人纠正→再训练）作为 trajectory 落库 = 主动学习完整日志；
-- 定义 3~5 个标准任务 schema（如「TCGA-BRCA 上找肿瘤区并出密度热图」「ROI 分类置信度低于阈值请求人工」）；
-- 「标注→训练→评估→重标注」循环建模为 LoopX objective。
-
-### Phase C — 打"我们能赢"的 benchmark
-不打静态榜（必输），打交互式/Agentic 评测（空白区）：
-- **标注效率曲线**：达到同等 AUROC 所需人工点击数，有 loop vs 无 loop 对比（主动学习标准度量，系统天然产生此数据）；
-- **Agent 任务成功率**：TCGA 有 ground truth 的任务上，人+agent 协作 vs 纯 agent vs 纯模型三方对比；
-- 静态榜仅用于证明 parity（CONCH embedding 跑标准任务，证明感知端不拖后腿）；
-- 最终产出目标：human-agent collaborative pathology analysis 方向的系统论文 + 可持续积累的数据飞轮平台。
+- A unified plotly viewer (zoom / pan / selection in one) plus a sidebar and a
+  single navigator thumbnail.
+- The ROI loop: selection → level-0 coordinate mapping → patch re-cropped from
+  the source image (not a screenshot) → DB persistence → agent payload.
+- The agent bridge (marimo-pair, requires `marimo edit` mode):
+  `get_current_selection()` (zero-click), `get_latest_selection()`,
+  `get_analysis_capabilities()`.
+- TCGA/GDC access: search, parallel chunked download (resumable, md5 verified),
+  catalog.
+- The analysis stack (informed by slideflow): Macenko/Reinhard stain
+  normalization, nuclei detection, QC, 56-dimension features, optional ResNet18
+  embedding, heatmaps, weakly-supervised LogisticRegression training.
+- DB: SQLAlchemy (slides / rois / agent_runs), degrading to a DB-free mode.
 
 ---
 
-## 4. LoopX 评估结论
+## 2. Core strategic judgment
 
-仓库：https://github.com/huangruiteng/loopx
+**Do not compete on static foundation-model leaderboards.** The 2025–2026
+pathology foundation-model boards (CONCH, Virchow2, Prov-GigaPath, UNI2-h,
+H-optimus-1 and others) are dominated by models trained on 100k–3.1M slides with
+0.6–1.1B parameters. The deciding factors are data and compute; we have no
+ticket to that game and should not build our own contender.
 
-**是什么**：长程 agent 工作的轻量状态内核 + 本地优先控制面。durable objective、gates、可执行 todos、evidence log、quota 感知自动唤醒；agent 无头（peer 模式），跨 Codex / Claude Code / Cursor 保持状态连续。不管"活怎么干"，只管"loop 的治理"。
+**HE-Scope's moat is the human–agent–database loop**: a human circles an ROI →
+the agent reads the coordinates and the source-image patch → analysis is written
+back to the DB → annotations become training data. That loop is an asset no
+static benchmark can measure.
 
-**与 HE-Scope 的映射**：
+**Borrow rather than build.** CONCH, UNI and similar models publish tile
+embeddings on HuggingFace. Wiring them in lifts the perception side from
+ResNet18 to near-SOTA at zero training cost.
 
-| LoopX 概念 | HE-Scope 场景对应物 |
+---
+
+## 3. Three-phase route
+
+### Phase A — perception upgrade (best value; recommended first)
+
+- Adopt UNI or CONCH tile embeddings as a backend, replacing or coexisting with
+  the current ResNet18.
+- The existing 56-dimension feature and LogisticRegression training pipeline and
+  the heatmap pipeline are reused wholesale; only the feature extractor changes.
+- Expected: few-shot annotation training moves from "demonstrable" to the
+  linear-probe AUROC 0.95+ tier.
+- **GPU source: molab (see §5). No local GPU is no longer a blocker.**
+
+### Phase B — formalize the agent loop + LoopX integration (see §4)
+
+- Complete the tool set: the agent can write annotations back, trigger training,
+  query DB history and request human review.
+- Every interaction (human selects → agent analyzes → human corrects → retrain)
+  lands as a trajectory in the database — a complete active-learning log.
+- Define 3–5 standard task schemas (e.g. "find tumor regions on TCGA-BRCA and
+  produce a density heatmap", "request human review when ROI classification
+  confidence falls below a threshold").
+- Model the annotate → train → evaluate → re-annotate cycle as a LoopX
+  objective.
+
+### Phase C — compete on a benchmark we can win
+
+Not the static boards (a guaranteed loss) but interactive / agentic evaluation,
+which is open ground:
+
+- **Annotation-efficiency curves**: human clicks required to reach a given
+  AUROC, with loop versus without. This is the standard active-learning metric,
+  and the system produces the data naturally.
+- **Agent task success rate**: on TCGA tasks that have ground truth, a
+  three-way comparison of human+agent, agent alone, and model alone.
+- Static boards are used only to demonstrate parity — run CONCH embeddings on
+  standard tasks to show the perception side is not holding us back.
+- Final deliverable: a systems paper on human–agent collaborative pathology
+  analysis, plus a platform whose data flywheel keeps accumulating.
+
+---
+
+## 4. LoopX evaluation
+
+Repository: https://github.com/huangruiteng/loopx
+
+**What it is.** A lightweight state kernel and local-first control plane for
+long-horizon agent work: durable objectives, gates, executable todos, an
+evidence log and quota-aware auto-wake. Agents are headless (peer mode), keeping
+state continuous across Codex / Claude Code / Cursor. It does not care how the
+work gets done, only how the loop is governed.
+
+**Mapping onto HE-Scope:**
+
+| LoopX concept | HE-Scope counterpart |
 |---|---|
-| durable objective | 跨天的标注-训练 campaign（如「20 张 TCGA-BRCA 标 200 个 ROI，训出 AUROC≥0.9」） |
-| gates（人类判断） | 病理医生复核标注后才允许训练；结果不达标不晋级 |
-| executable todos | 标注批次、下载批次、训练、评估、重训练 |
-| evidence log | DB 的 agent_runs + ROI 标注历史 + patch 路径（已有一半） |
-| quota-aware auto-wake | 主动学习中"不确定度最高的 N 个 patch 才叫醒人/agent" |
-| peer agents 无主从 | Kimi Code / Claude Code / Codex 轮流推进同一 campaign |
+| durable objective | A multi-day annotate-and-train campaign, e.g. "label 200 ROIs across 20 TCGA-BRCA slides and train to AUROC ≥ 0.9" |
+| gates (human judgment) | Training is allowed only after a pathologist reviews the annotations; results that miss the bar do not advance |
+| executable todos | Annotation batches, download batches, training, evaluation, retraining |
+| evidence log | The DB's agent_runs + ROI annotation history + patch paths (half of this already exists) |
+| quota-aware auto-wake | In active learning, only the N most uncertain patches wake a human or agent |
+| peer agents, no master | Kimi Code / Claude Code / Codex taking turns advancing the same campaign |
 
-**定位**：HE-Scope 已有「领域状态」（三张表），缺「跨会话、跨 agent、跨天的 campaign 治理」——LoopX 恰好补这层。
+**Positioning.** HE-Scope already has domain state (three tables) but lacks
+campaign governance across sessions, agents and days — precisely the layer LoopX
+supplies.
 
-**集成原则**：
-- **薄适配、可摘除**：核心状态留在自己的 DB，LoopX 只当 campaign 控制面；evidence 指向 DB 的 roi_id/run_id，gate 挂在训练管线的达标检查上；
-- **不进感知/分析链路**：LoopX 对病理图像零理解，提升的是长程实验的可复盘性与推进效率，不直接提升任何 AUROC；
-- **风险**：单作者早期项目，成熟度与维护持续性未知——先做 spike 实证再决定。
+**Integration principles:**
 
-**Spike 计划**（未开工）：克隆 LoopX、跑通 quickstart、把最小 campaign（demo slide 10 个 ROI 两轮主动学习）建模为 LoopX objective，验证适配层可行性，出"接/不接"实证结论。
+- **Thin adapter, removable.** Core state stays in our own DB and LoopX acts
+  only as the campaign control plane; evidence points at the DB's roi_id/run_id,
+  and gates hang off the training pipeline's threshold checks.
+- **Keep it out of the perception/analysis path.** LoopX understands nothing
+  about pathology images. It improves the reviewability and throughput of
+  long-horizon experiments; it raises no AUROC directly.
+- **Risk.** An early single-author project of unknown maturity and maintenance
+  continuity — run a spike for evidence before deciding.
 
----
-
-## 5. molab 评估结论（GPU 来源）
-
-官网：https://molab.marimo.io （marimo 官方托管云平台）
-
-**关键事实**：
-- 免费；默认 4 CPU + 32GB RAM；
-- **可挂 NVIDIA RTX Pro 6000 Blackwell GPU（96GB VRAM）**，app 头部 notebook specs 按钮开关（CoreWeave -backed）；
-- 预装 torch 等 ML 包，秒级启动；
-- 限制：单 session 最长 12 小时、空闲 90 分钟关闭、每 notebook 限量持久存储；
-- GitHub 集成，GitHub 为 source of truth。
-
-**接本地 agent：官方支持。** molab notebook 右上 actions → "Pair with an agent" → 本地 agent（装了 marimo-pair skill 的 Claude Code / Codex / Kimi Code 等）执行连接指令后，所有代码在 molab 沙箱内核执行，与本地 pair 体验一致。HE-Scope 的全部 agent 接口原样可用。
-
-**适配要点（三个坑）**：
-1. 包结构：molab 以单 notebook 为中心，`hescope/` 多文件包需推 GitHub 后 `pip install git+https://...`，或用 GitHub mirror 机制；
-2. 存储：TCGA SVS 单文件 100MB–2GB，molab 持久存储有限——大切片少量用 / 走 GCS mirror 路线 / molab 上只跑 demo + 小样本；
-3. 12 小时上限：长下载长训练切可续跑段（下载器已有 .part 断点逻辑）。
-
-**意义**：Phase A 的 GPU 阻塞解除——CONCH/UNI embedding 提取和线性探测训练可直接在 molab 96GB GPU 上跑，agent 留在本地。
+**Spike plan** (not started): clone LoopX, get the quickstart working, model a
+minimal campaign (two active-learning rounds over 10 ROIs on the demo slide) as
+a LoopX objective, validate that the adapter layer is feasible, and produce an
+evidence-based adopt/decline conclusion.
 
 ---
 
-## 6. 下一步（2026-08-08 夜：已由过夜研究取代本节原候选清单）
+## 5. molab evaluation (GPU source)
 
-过夜研究蜂群（6 路并行调研，原始报告在 `/mnt/agents/output/research/`）已产出两份核心文档，本节候选清单作废，以它们为准：
+Site: https://molab.marimo.io (marimo's official hosted cloud platform)
 
-- **PAPERS.md**——文献综述：病理 AI agent 四主线、人机协作/主动学习、评测格局、HE-Scope 定位与 novelty 分析（146 处引用）；
-- **STRATEGY.md**——战略决策：学术三目标（A：PathAgentBench human-in-the-loop 变体；B：「AUROC vs 人类交互预算」标注效率协议；C：eva+HEST parity 背书）、开源六维度迭代路线（P0–P2 优先级）、LoopX 混合路线决策（不接为依赖，自研 DB 薄 loop 层 + he-scope-loop SKILL.md）、7 个双周冲刺里程碑表（至 2026-11-08）。
+**Key facts:**
 
-**核心决策速览**：
-1. 学术定位：「首个以标注数据库为中心的人-agent 闭环 WSI 分析系统」；最大 novelty 威胁是 TissueLab，必须做会话反馈入库的消融对照；
-2. FM 选型：**GPFM（MIT）默认** / UNI2-h 仅学术 / H-optimus-0（Apache）商用备选；CC-BY-NC-ND 模型（UNI/CONCH/TITAN 等）立红线不进默认路径；经 encoder factory 统一接入；
-3. LoopX：不接依赖（文件态 vs DB 双事实源冲突、2.5 个月龄 v0.4.x 快速 breaking）；自研薄 loop 层，每 6 周跟踪其 pluggable-state-provider RFC 复评；
-4. 开源空位：「marimo-native + agent-native」双重空位 + 「可复现的观测（reproducible viewing）」叙事无人占据；与 Trident(.h5)/QuPath(GeoJSON) 共生而非竞争；尽早 JOSS 绑引用。
+- Free; 4 CPU + 32 GB RAM by default.
+- **An NVIDIA RTX Pro 6000 Blackwell GPU (96 GB VRAM) can be attached**, toggled
+  from the notebook-specs button in the app header (CoreWeave-backed).
+- torch and other ML packages are preinstalled; startup is near-instant.
+- Limits: 12 hours maximum per session, shutdown after 90 minutes idle, limited
+  persistent storage per notebook.
+- GitHub integration, with GitHub as the source of truth.
 
-**过夜已实施项**见 git log（master）与 STRATEGY.md §4 W1–2 栏。
+**Pairing with a local agent is officially supported.** In a molab notebook,
+actions (top right) → "Pair with an agent"; a local agent with the marimo-pair
+skill installed (Claude Code / Codex / Kimi Code, ...) runs the connect command,
+and from then on all code executes in the molab sandbox kernel with the same
+experience as local pairing. Every HE-Scope agent interface works unchanged.
+
+**Three adaptation pitfalls:**
+
+1. Package structure: molab is single-notebook-centric, so the multi-file
+   `hescope/` package needs to be pushed to GitHub and installed with
+   `pip install git+https://...`, or handled through the GitHub mirror
+   mechanism.
+2. Storage: a single TCGA SVS is 100 MB–2 GB and molab's persistent storage is
+   limited — use few large slides, go the GCS mirror route, or keep molab to the
+   demo plus small samples.
+3. The 12-hour cap: split long downloads and long training into resumable
+   segments (the downloader already has `.part` checkpoint logic).
+
+**Consequence:** the GPU blocker for Phase A is lifted. CONCH/UNI embedding
+extraction and linear-probe training can run directly on molab's 96 GB GPU while
+the agent stays local.
 
 ---
 
-## 7. 暂缓事项（早前已确认推迟）
+## 6. Next steps (night of 2026-08-08: the overnight research supersedes this section's original candidate list)
 
-- BigQuery cohort 搜索（ISB-CGC）；
-- GCS mirror 下载 / Google Cloud storage 集成；
-- marimo 其他 cloud/数据库结合（待 storage 优化阶段统一探究）。
+The overnight research swarm (6 parallel investigations; raw reports in
+`/mnt/agents/output/research/`) produced two core documents. The candidate list
+formerly in this section is void; these take precedence:
+
+- **PAPERS.md** — literature review: the four main threads of pathology AI
+  agents, human-AI collaboration and active learning, the evaluation landscape,
+  and HE-Scope's positioning and novelty analysis (146 citations).
+- **STRATEGY.md** — strategic decisions: the three academic goals (A: a
+  human-in-the-loop variant of PathAgentBench; B: an "AUROC vs human interaction
+  budget" annotation-efficiency protocol; C: eva + HEST parity as endorsement),
+  the six-dimension open-source iteration route (P0–P2 priorities), the LoopX
+  hybrid decision (not adopted as a dependency; build a thin DB-backed loop
+  layer plus a `he-scope-loop` SKILL.md), and a table of 7 biweekly sprint
+  milestones running to 2026-11-08.
+
+**Core decisions at a glance:**
+
+1. Academic positioning: "the first annotation-database-centric human–agent
+   closed-loop WSI analysis system". The largest novelty threat is TissueLab, so
+   an ablation contrasting session feedback written back to the database is
+   mandatory.
+2. FM selection: **GPFM (MIT) as the default**, UNI2-h for academic use only,
+   H-optimus-0 (Apache) as the commercial alternative. CC-BY-NC-ND models (UNI,
+   CONCH, TITAN and the like) hit a red line and never enter the default path;
+   all of them are wired in through the encoder factory.
+3. LoopX: not adopted as a dependency (file state versus DB creates two
+   conflicting sources of truth; at 2.5 months old, v0.4.x breaks quickly).
+   Build a thin loop layer instead, and re-evaluate their pluggable-state-provider
+   RFC every 6 weeks.
+4. Open-source gap: a double opening at "marimo-native + agent-native", plus a
+   "reproducible viewing" narrative nobody has claimed. Be symbiotic with
+   Trident (.h5) and QuPath (GeoJSON) rather than competitive, and anchor
+   citations with JOSS early.
+
+**Items implemented overnight** are in `git log` (master) and in STRATEGY.md §4,
+column W1–2.
+
+---
+
+## 7. Deferred (confirmed earlier)
+
+- BigQuery cohort search (ISB-CGC).
+- GCS mirror download / Google Cloud storage integration.
+- Other marimo cloud/database combinations (to be explored together during the
+  storage-optimization phase).

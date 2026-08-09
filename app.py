@@ -2096,47 +2096,45 @@ def _(mo):
     # Always-visible agent connection guide (open by default).
     mo.md(
         """
-    ### Connect your agent (agent 联动指南)
+    ### Connect your agent
 
-    *English: install the marimo-pair skill in your code agent, start this
-    app with `marimo edit app.py --no-token`, keep the browser tab open and
-    press Run once, then tell your agent "connect to my marimo notebook".
-    After you circle something, the agent reads it with
-    `get_current_selection()`; submitted ROIs are in `get_latest_selection()`
-    (patch image paths included).*
-
-    1. **安装 skill**:Kimi Code / Codex 等支持 Agent Skills 的 agent 执行
-       `npx skills add marimo-team/marimo-pair`;Claude Code 执行
-       `/plugin marketplace add marimo-team/marimo-pair`,然后
-       `/plugin install marimo-pair@marimo-pair`。
-    2. **启动**:用 `marimo edit app.py --no-token` 启动本应用,并保持浏览器
-       页面打开;首次打开点一次 Run 让 cells 执行(否则内核是空的)。
-    3. **为什么必须用 `marimo edit` 而不是 `marimo run`**:`marimo run`
-       是只读模式,官方在服务端禁用了代码执行接口(`/api/sessions` 与
-       `/execute` 都要求 edit 权限),marimo-pair 原理上无法在 run 模式
-       附加。想隐藏所有 cell 获得纯净 app 界面:启动后点右下角工具栏的
-       眼睛图标(Toggle app view)或按 Cmd/Ctrl + `.`,界面与 run 模式
-       完全一致,但会话仍是 edit session,agent 连接不受影响。本应用所有
-       cell 默认已 hide_code。
-    4. **对你的 agent 说**:"连接我的 marimo notebook"——它会用
-       marimo-pair 的 discover/execute 脚本进入内核。
-    5. **圈选之后**:你只要在图上拖框/套索,agent 调
-       `get_current_selection()` 就能读到(零点击);点过 Send to code agent
-       的完整记录在 `get_latest_selection()`;patch 图片路径在返回的 JSON
-       里,多模态 agent 可以直接看图。
-    6. **更多 agent 工具**(模块作用域,与上面两个同约定——返回 JSON
-       字符串或固定哨兵值,绝不抛异常):`get_slide_info()` 返回当前切片
-       元数据 JSON(名称/尺寸/mpp/层级/DB id/标注数,未打开切片时返回
-       `NO_SLIDE`);`query_annotations(label=None, limit=50)` 返回当前
-       切片的标注行 JSON 列表,可按 label 过滤;`annotate_roi(roi_id,
-       label=None, notes=None)` 把标签/备注回写到 rois 表(DB-free 模式
-       或未知 roi_id 返回 `{"error": ...}`);`get_analysis_capabilities()`
-       返回可用分析(nuclei/QC/染色归一化/热图/训练)、torch 可用性与已
-       训练模型的 JSON。
-    7. **换 agent 记录不丢**:标注在 `data/hescope.db`,历史在
-       `agent_out/`,与 agent 无关。
-    8. **AGENTS.md**:项目根目录的 AGENTS.md 是给 agent 的完整契约,agent
-       进目录会自动读到。
+    1. **Install the skill.** On agents that support Agent Skills (Kimi Code,
+       Codex, ...): `npx skills add marimo-team/marimo-pair`. On Claude Code:
+       `/plugin marketplace add marimo-team/marimo-pair`, then
+       `/plugin install marimo-pair@marimo-pair`.
+    2. **Start the app** with `marimo edit app.py --no-token`, keep the
+       browser tab open, and press Run once on first load so the cells
+       execute — until they do, the kernel globals do not exist.
+    3. **Why `marimo edit` and not `marimo run`.** Run mode is read-only:
+       the server requires edit permission for `/api/sessions` and
+       `/execute` and returns 401 otherwise, so marimo-pair cannot attach to
+       a run-mode session. For a chrome-free UI, use app view instead — the
+       eye icon in the bottom-right toolbar, or Cmd/Ctrl + `.`. It looks
+       exactly like run mode but the session stays an edit session, so agent
+       pairing is unaffected. Every cell here is `hide_code` by default.
+    4. **Tell your agent** "connect to my marimo notebook". It will use
+       marimo-pair's discover/execute scripts to enter the kernel.
+    5. **After you circle something**, just drag a box or lasso on the
+       figure — the agent reads it with `get_current_selection()`, no click
+       needed. Anything you sent with "Send to code agent" is in
+       `get_latest_selection()`. Both carry the patch image path in their
+       JSON, so a multimodal agent can open the image directly.
+    6. **More agent tools** (module scope, same contract as the two above:
+       they return a JSON string or a fixed sentinel, and never raise).
+       `get_slide_info()` returns the open slide's metadata as JSON (name,
+       dimensions, mpp, levels, DB id, annotation count) or `NO_SLIDE`.
+       `query_annotations(label=None, limit=50)` returns this slide's
+       annotation rows as a JSON list, optionally filtered by label.
+       `annotate_roi(roi_id, label=None, notes=None)` writes a label/notes
+       back to the rois table, returning `{"error": ...}` in DB-free mode or
+       for an unknown `roi_id`. `get_analysis_capabilities()` reports the
+       available analyses (nuclei, QC, stain normalization, heatmaps,
+       training), torch availability and any trained models.
+    7. **Your records survive an agent switch.** Annotations live in
+       `data/hescope.db` and history in `agent_out/`, independent of which
+       agent wrote them.
+    8. **AGENTS.md** at the repo root is the full contract for agents; an
+       agent entering the project directory picks it up automatically.
     """
     )
     return
