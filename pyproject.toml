@@ -42,6 +42,14 @@ dependencies = [
 # Real WSI formats via OpenSlide (.svs, .ndpi, .mrxs); needs the OpenSlide
 # system library.
 wsi = ["openslide-python"]
+# DICOM VL Whole Slide Microscopy Image, what clinical scanners increasingly
+# emit and the one format neither OpenSlide nor tifffile covers here.
+# Deliberately optional and deliberately small: measured against this
+# environment it resolves to 7 new packages with zero uninstalls and zero
+# downgrades, which is why it is in-tree at all. (For contrast, tiatoolbox
+# resolves to 152 installs and 22 uninstalls, including ipywidgets, on which
+# the OpenSeadragon viewer depends -- see docs/ROADMAP-INTEROP.md.)
+dicom = ["wsidicom>=0.20"]
 # Weakly-supervised training (hescope.ml) + torch/FM embedding backends
 # (hescope.features.extract_embedding, hescope.embeddings).
 ml = ["scikit-learn", "joblib", "torch", "torchvision", "timm"]
