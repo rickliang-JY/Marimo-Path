@@ -48,6 +48,11 @@ def _():
     )
     from hescope.db import export_rois
     from hescope.geojson import slide_geojson_text
+    from hescope.stats_table import (
+        label_summary,
+        roi_stats_rows,
+        rows_to_csv,
+    )
     from hescope.grid import tissue_fraction_proxy
     from hescope.heatmap import compute_grid, grid_coverage, render_heatmap
     from hescope.measure import format_measurement, measure_box
@@ -177,6 +182,9 @@ def _():
         roi_from_db_row,
         rois_to_payload,
         serve_slide,
+        label_summary,
+        roi_stats_rows,
+        rows_to_csv,
         slide_geojson_text,
         tempfile,
         threading,
@@ -1012,8 +1020,11 @@ def _(get_source, mo, ui_actions):
         stop=max(_max_ds, 1.0),
         step=0.5,
         value=max(_max_ds, 1.0),
-        label="set zoom (downsample)",
-        show_value=True,
+        label="zoom",
+        # The raw downsample is a slide-derived float ("8.001340482573728").
+        # The readable form -- magnification, or a rounded downsample -- is in
+        # the status line under the viewer, which has the mpp to compute it.
+        show_value=False,
         on_change=_fire("zoom"),
     )
 
@@ -1535,8 +1546,10 @@ def _(
     db_status_detail,
     get_db_msg,
     get_measure_msg,
+    get_rois,
     get_source,
     get_vp,
+    live_selection,
     magnification_for,
     mo,
 ):
@@ -1552,8 +1565,29 @@ def _(
             if _mag is not None
             else f"downsample x{_vp.downsample:g}"
         )
+        # Selection and ROI count belong here, not only on the canvas. The
+        # dashed outline says WHERE, and nothing said WHETHER: a user who had
+        # drawn nothing and a user whose selection was ignored saw the same
+        # screen, and "Add ROI" confirmed itself only by a row appearing in a
+        # sidebar list they may not be looking at.
+        _sel_s = "no selection"
+        try:
+            _sel = live_selection()
+        except Exception:  # a status line must never be the thing that breaks
+            _sel = None
+        if _sel is not None:
+            _bx0, _by0, _bx1, _by1 = _sel["bbox_level0"]
+            _sw, _sh = _bx1 - _bx0, _by1 - _by0
+            _sel_s = f"selection: {_sel['kind']} {_sw}x{_sh} px"
+            if _src.mpp:
+                # level-0 px * mpp: the bbox is level-0, unlike the patch
+                # dimensions in roi_stats (R07-2).
+                _sel_s += f" ({_sw * _src.mpp:.0f}x{_sh * _src.mpp:.0f} um)"
+            _sel_s += " — not added yet"
+        _n_rois = len(get_rois())
         _parts.append(
             mo.md(
+                f"**{_sel_s}** | {_n_rois} ROI(s) this session | "
                 f"center=({_vp.center[0]:.0f}, {_vp.center[1]:.0f}) | "
                 f"{_mag_s} | viewport {_vp.size[0]}x{_vp.size[1]} px"
             )
@@ -1961,7 +1995,10 @@ def _(
     db_roi_rows,
     export_rois,
     get_slide_id,
+    get_source,
     mo,
+    roi_stats_rows,
+    rows_to_csv,
     set_ann_version,
     set_db_msg,
     slide_geojson_text,
@@ -2154,6 +2191,28 @@ def _(
             mimetype="application/geo+json",
             label="Export ROIs (GeoJSON, QuPath)",
         )
+        def _stats_csv():
+            # The measurements, not just the annotations: a result that cannot
+            # leave the tool is not a result. Same hardened path as the three
+            # above, so a failure arrives as .EXPORT-FAILED.txt rather than as
+            # a correctly-named file with an error inside it (R07-6).
+            _src_stats = get_source()
+            return rows_to_csv(
+                roi_stats_rows(
+                    db.engine,
+                    get_slide_id(),
+                    mpp=_src_stats.mpp if _src_stats is not None else None,
+                )
+            )
+
+        export_stats_button = mo.download(
+            data=lambda: _export_data("stats", _stats_csv),
+            filename=lambda: _export_filename(
+                "stats", _stats_csv, "roi_statistics.csv"
+            ),
+            mimetype="text/csv",
+            label="Export statistics (CSV)",
+        )
         ann_edit_view = mo.vstack(
             [
                 mo.hstack([label_input, notes_input]),
@@ -2161,6 +2220,7 @@ def _(
                 mo.hstack(
                     [export_json_button, export_csv_button, export_geojson_button]
                 ),
+                mo.hstack([export_stats_button]),
             ]
         )
     return (ann_edit_view,)
@@ -3238,6 +3298,73 @@ def _(MODELS_DIR, analysis_capabilities, json):
 
 
 @app.cell(hide_code=True)
+def _(
+    db,
+    get_ann_version,
+    get_slide_id,
+    get_source,
+    label_summary,
+    mo,
+    roi_stats_rows,
+):
+    # Every ROI of this slide as one comparable row, plus per-label aggregates.
+    # roi_stats measures one region at a time, which is enough to look at a
+    # region and not enough to compare two -- this is the same data reshaped so
+    # a claim like "tumour reads higher than stroma" can be checked rather than
+    # asserted. Pure query: no new measurement happens here.
+    #
+    # Depends on ann_version so it refreshes when a label is saved or an ROI
+    # deleted, and NOT on the viewport -- panning must not rebuild this table
+    # (R04-1).
+    get_ann_version()
+    _stats_src = get_source()
+    if not db.enabled:
+        stats_table_view = mo.callout(
+            mo.md("Database disabled: per-ROI statistics are unavailable."),
+            kind="warn",
+        )
+    elif get_slide_id() is None:
+        stats_table_view = mo.md("_Open a slide to compare its ROIs._")
+    else:
+        try:
+            _stat_rows = roi_stats_rows(
+                db.engine,
+                get_slide_id(),
+                mpp=_stats_src.mpp if _stats_src is not None else None,
+            )
+        except Exception as _exc:
+            _stat_rows = []
+            stats_table_view = mo.callout(
+                mo.md(f"Could not read ROI statistics: `{_exc}`"), kind="danger"
+            )
+        if _stat_rows:
+            _measured = sum(1 for _r in _stat_rows if _r["has_stats"])
+            _note = f"{len(_stat_rows)} ROI(s)"
+            if _measured < len(_stat_rows):
+                # Say which rows carry no measurement rather than showing
+                # blanks the reader has to interpret.
+                _note += (
+                    f" — {len(_stat_rows) - _measured} drawn but never measured "
+                    "(send them to the agent, or run Analyze)"
+                )
+            if _stats_src is not None and _stats_src.mpp is None:
+                _note += "; slide has no mpp, so physical sizes are blank"
+            stats_table_view = mo.vstack(
+                [
+                    mo.md(f"**Per-ROI statistics** — {_note}"),
+                    mo.ui.table(_stat_rows, selection=None, pagination=True),
+                    mo.md("**By label**"),
+                    mo.ui.table(
+                        label_summary(_stat_rows), selection=None, pagination=True
+                    ),
+                ]
+            )
+        elif "stats_table_view" not in dir():
+            stats_table_view = mo.md("_No ROIs on this slide yet._")
+    return (stats_table_view,)
+
+
+@app.cell(hide_code=True)
 def _(analysis_select_view, heatmap_view, hm_progress_view, mo, train_view):
     # The Analysis accordion panel content.
     analysis_view = mo.vstack(
@@ -3262,6 +3389,7 @@ def _(
     history_view,
     mo,
     runs_view,
+    stats_table_view,
     tcga_filter_view,
     tcga_results_view,
     tcga_status_view,
@@ -3270,6 +3398,7 @@ def _(
     mo.accordion(
         {
             "Annotations": mo.vstack([ann_browser_view, ann_edit_view]),
+            "Statistics": stats_table_view,
             "Analysis": analysis_view,
             "Agent console": mo.vstack(
                 [agent_payload_view, history_view, runs_view]

@@ -142,6 +142,11 @@ def _run_editor(engine, *, slide_id, table_value=None, db=None):
         "set_ann_version": lambda v: published.__setitem__("ann_version", v),
         "set_db_msg": lambda v: published.__setitem__("msg", v),
         "slide_geojson_text": slide_geojson_text,
+        # The editor now also exports the MEASUREMENTS, not just the
+        # annotations, which needs the slide (for mpp) and the stats reshape.
+        "get_source": lambda: None,
+        "roi_stats_rows": lambda engine, sid, mpp=None: [],
+        "rows_to_csv": lambda rows: "",
     }
     missing = [p for p in params if p not in deps]
     assert not missing, f"the annotation editor cell grew new dependencies: {missing}"

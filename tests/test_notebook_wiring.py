@@ -46,8 +46,12 @@ def test_the_annotations_panel_offers_a_geojson_download(graph):
         "'one click' README advertises does not exist for a user"
     )
     assert "rois.geojson" in cell.code, "no GeoJSON download filename in the panel"
-    # ... and it is a real download button, beside the two that already work
-    assert cell.code.count("mo.download(") == 3
+    # ... and it is a real download button, beside the others that already
+    # work: ROIs as JSON and CSV, plus the per-ROI statistics table.
+    assert cell.code.count("mo.download(") == 4
+    assert "roi_statistics.csv" in cell.code, (
+        "the measurements have no export, so a result cannot leave the tool"
+    )
 
 
 #: The functions allowed to stand between TCGA_DATA_DIR and a server-supplied
