@@ -1632,12 +1632,6 @@ def _(
     # throughout, because it already went through live_selection(); that gap
     # between "the agent can read my selection" and "the UI ignores it" is
     # exactly what a second selection path buys you.
-    def _on_add_roi(_):
-        try:
-            _add_roi_or_measure()
-        except Exception as _exc:  # marimo swallows this otherwise (R07-5)
-            set_measure_msg(("danger", f"Add ROI failed: {_exc}"))
-
     def _add_roi_or_measure():
         # Measure mode FIRST, through live_measure(): asking live_selection()
         # here is blind to the OpenSeadragon measure vocabulary (kind
@@ -1684,6 +1678,21 @@ def _(
             _roi = ROI(kind=_kind, points=_pts)
         set_rois(get_rois() + [_roi])
         set_measure_msg(None)
+
+    # `_run=_add_roi_or_measure` is a DEFAULT ARGUMENT on purpose, and the one
+    # detail that makes this button work. marimo renames a cell-private name
+    # (`_add_roi_or_measure` -> `_cell_ZBYS_add_roi_or_measure`) and then drops
+    # it when the cell finishes; a handler that merely NAMES it in its body is
+    # resolved on click, long after that, and raises NameError -- which is what
+    # "Add ROI failed: name '_cell_ZBYS_add_roi_or_measure' is not defined" was.
+    # A default is evaluated at def time, so the function object itself is
+    # captured while it still exists. Same defect that killed the arrow buttons
+    # (`lambda _v, fn=_pan: ...`), one shape further out.
+    def _on_add_roi(_, _run=_add_roi_or_measure):
+        try:
+            _run()
+        except Exception as _exc:  # marimo swallows this otherwise (R07-5)
+            set_measure_msg(("danger", f"Add ROI failed: {_exc}"))
 
     ui_actions["add_roi"] = _on_add_roi
     return

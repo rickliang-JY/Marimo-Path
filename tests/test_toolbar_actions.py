@@ -21,6 +21,8 @@ marimo's mangle-then-discard sequence directly, the other guards the source.
 
 from __future__ import annotations
 
+import ast
+
 import pytest
 
 
@@ -116,28 +118,182 @@ def test_late_bound_cell_private_reference_dies_after_the_cell_finishes():
     assert registry["bound"](None) == (1, 0)
 
 
-def test_no_toolbar_action_names_a_cell_private_helper_in_a_lambda_body():
-    """Source guard: ``ui_actions[...] = lambda ...: _helper(...)`` is the
-    shape that broke the arrow buttons. Capturing via a default argument, or
-    storing the function object directly, is fine."""
+def test_clicking_add_roi_after_the_cell_ends_adds_an_roi():
+    """The user-reported failure, driven through marimo's OWN mangled bytecode.
+
+    ``Add ROI failed: name '_cell_ZBYS_add_roi_or_measure' is not defined``.
+    marimo compiles a cell with its private names rewritten and discards them
+    once the cell finishes, so this execs the real compiled body, deletes every
+    ``_cell_*`` name exactly as marimo does, and only THEN clicks -- which is
+    the sequence a source guard can only approximate.
+    """
+    import app as appmod
+
+    from hescope.rois import ROI
+
+    appmod.app._maybe_initialize()
+    cell = appmod.app._graph.cells["ZBYS"]
+
+    added: list = []
+    published: list = []
+
+    class _Check:
+        value = False
+
+    ns: dict = {
+        "ROI": ROI,
+        "circle_checkbox": _Check(),
+        "measure_checkbox": _Check(),
+        "format_measurement": lambda m: "measured",
+        "get_rois": lambda: list(added),
+        "get_source": lambda: None,
+        "live_measure": lambda: None,
+        "live_selection": lambda: {
+            "kind": "rect",
+            "points_level0": ((10.0, 20.0), (110.0, 100.0)),
+        },
+        "measure_box": lambda a, b, mpp: {},
+        "set_measure_msg": published.append,
+        "set_rois": lambda rois: added.__setitem__(slice(None), rois),
+        "ui_actions": (actions := {}),
+    }
+    exec(cell.body, ns)
+
+    assert any(k.startswith("_cell_ZBYS_") for k in ns), "cell defined no privates"
+    for key in [k for k in ns if k.startswith("_cell_")]:
+        del ns[key]  # marimo drops cell-private names when the cell finishes
+
+    actions["add_roi"](object())
+
+    # A successful add ends with set_measure_msg(None), clearing the strip.
+    failures = [t for k, t in (m for m in published if m) if k == "danger"]
+    assert not failures, f"the click raised instead of adding an ROI: {failures}"
+    assert len(added) == 1 and added[0].kind == "rect"
+    assert added[0].points == ((10.0, 20.0), (110.0, 100.0))
+
+
+def _bound_names(fn: ast.AST) -> set[str]:
+    """Every name ``fn`` binds itself: parameters, assignments, loop and with
+    and except targets, comprehension variables, imports, nested defs."""
+    bound: set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.alias):
+            bound.add((node.asname or node.name).split(".")[0])
+    return bound
+
+
+def _deferred_private_refs(fn: ast.AST, cell_private: dict) -> set[str]:
+    """Cell-private names ``fn`` will look up WHEN CALLED rather than now.
+
+    A default argument is evaluated at ``def`` time, so it is safe -- and it is
+    also how a handler legitimately reaches a helper. Everything else in the
+    body is a lookup deferred to click time, which is exactly when marimo has
+    already discarded the name.
+    """
+    safe = _bound_names(fn)
+    defaults = [d for d in getattr(fn.args, "defaults", [])] + [
+        d for d in getattr(fn.args, "kw_defaults", []) or [] if d is not None
+    ]
+    default_nodes = {id(n) for d in defaults for n in ast.walk(d)}
+    return {
+        node.id
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id in cell_private
+        and node.id not in safe
+        and id(node) not in default_nodes
+    }
+
+
+def _helpers_bound_as_defaults(fn: ast.AST, cell_private: dict) -> set[str]:
+    """Cell-private functions this handler captured in a default argument.
+
+    Safe for this handler, but their OWN bodies still run at click time, so the
+    check has to follow them (R07-5's ``_on_add_roi`` -> ``_add_roi_or_measure``
+    was one hop past where the old line-based guard looked)."""
+    defaults = [d for d in getattr(fn.args, "defaults", [])] + [
+        d for d in getattr(fn.args, "kw_defaults", []) or [] if d is not None
+    ]
+    return {
+        n.id
+        for d in defaults
+        for n in ast.walk(d)
+        if isinstance(n, ast.Name) and n.id in cell_private
+    }
+
+
+def test_no_toolbar_action_defers_a_cell_private_lookup_to_click_time():
+    """Source guard over app.py's own AST.
+
+    The arrow buttons died as ``ui_actions[k] = lambda _v: _pan(...)``. The Add
+    ROI button died later as ``ui_actions["add_roi"] = _on_add_roi``, whose
+    BODY called a second cell-private helper -- a shape the old line-based
+    ``= lambda`` regex could not see. Both are the same defect, so the guard is
+    now structural: walk every callable reachable from ``ui_actions``, through
+    default-argument captures, and flag any cell-private name it resolves when
+    clicked instead of when defined.
+    """
     import pathlib
-    import re
 
     src = (pathlib.Path(__file__).resolve().parents[1] / "app.py").read_text(
         encoding="utf-8"
     )
-    offenders = []
-    for line in src.splitlines():
-        stripped = line.strip()
-        if not re.match(r"ui_actions\[.+\]\s*=\s*lambda", stripped):
-            continue
-        head, _, body = stripped.partition("lambda")
-        params, _, expr = body.partition(":")
-        for ref in re.findall(r"\b_[A-Za-z]\w*", expr):
-            if f"={ref}" not in params.replace(" ", ""):
-                offenders.append(stripped)
-                break
+    offenders: list[str] = []
+
+    for cell in [
+        n
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.FunctionDef) and n.decorator_list
+    ]:
+        # Names this cell owns privately -- mangled by marimo, then discarded
+        # when the cell finishes. Single underscore only; __dunder__ is not.
+        cell_private = {
+            node.name: node
+            for node in cell.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name.startswith("_")
+            and not node.name.startswith("__")
+        }
+
+        queue: list[tuple[str, ast.AST]] = []
+        for node in ast.walk(cell):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(
+                isinstance(t, ast.Subscript)
+                and isinstance(t.value, ast.Name)
+                and t.value.id == "ui_actions"
+                for t in node.targets
+            ):
+                continue
+            key = ast.unparse(node.targets[0])
+            if isinstance(node.value, ast.Lambda):
+                queue.append((key, node.value))
+            elif isinstance(node.value, ast.Name) and node.value.id in cell_private:
+                queue.append((key, cell_private[node.value.id]))
+
+        seen: set[int] = set()
+        while queue:
+            key, fn = queue.pop()
+            if id(fn) in seen:
+                continue
+            seen.add(id(fn))
+            for name in sorted(_deferred_private_refs(fn, cell_private)):
+                offenders.append(f"{key} -> {name}")
+            for name in sorted(_helpers_bound_as_defaults(fn, cell_private)):
+                queue.append((f"{key} -> {name}", cell_private[name]))
+
     assert not offenders, (
-        "these toolbar handlers defer a cell-private lookup to click time and "
-        f"will raise NameError in the browser: {offenders}"
+        "these toolbar handlers look a cell-private name up when the button is "
+        "clicked, by which time marimo has discarded it, so the click raises "
+        f"NameError in the browser instead of doing anything: {offenders}"
     )

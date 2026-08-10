@@ -155,7 +155,16 @@ in `file_id`, at the site R02-3's fix did not cover. Both fixes were then placed
 | 4 | **`HESCOPE_TILE_PARALLEL_READ=1` removes `entry.read_lock` from the tile path entirely.** `TileServer.tile_bytes` is `if plan.use_overview or _parallel_reads_enabled(): render_tile(...)`. Off by default and never measured enabled, so a future round must not benchmark with it set and blame the wrong thing. | Round 07 observation. |
 | 5 | **26 temp-directory slide rows remain in `data/hescope.db`.** Each has a unique path, so `dedupe-slides` does not touch them; deleting them is a separate destructive action with no user-visible benefit. | Round 07, R07-3. `conftest.py` isolates `pytest`; the rows predate R05-4, plus one written by round 07's own scratchpad probes, which bypass `conftest`. |
 | 6 | **`records_to_rows` omits `md5sum`,** so app.py's `_sel[0].get("md5sum") or <catalog lookup>` has a permanently dead first branch. | Round 02 observation, still latent. |
-| 7 | **Factory-produced click handlers are outside R07-5's lint.** `on_click=_make_view(_i)` is not reachable by name, so the per-ROI View/Delete buttons are neither guarded nor checked. | Round 07, R07-5; the test docstring says so rather than papering over it. |
+| 7 | **Factory-produced click handlers are outside R07-5's lint.** `on_click=_make_view(_i)` is not reachable by name, so the per-ROI View/Delete buttons are neither guarded nor checked. | Round 07, R07-5; the test docstring says so rather than papering over it. Still true after F01 widened the `ui_actions` guard — that guard starts from `ui_actions[...] = <name>`, and a factory call is neither. |
+
+**Field reports** (defects hit in the running app rather than found by review)
+are in `2026-08-10-field-reports.md`. F01 — Add ROI raising `NameError` on every
+click — matters beyond its one-line fix: the guard written for the *previous*
+instance of that defect was scoped to the reproduction (`ui_actions[...] =
+lambda ...`) rather than to the rule, so it passed on the next instance. It has
+been replaced with an AST guard over everything reachable from `ui_actions`,
+plus a test that runs marimo's own mangled bytecode and deletes the cell-private
+names before clicking.
 
 **Closed by round 07:** the R05-2 split in `data/hescope.db` (R07-3 — repaired
 on the live artefact, with a backup at `data/hescope.db.bak-before-round07-dedupe`
