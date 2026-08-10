@@ -155,6 +155,7 @@ def _():
         grid_coverage,
         json,
         jump_viewport_for_bbox,
+        label_summary,
         list_models,
         load_model,
         magnification_for,
@@ -180,11 +181,10 @@ def _():
         render_heatmap,
         render_viewport,
         roi_from_db_row,
-        rois_to_payload,
-        serve_slide,
-        label_summary,
         roi_stats_rows,
+        rois_to_payload,
         rows_to_csv,
+        serve_slide,
         slide_geojson_text,
         tempfile,
         threading,
@@ -831,6 +831,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    db_roi_rows,
     dc_replace,
     get_rois,
     get_source,
@@ -845,7 +846,15 @@ def _(
     # buttons. View reuses the annotation-browser jump (center on the bbox,
     # zoom so it fills the viewport); only state getters/setters and
     # imported helpers are referenced, so no reactive cycle is introduced.
+    #
+    # It also has to ACCOUNT FOR the saved ROIs, even though it does not list
+    # them. The viewer draws `overlay_rois = session + persisted`, so a slide
+    # reopened in a new session shows its saved outlines on the image while
+    # this panel -- reading get_rois() alone -- said "No ROIs yet: draw on the
+    # viewer". The picture and the panel were describing the same slide from
+    # two different stores, and the panel's copy was the false one.
     _rois = get_rois()
+    _saved = len(db_roi_rows)
 
     def _make_view(_idx):
         def _view(_):
@@ -876,12 +885,19 @@ def _(
 
         return _del
 
-    def _on_clear_rois(_):
+    def _on_clear_rois(_, _n=_saved):
         set_rois([])
-        set_db_msg(("info", "All session ROIs cleared."))
+        # "All session ROIs cleared" over a viewer still showing every saved
+        # outline read as a button that had not worked. Name what stayed.
+        _msg = "Session ROIs cleared."
+        if _n:
+            _msg += f" The {_n} saved ROI(s) of this slide are still on the image."
+        set_db_msg(("info", _msg))
 
     clear_rois_button = mo.ui.button(
-        label="Clear all ROIs", on_click=_on_clear_rois
+        # Labelled for what it actually clears: the session list. The saved
+        # ROIs are deleted from the Annotations panel, one row at a time.
+        label="Clear session ROIs", on_click=_on_clear_rois
     )
     if _rois:
         roi_view_buttons = [
@@ -912,7 +928,22 @@ def _(
                 "*No ROIs yet: draw on the viewer, then 'Add ROI' or "
                 "'Send to code agent'.*"
             )
+            if not _saved
+            # The outlines ARE on the image, drawn from the database. Claiming
+            # "No ROIs yet" here is contradicted by what the user is looking at.
+            else mo.md(
+                f"*Nothing drawn this session. **{_saved} saved ROI(s)** for "
+                "this slide are already outlined on the image — open the "
+                "**Annotations** panel to browse, label or delete them.*"
+            )
         ]
+    if _rois and _saved:
+        _rows.append(
+            mo.md(
+                f"*Plus **{_saved} saved ROI(s)** from earlier sessions, also "
+                "outlined on the image (Annotations panel).*"
+            )
+        )
     roi_panel = mo.vstack([mo.md("**ROIs**"), *_rows, clear_rois_button])
     return (roi_panel,)
 
@@ -2315,7 +2346,6 @@ def _(Path, db, mo):
         TCGA_DATA_DIR,
         get_tcga_msg,
         get_tcga_records,
-        safe_file_id,
         set_tcga_msg,
         set_tcga_records,
         tcga_catalog,
@@ -2323,8 +2353,8 @@ def _(Path, db, mo):
         tcga_db,
         tcga_dl,
         tcga_hits_to_rows,
-        tcga_storage_relpath,
         tcga_panel,
+        tcga_storage_relpath,
         tcga_ticker,
     )
 
@@ -2886,8 +2916,8 @@ def _(
     render_heatmap,
     set_analysis_msg,
     set_hm_result,
-    tissue_fraction_proxy,
     threading,
+    tissue_fraction_proxy,
     viewport_png_bytes,
 ):
     # "Run heatmap" action. Same shape as the TCGA download button: the sweep
