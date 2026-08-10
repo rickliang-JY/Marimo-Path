@@ -340,3 +340,95 @@ def test_open_slide_routes_svs_to_tifffile(svs_path, monkeypatch):
     src = open_slide(path)
     assert isinstance(src, TifffileSource)
     src.close()
+
+
+# --- an already-downloaded slide must open offline -------------------------
+
+
+def test_local_file_finds_a_downloaded_slide(tmp_path):
+    """The catalog already records where the slide landed; asking it must not
+    require the network.
+
+    download_slide cannot answer this question: it probes the server with a
+    Range request before it can decide the local file is complete, so with no
+    network it exhausts its retry budget and raises over a slide sitting on
+    disk. That made "Download & Open" -- the only route to a TCGA slide in the
+    UI -- fail offline for a slide already downloaded.
+    """
+    from hescope.tcga import SlideCatalog, SlideRecord
+
+    cat = SlideCatalog(tmp_path / "catalog.db")
+    cat.upsert([
+        SlideRecord(
+            file_id="fid-1", file_name="a.svs", file_size=10,
+            project_id="TCGA-BRCA", case_submitter_id="C1",
+            sample_type="Primary Tumor", primary_site="Breast",
+            local_path=None, md5sum=None,
+        )
+    ])
+    assert cat.local_file("fid-1") is None          # known, never downloaded
+    assert cat.local_file("no-such-id") is None     # unknown id
+
+    slide = tmp_path / "a.svs"
+    slide.write_bytes(b"x" * 10)
+    cat.mark_downloaded("fid-1", str(slide))
+    assert cat.local_file("fid-1") == slide
+
+
+def test_local_file_ignores_a_stale_path(tmp_path):
+    """A recorded path whose file was moved or deleted must not be reported as
+    openable -- the caller would hand it to open_slide and get an error it
+    cannot explain."""
+    from hescope.tcga import SlideCatalog, SlideRecord
+
+    cat = SlideCatalog(tmp_path / "catalog.db")
+    cat.upsert([
+        SlideRecord(
+            file_id="fid-2", file_name="b.svs", file_size=10,
+            project_id="TCGA-LUAD", case_submitter_id="C2",
+            sample_type=None, primary_site=None,
+            local_path=None, md5sum=None,
+        )
+    ])
+    gone = tmp_path / "moved-away.svs"
+    gone.write_bytes(b"y" * 10)
+    cat.mark_downloaded("fid-2", str(gone))
+    assert cat.local_file("fid-2") == gone
+    gone.unlink()
+    assert cat.local_file("fid-2") is None
+
+    # a directory is not an openable slide either
+    d = tmp_path / "a-directory"
+    d.mkdir()
+    cat.mark_downloaded("fid-2", str(d))
+    assert cat.local_file("fid-2") is None
+
+
+def test_opening_a_downloaded_slide_needs_no_network(tmp_path):
+    """End to end: with the client pointed at an unroutable host, the catalog
+    path still resolves instantly while download_slide fails."""
+    import time
+
+    import pytest as _pytest
+
+    from hescope.tcga import GDCClient, SlideCatalog, SlideRecord
+
+    cat = SlideCatalog(tmp_path / "catalog.db")
+    cat.upsert([
+        SlideRecord(
+            file_id="fid-3", file_name="c.svs", file_size=4,
+            project_id="TCGA-BRCA", case_submitter_id="C3",
+            sample_type=None, primary_site=None, local_path=None, md5sum=None,
+        )
+    ])
+    slide = tmp_path / "c.svs"
+    slide.write_bytes(b"data")
+    cat.mark_downloaded("fid-3", str(slide))
+
+    started = time.perf_counter()
+    assert cat.local_file("fid-3") == slide
+    assert time.perf_counter() - started < 1.0, "the catalog lookup hit the network"
+
+    offline = GDCClient(api_base="http://127.0.0.1:9", timeout=1)
+    with _pytest.raises(Exception):
+        offline.download_slide("fid-3", tmp_path)

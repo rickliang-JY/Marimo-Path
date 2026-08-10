@@ -635,6 +635,30 @@ class SlideCatalog:
                 (str(local_path), self._now(), file_id),
             )
 
+    def local_file(self, file_id: str) -> Path | None:
+        """The recorded local copy of ``file_id``, if it is still on disk.
+
+        This is what makes an already-downloaded slide openable OFFLINE.
+        ``GDCClient.download_slide`` cannot answer the question: it probes the
+        server with a Range request before it can decide the local file is
+        complete, so with no network it spends its full retry budget and then
+        raises over a slide that is sitting on disk. The catalog already knows
+        the path -- ask it first.
+
+        Returns None when the id is unknown, was never downloaded, or the file
+        has since been moved or deleted (a stale ``local_path`` must not be
+        reported as openable).
+        """
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT local_path FROM tcga_slides WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+        if not row or not row[0]:
+            return None
+        path = Path(row[0])
+        return path if path.is_file() else None
+
     def search(
         self,
         project_id: str | None = None,

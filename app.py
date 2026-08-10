@@ -2163,6 +2163,21 @@ def _(
             set_tcga_msg(("warn", "Select a slide row first."))
             return
         _fid = str(_sel[0]["file_id"])
+
+        # ALREADY ON DISK -> open it, without touching the network.
+        # download_slide cannot be used for this: it probes the server with a
+        # Range request before it can decide the local file is complete, so
+        # offline it burns its retry budget and then raises over a slide that
+        # is already downloaded. That made a downloaded slide unreachable from
+        # the UI whenever the network was down, since this button was the only
+        # route to it. Hand the path to the same open_path channel the
+        # download worker uses, so the open (and any failure to open) is
+        # handled on the main thread exactly as before.
+        _local = tcga_catalog.local_file(_fid)
+        if _local is not None:
+            tcga_dl.update(progress=None, msg=None, open_path=str(_local))
+            return
+
         # integrity check source: md5 carried by the table row if any,
         # otherwise look it up in the local catalog by file_id
         _md5 = _sel[0].get("md5sum") or next(
@@ -2205,8 +2220,15 @@ def _(
         tcga_dl["thread"] = threading.Thread(target=_work, daemon=True)
         tcga_dl["thread"].start()
 
+    # "Open slide", not "Download & Open": a row already on disk opens
+    # straight away with no network, and only a missing one is downloaded.
+    # The label is static because this cell must stay out of the results
+    # table's dependency set -- a label keyed on the selection would rebuild
+    # the button on every click.
     tcga_download_button = mo.ui.button(
-        label="Download & Open", kind="success", on_click=_on_download_open
+        label="Open slide (downloads if needed)",
+        kind="success",
+        on_click=_on_download_open,
     )
     tcga_results_view = mo.vstack([tcga_results_table, tcga_download_button])
     return (tcga_results_view,)
