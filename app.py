@@ -780,30 +780,52 @@ def _(
     else:
         _nav_img = navigator_image(_src, _vp, max_size=200)
         _hm = get_hm_result()
-        if hm_nav_checkbox.value and _hm is not None:
-            try:
-                # coverage: the grid's cell count is rounded UP, so it spans
-                # more than the slide. Without it the overlay is stretched
-                # over the thumbnail and drifts off the tissue it measured.
-                _nav_img = render_heatmap(
-                    _nav_img,
-                    _hm["grid"],
-                    coverage=grid_coverage(
-                        _src.dimensions,
-                        _hm["grid"].shape,
-                        tile=int(_hm["params"]["tile"]),
-                        downsample=float(_hm["params"]["downsample"]),
-                    ),
+        # "show heatmap on navigator" had TWO silent no-ops: no heatmap
+        # computed yet, and a grid that does not fit this slide. Both left the
+        # plain thumbnail on screen and said nothing, which is indistinguishable
+        # from a dead checkbox -- and is exactly what it was reported as. The
+        # tick is a request; if it cannot be honoured, say why, here, next to
+        # the image that did not change.
+        _hm_note = None
+        if hm_nav_checkbox.value:
+            if _hm is None:
+                _hm_note = (
+                    "heatmap requested, but none has been computed yet — "
+                    "run one under **Analysis › Heatmap**"
                 )
-            except Exception:
-                pass  # stale/mismatched grid: show the plain thumbnail
+            else:
+                try:
+                    # coverage: the grid's cell count is rounded UP, so it spans
+                    # more than the slide. Without it the overlay is stretched
+                    # over the thumbnail and drifts off the tissue it measured.
+                    _nav_img = render_heatmap(
+                        _nav_img,
+                        _hm["grid"],
+                        coverage=grid_coverage(
+                            _src.dimensions,
+                            _hm["grid"].shape,
+                            tile=int(_hm["params"]["tile"]),
+                            downsample=float(_hm["params"]["downsample"]),
+                        ),
+                    )
+                except Exception as _exc:
+                    # Reachable with a grid computed for a DIFFERENT slide.
+                    _hm_note = (
+                        "heatmap not drawn on the navigator "
+                        f"({type(_exc).__name__}: {_exc}) — re-run the sweep "
+                        "for this slide"
+                    )
         if overlay_checkbox.value and overlay_rois:
             _nav_img = draw_navigator_markers(
                 _nav_img, overlay_rois, _src.dimensions
             )
-        navigator_panel = mo.vstack(
-            [mo.md("**Navigator**"), mo.image(viewport_png_bytes(_nav_img))]
-        )
+        _nav_parts = [
+            mo.md("**Navigator**"),
+            mo.image(viewport_png_bytes(_nav_img)),
+        ]
+        if _hm_note is not None:
+            _nav_parts.append(mo.md(f"*{_hm_note}*"))
+        navigator_panel = mo.vstack(_nav_parts)
     return (navigator_panel,)
 
 
