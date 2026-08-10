@@ -82,6 +82,9 @@ def _run_ticker_cell(defs):
         "hm_job": defs["hm_job"],
         "hm_ticker": mo.ui.refresh(options=["1s"], default_interval="1s"),
         "mo": mo,
+        # The ticker compares the sweep's slide against the open one before it
+        # publishes anything (R07-1); see tests/test_heatmap_provenance.py.
+        "get_source": defs["get_source"],
         "set_analysis_msg": lambda v: published.__setitem__("msg", v),
         "set_hm_result": lambda v: published.__setitem__("result", v),
         # The same ticker drains the background TRAINING run (R06-7).

@@ -7,8 +7,8 @@ regressions a previous round claimed to have fixed.
 
 ## Files
 
-**Start here: [SUMMARY.md](SUMMARY.md)** — all six rounds by area and severity,
-the bug classes that recurred, and what is still open.
+**Start here: [SUMMARY.md](SUMMARY.md)** — all seven rounds by area and
+severity, the bug classes that recurred, and what is still open.
 
 | Round | Date | Findings | Status |
 | --- | --- | --- | --- |
@@ -18,6 +18,7 @@ the bug classes that recurred, and what is still open.
 | [round-04](2026-08-09-round-04.md) | 2026-08-09 | 6 | fixed |
 | [round-05](2026-08-09-round-05.md) | 2026-08-09 | 7 | fixed — **record reconstructed 2026-08-10**, see its header for what is and is not recoverable |
 | [round-06](2026-08-09-round-06.md) | 2026-08-09 | 5 | fixed (+2 refuted) |
+| [round-07](2026-08-10-round-07.md) | 2026-08-10 | 19 | fixed (+2 refuted, +2 corrected) |
 
 ## Conventions
 
@@ -51,9 +52,17 @@ the bug classes that recurred, and what is still open.
   87 lines). Cite the function or the cell name as the durable anchor and treat
   the number as a hint. The same applies to `hescope/` modules.
 - **Say which invocation a regression test needs.** Two of round 01's fixes are
-  pinned only by `-W "error::FutureWarning"` and pass under a plain `pytest -q`
-  with the bug reintroduced. A record that says "regression coverage: the
-  existing suite" without naming the invocation overstates the guard.
+  pinned only by `-W "error::FutureWarning"` and passed under a plain
+  `pytest -q` with the bug reintroduced. Round 07 moved that flag into
+  `[tool.pytest.ini_options]` in `pyproject.toml`, so a plain `pytest -q` is
+  now sufficient — but the rule stands for any future guard that needs a
+  non-default invocation.
+- **Do not extend a guard by analogy without measuring it.** Round 07's R07-8
+  found that adding `hm_metric_dropdown` to
+  `test_sweep_controls_are_not_rebuilt_by_a_training_run`'s parametrize list
+  *passes on broken code*: that test asserts over a cell's `.refs`, and the
+  metric dropdown is a transitive DESCENDANT of the cell that refs the token,
+  not a referrer. A test that passes on broken code is worse than none.
 - **Do not cite a finding number that no record defines.** Round 06 dismissed a
   live doc gap as "the already-recorded R02-4"; no round ever wrote an R02-4, so
   the gap went unrecorded for two rounds.
@@ -61,9 +70,14 @@ the bug classes that recurred, and what is still open.
 ## Start every round with
 
 ```bash
-pytest -q -W "error::FutureWarning"   # deprecations the toolchain already knows about
+pytest -q                             # FutureWarning is an error via pyproject.toml
 python app.py                         # every notebook cell, once
 ```
 
 Reading for a pattern misses call sites; the first command found three of round
 01's issues that a careful read had not.
+
+`pytest -q -W "error::FutureWarning"` is now redundant — round 07 put
+`filterwarnings = ["error::FutureWarning"]` in `[tool.pytest.ini_options]`, so
+the guard travels with the repo instead of with the instruction. Running it
+explicitly still works and is harmless.

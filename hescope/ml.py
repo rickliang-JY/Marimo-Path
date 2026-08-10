@@ -70,6 +70,66 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _retry_on_oserror(fn, *, attempts: int = 40, delay: float = 0.005):
+    """Call ``fn``, retrying briefly while the OS says "busy".
+
+    The other half of R07-10, and the one that is easy to miss: ``os.replace``
+    stops a reader seeing a HALF-WRITTEN model, but on Windows it does not
+    make the swap invisible -- a reader that tries to OPEN the destination
+    inside the replace window gets ``PermissionError: Permission denied``.
+    Measured here, 200 atomic replaces against a tight reader loop produced 69
+    such errors in 7121 reads, every one an open failure rather than a corrupt
+    parse. ``list_models`` swallows ``OSError``, so without this the model
+    would still VANISH from the dropdown and from
+    ``get_analysis_capabilities()`` -- silently, which is the outcome that
+    matters most here.
+
+    Only ``OSError`` is retried: a malformed ``meta.json`` raises
+    ``JSONDecodeError`` and must still be reported as malformed.
+    """
+    import time
+
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
+def _replace_atomically(src: Path, dst: Path, *, attempts: int = 100) -> None:
+    """``os.replace`` with a Windows retry, falling back to an in-place copy.
+
+    ``os.replace`` is what makes a re-train invisible to a concurrent reader:
+    it swaps the whole file in one step, so ``list_models``/``load_model``
+    always see one complete generation or the other (R07-10). On Windows,
+    though, it raises ``PermissionError`` if anything currently has the
+    DESTINATION open -- which is exactly the reader this is protecting -- so
+    without the retry the fix would turn a rare corrupt read into a failed
+    training run. Reader handles are held for microseconds, so a short backoff
+    clears every collision measured here.
+
+    The final fallback is the old in-place overwrite: a model written
+    non-atomically is strictly better than a training run that is lost.
+    """
+    import time
+
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:  # Windows: destination is open elsewhere
+            if attempt == attempts - 1:
+                break
+            time.sleep(0.005)
+    dst.write_bytes(src.read_bytes())
+    try:
+        os.unlink(src)
+    except OSError:
+        pass
+
+
 def _to_feature_raster(img: "Image.Image", raster: int | None) -> "Image.Image":
     """Resample to the square raster handcrafted features are defined at.
 
@@ -283,12 +343,28 @@ def train_from_annotations(
         warning=warning,
         feature_raster=feature_raster,
     )
-    joblib.dump(pipeline, model_dir / MODEL_FILENAME)
     meta = asdict(info)
     meta["seed"] = seed
     meta["min_per_class"] = min_per_class
-    with open(model_dir / META_FILENAME, "w", encoding="utf-8") as fh:
+    # Written to temp names and os.replace()d in, because re-training under an
+    # EXISTING name is the documented workflow and readers run outside this
+    # thread: list_models() (the model dropdown and get_analysis_capabilities())
+    # and load_model() (the heatmap's model_prob path). Overwriting in place
+    # left a window in which meta.json was empty or truncated, so list_models
+    # -- which swallows a partial read -- silently reported the model as GONE,
+    # and load_model raised EOFError/JSONDecodeError. Measured on one model
+    # re-trained 60x while two readers polled: 39 vanishings in 535 list calls
+    # and 27 failures in 36 loads (R07-10). os.replace is atomic within a
+    # directory, so a reader now sees one complete generation or the other.
+    _tmp_model = model_dir / (MODEL_FILENAME + ".tmp")
+    _tmp_meta = model_dir / (META_FILENAME + ".tmp")
+    joblib.dump(pipeline, _tmp_model)
+    with open(_tmp_meta, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
+    # meta.json last: it is what list_models keys off, so the model file is
+    # already complete by the time the directory starts advertising it.
+    _replace_atomically(_tmp_model, model_dir / MODEL_FILENAME)
+    _replace_atomically(_tmp_meta, model_dir / META_FILENAME)
 
     summary = (
         f"trained model {name!r}: {info.n_samples} samples, "
@@ -324,9 +400,12 @@ def load_model(name: str, models_dir: str | Path = "data/models"):
             f"model {name!r} not found under {Path(models_dir)} "
             f"(expected {MODEL_FILENAME} and {META_FILENAME} in {model_dir})"
         )
-    pipeline = joblib.load(model_path)
-    with open(meta_path, encoding="utf-8") as fh:
-        meta = json.load(fh)
+    # Retried: a concurrent re-train under the same name swaps both files, and
+    # on Windows an open inside that window fails outright (R07-10).
+    pipeline = _retry_on_oserror(lambda: joblib.load(model_path))
+    meta = _retry_on_oserror(
+        lambda: json.loads(meta_path.read_text(encoding="utf-8"))
+    )
     return pipeline, meta
 
 
@@ -391,8 +470,13 @@ def list_models(models_dir: str | Path = "data/models") -> list[dict]:
         meta_path = child / META_FILENAME
         if child.is_dir() and meta_path.is_file():
             try:
-                with open(meta_path, encoding="utf-8") as fh:
-                    meta = json.load(fh)
+                # Retried on OSError only: a re-train swapping meta.json under
+                # us must not read as "this model does not exist" (R07-10),
+                # while a genuinely malformed meta still falls through to the
+                # skip below.
+                meta = _retry_on_oserror(
+                    lambda: json.loads(meta_path.read_text(encoding="utf-8"))
+                )
                 if isinstance(meta, dict):
                     out.append(meta)
             except (json.JSONDecodeError, OSError):

@@ -353,6 +353,42 @@ class SlideRepo:
                 s.commit()
 
 
+def plan_duplicate_slide_merge(engine: sa.Engine) -> dict:
+    """What :func:`merge_duplicate_slide_paths` WOULD do. Writes nothing.
+
+    ``dedupe-slides`` edits the artefact the whole app exists to protect — a
+    user's annotations — irreversibly and in one shot, which is why the repair
+    of the shipped ``data/hescope.db`` sat unmade for three review rounds: the
+    tool was tested, but there was no way to see its blast radius first
+    (R07-19). This is that view.
+
+    Returns ``{"merges": [(deleted_id, kept_id, path), ...], "rewrites":
+    [(slide_id, old_path, new_path), ...], "moved_rois": [(roi_id, from_slide,
+    to_slide), ...]}``. Note ``rewrites`` lists only rows whose STORED value
+    actually changes: ``merge_duplicate_slide_paths`` assigns the canonical
+    path to every keeper, but for a row that was already canonical that is a
+    no-op, and counting those overstates the change by an order of magnitude.
+    """
+    merges: list[tuple[int, str, str]] = []
+    rewrites: list[tuple[int, str, str]] = []
+    moved_rois: list[tuple[int, int, int]] = []
+    with Session(engine) as s:
+        groups: dict[str, list[Slide]] = {}
+        for slide in s.execute(select(Slide).order_by(Slide.id)).scalars():
+            groups.setdefault(normalize_slide_path(slide.path), []).append(slide)
+        for canonical, rows in groups.items():
+            keeper = rows[0]
+            for dup in rows[1:]:
+                merges.append((dup.id, keeper.id, canonical))
+                for roi in s.execute(
+                    select(ROI).where(ROI.slide_id == dup.id).order_by(ROI.id)
+                ).scalars():
+                    moved_rois.append((roi.id, dup.id, keeper.id))
+            if keeper.path != canonical:
+                rewrites.append((keeper.id, keeper.path, canonical))
+    return {"merges": merges, "rewrites": rewrites, "moved_rois": moved_rois}
+
+
 def merge_duplicate_slide_paths(engine: sa.Engine) -> list[tuple[int, int]]:
     """One-off repair for slide rows written before path normalization.
 
@@ -440,17 +476,25 @@ class ROIRepo:
         *,
         label: str | None = None,
         notes: str | None = None,
-    ) -> None:
-        """Update label/notes; ``None`` leaves the field unchanged."""
+    ) -> bool:
+        """Update label/notes; ``None`` leaves the field unchanged.
+
+        Returns whether a row was actually updated. It used to return None
+        either way, so a caller could only tell "no exception was raised" from
+        "the write landed" by re-reading — and app.py's Save button therefore
+        reported "Saved annotation for ROI N." unconditionally, including for
+        a row a second session had already deleted (R07-14).
+        """
         with Session(self.engine) as s:
             rec = s.get(ROI, roi_id)
             if rec is None:
-                return
+                return False
             if label is not None:
                 rec.label = label
             if notes is not None:
                 rec.notes = notes
             s.commit()
+            return True
 
     def get(self, roi_id: int) -> dict | None:
         """Single ROI row by id (same dict shape as ``for_slide``), or None."""
@@ -458,13 +502,19 @@ class ROIRepo:
             rec = s.get(ROI, roi_id)
             return _roi_dict(rec) if rec is not None else None
 
-    def delete(self, roi_id: int) -> None:
-        """Delete an ROI; agent_runs referencing it get roi_id set to NULL."""
+    def delete(self, roi_id: int) -> bool:
+        """Delete an ROI; agent_runs referencing it get roi_id set to NULL.
+
+        Returns whether a row was actually deleted — see
+        :meth:`update_annotation` for why the caller needs to know (R07-14).
+        """
         with Session(self.engine) as s:
             rec = s.get(ROI, roi_id)
-            if rec is not None:
-                s.delete(rec)
-                s.commit()
+            if rec is None:
+                return False
+            s.delete(rec)
+            s.commit()
+            return True
 
     def for_slide(self, slide_id: int) -> list[dict]:
         """All ROIs for a slide; each dict includes parsed ``bbox`` (ints)."""

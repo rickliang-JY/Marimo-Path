@@ -224,3 +224,61 @@ def test_lasso_malformed_returns_none():
     # a well-formed lasso still parses
     ok = parse_plotly_selection({"lasso": {"x": [0, 10, 5], "y": [0, 0, 10]}})
     assert ok["kind"] == "lasso" and len(ok["points"]) == 3
+
+
+# --- R07-16: NaN is not JSON, and the plotly parser had no finiteness check --
+
+
+def test_a_non_finite_plotly_selection_is_refused():
+    """``float("nan")`` raises none of (TypeError, ValueError, IndexError).
+
+    ``hescope.osdviewer._finite_points`` has this guard and its docstring says
+    it "mirrors the R01-3 hardening in parse_plotly_selection and ADDS a
+    finiteness check"; the plotly twin never got one back, and
+    ``test_osd_selection_matches_plotly_contract`` compares the two on
+    well-formed input only, so nothing pinned the difference. On the plotly
+    fallback surface a NaN vertex rode all the way out through
+    ``get_current_selection()`` as a bare ``NaN`` token -- Python's
+    ``json.loads`` accepts it, so a Python agent never notices, while
+    ``JSON.parse`` in a JS agent throws, and AGENTS.md 2 makes "all tools
+    return plain strings (JSON ...)" a hard rule.
+    """
+    import math
+
+    from hescope.viewer import parse_plotly_selection
+
+    nan, inf = float("nan"), float("inf")
+    assert parse_plotly_selection({"lasso": {"x": [0.0, 1.0, nan], "y": [0.0, 1.0, 2.0]}}) is None
+    assert parse_plotly_selection({"lasso": {"x": [0.0, 1.0, 2.0], "y": [0.0, inf, 2.0]}}) is None
+    assert parse_plotly_selection({"range": {"x": [nan, 5.0], "y": [0.0, 5.0]}}) is None
+    assert parse_plotly_selection({"range": {"x": [0.0, 5.0], "y": [0.0, inf]}}) is None
+
+    # ...and a finite selection is untouched
+    ok = parse_plotly_selection({"lasso": {"x": [0.0, 10.0, 5.0], "y": [0.0, 0.0, 10.0]}})
+    assert all(math.isfinite(c) for p in ok["points"] for c in p)
+
+
+def test_the_agent_contract_stays_strict_json_on_the_plotly_surface(source):
+    """End to end through the REAL tool factory, in strict-JSON terms."""
+    from hescope.agent_bridge import make_live_selection_tool
+    from hescope.viewer import current_selection
+
+    tool = make_live_selection_tool(
+        lambda: current_selection(
+            source,
+            VP,
+            {
+                "lasso": {
+                    "x": [10.0, 200.0, float("nan")],
+                    "y": [10.0, 20.0, 300.0],
+                }
+            },
+        )
+    )
+
+    out = tool()
+
+    assert out == "NO_SELECTION", (
+        "a NaN vertex reached the agent contract as a bare `NaN` token: "
+        f"{out!r} -- valid to Python's json.loads, fatal to JSON.parse"
+    )

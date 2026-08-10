@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 from dataclasses import dataclass, replace as dc_replace
 from typing import Any, Iterable, Literal
 
@@ -272,6 +273,8 @@ def parse_plotly_selection(value: dict | None) -> dict | None:
             y0, y1 = float(rng["y"][0]), float(rng["y"][1])
         except (TypeError, ValueError, IndexError):
             return None
+        if not all(math.isfinite(v) for v in (x0, x1, y0, y1)):
+            return None
         return {
             "kind": "box",
             "points": [(min(x0, x1), min(y0, y1)), (max(x0, x1), max(y0, y1))],
@@ -284,6 +287,16 @@ def parse_plotly_selection(value: dict | None) -> dict | None:
             xs, ys = lasso["x"], lasso["y"]
             pts = [(float(x), float(y)) for x, y in zip(xs, ys)]
         except (TypeError, ValueError, IndexError):
+            return None
+        # Finiteness, NOT just parseability: float("nan") raises none of the
+        # exceptions above, and a NaN coordinate rides all the way out through
+        # get_current_selection() as a bare `NaN` token. AGENTS.md 2 makes
+        # "the tools return JSON" a hard rule, and NaN is not JSON -- Python's
+        # json.loads accepts it, so a Python agent never notices, while
+        # JSON.parse in a JS agent throws. hescope.osdviewer._finite_points is
+        # the same guard on the OpenSeadragon surface; this is the twin it
+        # says it mirrors (R07-16).
+        if not all(math.isfinite(x) and math.isfinite(y) for x, y in pts):
             return None
         if len(pts) >= 3:
             return {"kind": "lasso", "points": pts}

@@ -71,7 +71,7 @@ def _():
     )
     from hescope.overlay import draw_navigator_markers, draw_scale_bar
     from hescope.qc import qc_report
-    from hescope.rois import ROI, ViewportState, extract_patch
+    from hescope.rois import ROI, ViewportState, extract_patch, patch_mpp
     from hescope.slides import open_slide
     from hescope.tileserver import (
         DisplayParams,
@@ -168,6 +168,7 @@ def _():
         os,
         osd_current_selection,
         parse_osd_measure,
+        patch_mpp,
         qc_report,
         raw_osd_selection,
         raw_plotly_selection,
@@ -354,13 +355,26 @@ def _(mo):
     # are inert when called from a foreign thread. The worker writes here; the
     # ticker cell renders progress and publishes the finished grid to mo.state
     # on the main thread.
-    hm_job = {"thread": None, "progress": None, "result": None, "msg": None}
+    # "slide" is the SlideSource the values currently sitting in "result" and
+    # "msg" were measured on. The worker publishes minutes after the click and
+    # writes AFTER _open_slide_path's clear, so clearing at slide-OPEN time
+    # (R04-3) cannot reach it; the ticker compares this token against the open
+    # slide at PUBLISH time instead (R07-1).
+    hm_job = {
+        "thread": None, "progress": None, "result": None, "msg": None,
+        "slide": None,
+    }
     hm_ticker = mo.ui.refresh(options=["1s"], default_interval="1s")
     # Background training run, same shape and for the same reasons: feature
     # extraction is ~0.04 s per patch and a realistic annotation set is
     # hundreds of ROIs, so running it inline froze the kernel (measured:
     # 19.7 s for 20 ROIs before this) with no message and no way to re-render.
     train_job = {"thread": None, "result": None, "msg": None}
+    # The user's last pick for the two heatmap dropdowns. A PLAIN dict, not
+    # mo.state, on purpose: both dropdowns live in cells that get_models_version
+    # re-runs, and a reactive channel would add a dependency edge back into
+    # them. Written from their on_change, read as their value= (R07-8).
+    hm_choice = {"model": None, "metric": "tissue_fraction"}
     return (
         get_analysis_msg,
         get_analysis_result,
@@ -368,6 +382,7 @@ def _(mo):
         get_models_version,
         get_train_info,
         get_train_msg,
+        hm_choice,
         hm_job,
         hm_ticker,
         set_analysis_msg,
@@ -450,6 +465,16 @@ def _(
         src = open_slide(p)
         set_source(src)
         set_measure_msg(None)
+        # ...and every MESSAGE about the old slide, not just the data behind
+        # it. set_db_msg was the one channel this function did not reset, and
+        # it is the channel carrying every success string in the app: "Sent
+        # ROI to agent: rect bbox=[...] -- the agent reads it with
+        # get_latest_selection()" stood, verbatim and actionable, over the
+        # newly opened slide, so an agent that followed the callout analysed
+        # slide A's region while the user looked at slide B (R07-4). Cleared
+        # BEFORE the tile-server and registration failures below, which write
+        # to this same channel about the NEW slide.
+        set_db_msg(None)
         # A slide boundary invalidates EVERYTHING derived from the old slide.
         # All of it is level-0 geometry or level-0 pixel statistics, and none
         # of it carries the slide it came from, so left in place it is
@@ -526,13 +551,28 @@ def _(
         else:
             set_slide_id(None)
 
+    # The three open actions below are the ONLY click handlers in this file
+    # that had no error path. marimo swallows an exception raised inside an
+    # on_click callback (it logs to the KERNEL's stderr -- the terminal running
+    # `marimo edit`, not the browser -- and returns normally), so a mistyped
+    # path or an unreadable upload changed nothing on screen at all: no
+    # callout, no message, and the previous slide still rendered. That is
+    # byte-identical to successfully re-opening the same slide (R07-5). The
+    # comment above says the panel is hardened, and its WIDGETS are; the
+    # ACTIONS were not.
     def _on_open_clicked(_):
         _v = getattr(path_input, "value", None)
         if _v:
-            _open_slide_path(_v, source_kind="local")
+            try:
+                _open_slide_path(_v, source_kind="local")
+            except Exception as _exc:
+                set_db_msg(("danger", f"Could not open {_v}: {_exc}"))
 
     def _on_demo_clicked(_):
-        _open_slide_path(str(ensure_demo_slide()), source_kind="local")
+        try:
+            _open_slide_path(str(ensure_demo_slide()), source_kind="local")
+        except Exception as _exc:
+            set_db_msg(("danger", f"Could not open the demo slide: {_exc}"))
 
     # Open a slide on startup so the app comes up showing an image instead of
     # an empty frame waiting for a click. ensure_demo_slide() reuses the
@@ -555,9 +595,12 @@ def _(
     def _on_upload(files):
         if files:
             _f = files[0]
-            _tmp = Path(tempfile.mkdtemp(prefix="hescope_upload_")) / _f.name
-            _tmp.write_bytes(_f.contents)
-            _open_slide_path(str(_tmp), source_kind="upload")
+            try:
+                _tmp = Path(tempfile.mkdtemp(prefix="hescope_upload_")) / _f.name
+                _tmp.write_bytes(_f.contents)
+                _open_slide_path(str(_tmp), source_kind="upload")
+            except Exception as _exc:
+                set_db_msg(("danger", f"Could not open {_f.name}: {_exc}"))
 
     try:
         path_input = mo.ui.text(
@@ -1017,12 +1060,18 @@ def _(
     get_vp,
     jump_viewport_for_bbox,
     move_camera,
+    set_db_msg,
     ui_actions,
 ):
     # Camera actions for the toolbar buttons AND for the annotation browser.
     # Kept out of every UI-building cell on purpose (see the comment in the
     # toolbar cell): this cell reads the live viewport, so it re-runs whenever
-    # the view moves, and it must therefore build no UI.
+    # the view moves, and it must therefore build no UI. Referencing the
+    # set_db_msg SETTER adds no dependency edge -- only the getter would.
+    #
+    # Every action below reports its own failure, because marimo swallows an
+    # exception raised inside an on_click callback into the kernel's stderr
+    # and the click then looks exactly like a click that worked (R07-5).
     def _pan(dx, dy):
         # step = 25% of the viewport, in level-0 coordinates
         _vp = get_vp()
@@ -1038,19 +1087,25 @@ def _(
         _s = get_source()
         if _s is None:
             return
-        _w, _h = _s.dimensions
-        move_camera(
-            ViewportState(
-                center=(_w / 2.0, _h / 2.0),
-                downsample=max(_s.level_downsamples),
-                size=get_vp().size,
+        try:
+            _w, _h = _s.dimensions
+            move_camera(
+                ViewportState(
+                    center=(_w / 2.0, _h / 2.0),
+                    downsample=max(_s.level_downsamples),
+                    size=get_vp().size,
+                )
             )
-        )
+        except Exception as _exc:
+            set_db_msg(("danger", f"Zoom to fit failed: {_exc}"))
 
     def _on_zoom(v):
         if get_source() is None:
             return
-        move_camera(dc_replace(get_vp(), downsample=max(float(v), 1.0)))
+        try:
+            move_camera(dc_replace(get_vp(), downsample=max(float(v), 1.0)))
+        except Exception as _exc:
+            set_db_msg(("danger", f"Zoom failed: {_exc}"))
 
     def _on_jump_bbox(bbox):
         """Center the viewer on a level-0 bbox (annotation click-to-jump).
@@ -1069,15 +1124,19 @@ def _(
         _s = get_source()
         if _s is None or not bbox:
             return
-        _center, _ds = jump_viewport_for_bbox(
-            bbox,
-            get_vp().size,
-            max_downsample=float(max(_s.level_downsamples)),
-        )
-        # move_camera, not set_vp: set_vp only updates ViewportState
-        # (navigator/header), leaving the OpenSeadragon surface -- the default
-        # one, the one actually showing the slide -- exactly where it was.
-        move_camera(dc_replace(get_vp(), center=_center, downsample=_ds))
+        try:
+            _center, _ds = jump_viewport_for_bbox(
+                bbox,
+                get_vp().size,
+                max_downsample=float(max(_s.level_downsamples)),
+            )
+            # move_camera, not set_vp: set_vp only updates ViewportState
+            # (navigator/header), leaving the OpenSeadragon surface -- the
+            # default one, the one actually showing the slide -- exactly where
+            # it was.
+            move_camera(dc_replace(get_vp(), center=_center, downsample=_ds))
+        except Exception as _exc:
+            set_db_msg(("danger", f"Could not jump to {bbox}: {_exc}"))
 
     # `fn=_pan` binds the function OBJECT now. A bare `lambda _: _pan(...)`
     # defers the lookup to click time, and by then marimo's cell-private name
@@ -1540,6 +1599,12 @@ def _(
     # between "the agent can read my selection" and "the UI ignores it" is
     # exactly what a second selection path buys you.
     def _on_add_roi(_):
+        try:
+            _add_roi_or_measure()
+        except Exception as _exc:  # marimo swallows this otherwise (R07-5)
+            set_measure_msg(("danger", f"Add ROI failed: {_exc}"))
+
+    def _add_roi_or_measure():
         # Measure mode FIRST, through live_measure(): asking live_selection()
         # here is blind to the OpenSeadragon measure vocabulary (kind
         # "measure" is refused on purpose), so the None branch below fired on
@@ -1943,9 +2008,24 @@ def _(
                 set_db_msg(("warn", "Select an ROI row first."))
                 return
             try:
-                db.roi_repo.update_annotation(
+                # ...ask the repository what it DID. update_annotation is
+                # documented to no-op on a row that is gone, and this message
+                # used to be written on the sole condition that nothing raised,
+                # so "Saved annotation for ROI 1." was reported in green for a
+                # row a second session had already deleted (R07-14).
+                _saved = db.roi_repo.update_annotation(
                     _rid, label=label_input.value, notes=notes_input.value
                 )
+                if not _saved:
+                    set_ann_version(object())  # the table is out of date
+                    set_db_msg(
+                        (
+                            "warn",
+                            f"ROI {_rid} no longer exists (deleted in another "
+                            "session?); nothing was saved.",
+                        )
+                    )
+                    return
                 # Trace the HUMAN label write. The agent's annotate_roi tool
                 # has always recorded this kind; without the line below the
                 # interactions table said only the agent ever labels anything.
@@ -1971,7 +2051,16 @@ def _(
                 set_db_msg(("warn", "Select an ROI row first."))
                 return
             try:
-                db.roi_repo.delete(_rid)
+                # Same rule as _on_save: report the outcome, not the attempt.
+                if not db.roi_repo.delete(_rid):
+                    set_ann_version(object())
+                    set_db_msg(
+                        (
+                            "warn",
+                            f"ROI {_rid} was already gone; nothing was deleted.",
+                        )
+                    )
+                    return
                 # Recorded AFTER the row is gone, and deliberately not
                 # roi_id-linked in the FK sense: a rejected ROI is the most
                 # informative event the trace can hold, and the row it names
@@ -1993,40 +2082,75 @@ def _(
             label="Delete ROI", kind="danger", on_click=_on_delete
         )
 
-        def _export(fmt):
-            # Export the current slide's ROIs (or all when no slide is open);
-            # failures surface as downloadable text, never a crash.
+        # Export the current slide's ROIs (or all when no slide is open).
+        #
+        # A failure must not be delivered as a successful download. It used to
+        # be: the except returned "export failed: <exc>" and mo.download handed
+        # that string over as rois.json / rois.csv / rois.geojson, with the
+        # right filename and the right mimetype, so the browser performed an
+        # ordinary download and the user walked away believing the annotations
+        # were exported. The failure then surfaced somewhere else entirely --
+        # QuPath rejecting the GeoJSON, a script's json.loads raising -- with
+        # nothing pointing back at the click (R07-6).
+        #
+        # mo.download evaluates a callable `filename` as well as callable
+        # `data`, both at click time, so the name can report what happened.
+        # _pending caches the one export per click; whichever callable marimo
+        # invokes first fills it, the other consumes it. Order-independent by
+        # construction, and it never serves a cached body from an earlier
+        # click.
+        _pending: dict = {}
+
+        def _export_once(fmt, produce):
+            if fmt in _pending:
+                return _pending[fmt]
             try:
-                return export_rois(db.engine, slide_id=get_slide_id(), fmt=fmt)
+                _pending[fmt] = (True, produce())
             except Exception as _exc:
-                return f"export failed: {_exc}"
+                _pending[fmt] = (False, f"export failed: {_exc}")
+            return _pending[fmt]
 
-        export_json_button = mo.download(
-            data=lambda: _export("json"),
-            filename="rois.json",
-            mimetype="application/json",
-            label="Export ROIs (JSON)",
-        )
-        export_csv_button = mo.download(
-            data=lambda: _export("csv"),
-            filename="rois.csv",
-            mimetype="text/csv",
-            label="Export ROIs (CSV)",
-        )
+        def _export_data(fmt, produce):
+            _ok, _text = _export_once(fmt, produce)
+            _pending.pop(fmt, None)  # this click is over
+            return _text
 
-        def _export_geojson():
+        def _export_filename(fmt, produce, good):
+            _ok, _text = _export_once(fmt, produce)
+            # A ".txt" the user cannot mistake for their annotations, instead
+            # of a correctly-named file with an error message inside it.
+            return good if _ok else f"{good}.EXPORT-FAILED.txt"
+
+        def _rois(fmt):
+            return lambda: export_rois(db.engine, slide_id=get_slide_id(), fmt=fmt)
+
+        def _geojson():
             # README advertises "one click turns annotations into a
             # QuPath-compatible FeatureCollection"; until R05-8 the only
             # entry point was hescope.geojson, which app.py never called, so
             # the one interop feature on the user-facing list was agent-only.
-            try:
-                return slide_geojson_text(db.engine, get_slide_id())
-            except Exception as _exc:
-                return f"export failed: {_exc}"
+            # slide_id=None means ALL ROIs here, exactly as it does for
+            # export_rois beside it -- it used to mean an empty
+            # FeatureCollection (R07-7).
+            return slide_geojson_text(db.engine, get_slide_id())
 
+        export_json_button = mo.download(
+            data=lambda: _export_data("json", _rois("json")),
+            filename=lambda: _export_filename("json", _rois("json"), "rois.json"),
+            mimetype="application/json",
+            label="Export ROIs (JSON)",
+        )
+        export_csv_button = mo.download(
+            data=lambda: _export_data("csv", _rois("csv")),
+            filename=lambda: _export_filename("csv", _rois("csv"), "rois.csv"),
+            mimetype="text/csv",
+            label="Export ROIs (CSV)",
+        )
         export_geojson_button = mo.download(
-            data=lambda: _export_geojson(),
-            filename="rois.geojson",
+            data=lambda: _export_data("geojson", _geojson),
+            filename=lambda: _export_filename(
+                "geojson", _geojson, "rois.geojson"
+            ),
             mimetype="application/geo+json",
             label="Export ROIs (GeoJSON, QuPath)",
         )
@@ -2069,7 +2193,15 @@ def _(Path, mo):
     # (no cell can re-render mid-download), so the worker writes here and
     # the 1s refresh ticker in the status cell renders/consumes these
     # values on the main thread.
-    tcga_dl = {"thread": None, "progress": None, "msg": None, "open_path": None}
+    # "downloaded" says whether the file behind "open_path" was fetched and
+    # md5-verified by this session, or was simply already on disk. The status
+    # cell used to compose its message from the branch it was on rather than
+    # from what happened, and reported "Downloaded and opened X" for a file
+    # nothing had fetched or checked (R07-13, R01-4's own class).
+    tcga_dl = {
+        "thread": None, "progress": None, "msg": None, "open_path": None,
+        "downloaded": False,
+    }
     # 1s auto-refresh ticker (value read by the status cell -> re-render)
     tcga_ticker = mo.ui.refresh(options=["1s"], default_interval="1s")
     return (
@@ -2117,7 +2249,21 @@ def _(
             set_tcga_msg(("danger", f"GDC search failed: {_exc}"))
 
     def _on_browse_catalog(_v):
-        set_tcga_records(tcga_catalog.search())
+        # limit=100000 to match the two neighbouring calls in this panel:
+        # SlideCatalog.search defaults to 200, so browsing a catalog with more
+        # rows than that quietly showed a truncated list directly under a
+        # status line reading "catalog: N slides" computed from every row
+        # (R07-15). And this action has to write its OWN message, or a red
+        # "GDC search failed" from an earlier click stands above a result list
+        # that was produced successfully (R07-4).
+        try:
+            _records = tcga_catalog.search(limit=100000)
+            set_tcga_records(_records)
+            set_tcga_msg(
+                ("info", f"Local catalog: {len(_records)} slides.")
+            )
+        except Exception as _exc:
+            set_tcga_msg(("danger", f"Reading the local catalog failed: {_exc}"))
 
     (
         tcga_filter_layout,
@@ -2175,7 +2321,14 @@ def _(
         # handled on the main thread exactly as before.
         _local = tcga_catalog.local_file(_fid)
         if _local is not None:
-            tcga_dl.update(progress=None, msg=None, open_path=str(_local))
+            # downloaded=False: nothing was fetched and no md5 was verified on
+            # this path, so the status cell must not report "Downloaded and
+            # opened". "Downloaded" is an integrity claim in this app --
+            # download_slide checks expected_md5, and local_file only checks
+            # that the path exists (R07-13).
+            # `msg` is deliberately left alone: it may hold a result the 1s
+            # ticker has not drained yet (R07-17).
+            tcga_dl.update(progress=None, open_path=str(_local), downloaded=False)
             return
 
         # integrity check source: md5 carried by the table row if any,
@@ -2188,7 +2341,11 @@ def _(
             ),
             None,
         )
-        tcga_dl.update(progress=(0, None), msg=None, open_path=None)
+        # Only `progress` is reset. Clearing `msg` and `open_path` here threw
+        # away a hand-off the ticker had not drained yet -- and open_path is a
+        # finished, md5-verified, possibly gigabyte download, which would then
+        # sit on disk never opened and never mentioned (R07-17).
+        tcga_dl["progress"] = (0, None)
 
         def _work():
             try:
@@ -2208,6 +2365,7 @@ def _(
                 # Report only what this thread actually did: opening happens
                 # later on the main thread and can still fail, so the final
                 # message is written there.
+                tcga_dl["downloaded"] = True
                 tcga_dl["open_path"] = str(_path)
                 tcga_dl["msg"] = ("success", f"Downloaded {_path.name}")
             except Exception as _exc:  # network / HTTP error: never crash
@@ -2257,6 +2415,10 @@ def _(
 
     if tcga_dl["open_path"]:
         _p = tcga_dl["open_path"]
+        # Did THIS session fetch and verify the file, or was it already there?
+        # Both branches reach the same open, and both used to end in the same
+        # "Downloaded and opened" string (R07-13).
+        _fetched = tcga_dl.get("downloaded", False)
         tcga_dl["open_path"] = None
         _name = Path(_p).name
         # A verified download can still be unopenable (no backend handles
@@ -2265,11 +2427,20 @@ def _(
         # success.
         try:
             open_slide_path(_p, source_kind="tcga")
-            tcga_dl["msg"] = ("success", f"Downloaded and opened {_name}")
+            tcga_dl["msg"] = (
+                ("success", f"Downloaded and opened {_name}")
+                if _fetched
+                else ("success", f"Opened {_name} (already downloaded)")
+            )
         except Exception as _exc:
             tcga_dl["msg"] = (
                 "danger",
-                f"Downloaded {_name}, but opening it failed: {_exc}",
+                (
+                    f"Downloaded {_name}, but opening it failed: {_exc}"
+                    if _fetched
+                    else f"{_name} is already on disk, but opening it "
+                    f"failed: {_exc}"
+                ),
             )
         try:
             set_tcga_records(
@@ -2308,6 +2479,7 @@ def _(
     get_source,
     live_selection,
     mo,
+    patch_mpp,
     qc_report,
     set_analysis_result,
 ):
@@ -2360,8 +2532,16 @@ def _(
                 )
                 return
             _patch = extract_patch(_src, _roi, max_size=1024)
-            _labels, _nuc = detect_nuclei(_patch, mpp=_src.mpp)
-            _qc = qc_report(_patch, mpp=_src.mpp)
+            # detect_nuclei's mpp is microns per PATCH pixel -- it multiplies
+            # it by the patch's own height and width to get an area in mm^2 --
+            # and extract_patch thumbnails anything wider than 1024 level-0 px.
+            # Passing the slide's LEVEL-0 mpp therefore divided the count by an
+            # area 1/downsample^2 too small: measured 16.00x overstatement on a
+            # 4096 px ROI of the TCGA slide, under a green "Analyzed" callout
+            # that prints the true patch size right next to it (R07-2).
+            _mpp = patch_mpp(_src, _roi, _patch)
+            _labels, _nuc = detect_nuclei(_patch, mpp=_mpp)
+            _qc = qc_report(_patch, mpp=_mpp)
             db.trace(
                 "analysis_run",
                 payload={
@@ -2439,18 +2619,30 @@ def _(analyze_button, get_analysis_result, mo):
 
 
 @app.cell(hide_code=True)
-def _(MODELS_DIR, get_models_version, list_models, mo):
+def _(MODELS_DIR, get_models_version, hm_choice, list_models, mo):
     # Heatmap controls (Analysis accordion). The model dropdown is rebuilt
-    # whenever get_models_version changes (after training).
+    # whenever get_models_version changes (after training) -- refreshing its
+    # OPTIONS is the whole point of the token. Refreshing its SELECTION is not:
+    # marimo stamps a re-constructed mo.ui element with a fresh token so it
+    # comes back at its default, which for this dropdown was "nothing chosen".
+    # A successful "Train from annotations" therefore silently un-picked the
+    # user's model -- on the one click after which they most want a
+    # model_prob sweep (R07-8, R04-4's class). hm_choice is a plain
+    # (non-reactive) dict, so remembering the pick adds no dependency edge.
     get_models_version()
     try:
         hm_models = list_models(str(MODELS_DIR))
     except Exception:
         hm_models = []
+    _model_opts = [_m.get("name", "?") for _m in hm_models]
     hm_model_dropdown = mo.ui.dropdown(
-        options=[_m.get("name", "?") for _m in hm_models],
+        options=_model_opts,
+        # A value no longer on offer raises out of the cell, so a model that
+        # was deleted or renamed falls back to "nothing chosen".
+        value=hm_choice["model"] if hm_choice["model"] in _model_opts else None,
         label="model (for model_prob metrics)",
         allow_select_none=True,
+        on_change=lambda _v: hm_choice.__setitem__("model", _v),
     )
     return hm_model_dropdown, hm_models
 
@@ -2475,8 +2667,17 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(hm_model_dropdown, hm_models, mo):
+def _(hm_choice, hm_model_dropdown, hm_models, mo):
     # Metric dropdown, built dynamically from the selected model's labels.
+    #
+    # This cell is a DESCENDANT of the model dropdown, so it re-runs on every
+    # successful train too, and its hardcoded value= reset the user's chosen
+    # metric to "tissue_fraction" at the same time (R07-8). It cannot be moved
+    # out of that closure the way R04-4 moved the tile slider: its options
+    # genuinely depend on the selected model's labels. So the previous choice
+    # is remembered in the same non-reactive dict instead, and honoured only
+    # while it is still on offer -- picking a model_prob label the new model
+    # does not have would raise out of the cell.
     _opts = ["tissue_fraction", "nuclei_density"]
     _name = hm_model_dropdown.value
     if _name:
@@ -2488,7 +2689,10 @@ def _(hm_model_dropdown, hm_models, mo):
                 f"model_prob:{_lab}" for _lab in _meta.get("labels", [])
             ]
     hm_metric_dropdown = mo.ui.dropdown(
-        options=_opts, value="tissue_fraction", label="heatmap metric"
+        options=_opts,
+        value=hm_choice["metric"] if hm_choice["metric"] in _opts else "tissue_fraction",
+        label="heatmap metric",
+        on_change=lambda _v: hm_choice.__setitem__("metric", _v),
     )
     return (hm_metric_dropdown,)
 
@@ -2511,6 +2715,7 @@ def _(
     mo,
     render_heatmap,
     set_analysis_msg,
+    set_hm_result,
     tissue_fraction_proxy,
     threading,
     viewport_png_bytes,
@@ -2577,7 +2782,16 @@ def _(
         # axis so sweeps stay interactive; >= 1.0 (never upsample).
         _w, _h = _src.dimensions
         _ds = max(1.0, max(_w, _h) / (_tile * 48.0))
-        hm_job.update(progress=(0, 1), result=None, msg=None)
+        # Hand over anything the 1s ticker has not drained yet BEFORE this
+        # click overwrites the slots. Worker and ticker share three plain dict
+        # entries with no ordering guarantee, so a sweep that finished in the
+        # last second was simply discarded by the reset below (R07-17). Only
+        # the GRID is rescued: its message is superseded by "sweep started"
+        # on the very next line, and only a grid measured on the slide still
+        # open can honestly be shown (R07-1).
+        if hm_job["result"] is not None and hm_job["slide"] is _src:
+            set_hm_result(hm_job["result"])
+        hm_job.update(progress=(0, 1), result=None, msg=None, slide=_src)
         set_analysis_msg(("info", f"Heatmap '{_metric}': sweep started."))
         # Traced on the MAIN thread, before the worker starts: the sweep runs
         # for minutes and may be abandoned, and what the trace is about is the
@@ -2688,6 +2902,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    get_source,
     hm_job,
     hm_ticker,
     mo,
@@ -2712,11 +2927,36 @@ def _(
     # mo.ui.refresh widget must not be displayed from two cells.
     hm_ticker.value  # dependency: re-run on every tick
 
+    # PROVENANCE IS CHECKED HERE, AT PUBLISH TIME, not cleared at open time.
+    # A sweep of the 81671x18211 TCGA slide runs for minutes and the user is
+    # free to change slides while it does; the worker then writes its grid and
+    # its green "N cells measured" into hm_job long after _open_slide_path
+    # cleared hm_result, and this cell used to publish both unconditionally.
+    # The navigator's `except Exception: pass` cannot catch that -- a grid from
+    # another slide does not raise, render_heatmap just resizes it -- so slide
+    # A's metric grid landed on slide B's tissue under a success callout, with
+    # grid_coverage rescaling it into a registration that means nothing
+    # (R07-1, the live half of R04-3 that R04-6's worker thread reopened).
+    _hm_stale = hm_job["slide"] is not None and hm_job["slide"] is not get_source()
     if hm_job["result"] is not None:
-        set_hm_result(hm_job["result"])
+        if not _hm_stale:
+            set_hm_result(hm_job["result"])
         hm_job["result"] = None
     if hm_job["msg"] is not None:
-        set_analysis_msg(hm_job["msg"])
+        if _hm_stale:
+            # Say so rather than drop it: the sweep really did run, and an
+            # empty panel where a result was expected is its own small lie.
+            set_analysis_msg(
+                (
+                    "warn",
+                    "A heatmap sweep of "
+                    f"'{getattr(hm_job['slide'], 'name', 'another slide')}' "
+                    "finished after the slide was changed. Its grid is not "
+                    "shown, because it does not describe the slide on screen.",
+                )
+            )
+        else:
+            set_analysis_msg(hm_job["msg"])
         hm_job["msg"] = None
 
     if train_job["result"] is not None:

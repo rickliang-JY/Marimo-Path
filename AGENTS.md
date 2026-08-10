@@ -57,8 +57,8 @@ After that, the entry points below are live in the kernel globals.
 | `open_slide` | `hescope.slides.open_slide(path) -> SlideSource`. |
 | `ensure_demo_slide()` | Returns the demo slide path, generating `assets/demo_he.png` in-process if missing. |
 | `get_source()` / `get_vp()` | State accessors: current `SlideSource | None` and `ViewportState` (center, downsample, size). |
-| `roi_plot` | The `mo.ui.plotly` capture surface (`None` before a slide is open); `roi_plot.value` is the raw plotly selection. |
-| `get_analysis_capabilities()` | Zero-arg tool returning a JSON string: `{"analyses": [...], "torch_embedding_available": bool, "models": [...]}` (trained classifiers under `data/models/`). Never raises — on failure returns `{"error": ...}`. |
+| `roi_plot` | The legacy `mo.ui.plotly` capture surface, and **`None` on the surface the app normally ships**: it is built only when OpenSeadragon is unavailable (`app.py`: `if _src is None or get_tiles() is not None: roi_plot = None`), so with a slide open it is still `None` on a default install. Use `get_current_selection()`, which picks the live surface for you; `roi_plot.value` is the raw plotly selection when the fallback *is* in use. |
+| `get_analysis_capabilities()` | Zero-arg tool returning a JSON string: `{"analyses": [...], "torch_embedding_available": bool, "available_encoders": {...}, "models": [...]}` (trained classifiers under `data/models/`). Never raises — on failure returns `{"error": ...}`. `available_encoders` is `{"default": <name>, "torch_importable": bool, "encoders": [...]}`; each encoder spec carries `license` and `commercial_ok`, so **consult it before choosing an encoder** — `uni2h` is `commercial_ok=false` and gated, `gpfm` is MIT. |
 | `get_slide_info()` | Zero-arg tool: JSON metadata of the open slide — `{"name", "dimensions": [w, h], "mpp", "levels", "level_downsamples", "db_id", "annotation_count"}` (`db_id`/`annotation_count` are `null` in DB-free mode). Returns the exact string `NO_SLIDE` when no slide is open. Never raises. |
 | `annotate_roi(roi_id, label=None, notes=None)` | Writes label/notes back to the rois table (`ROIRepo.update_annotation`) and returns the updated row JSON. Returns `{"error": ...}` in DB-free mode, for an invalid/unknown `roi_id`, or on any failure. Records an `interactions` row (`kind=label_set`). |
 | `query_annotations(label=None, limit=50)` | JSON list of the current slide's annotation rows (same dict shape as `ROIRepo.for_slide`), optionally exact-label filtered. Returns `[]` when no slide is open, `{"error": ...}` in DB-free mode. Records an `interactions` row (`kind=tool_call`). |
@@ -200,11 +200,12 @@ lazily by `hescope.features.extract_embedding`.
 import json
 
 import hescope
-from hescope.rois import ROI, extract_patch
+from hescope.rois import ROI, extract_patch, patch_mpp
 
 # What is available right now (never raises; check the "error" key):
 caps = json.loads(get_analysis_capabilities())
-# -> {"analyses": [...], "torch_embedding_available": bool, "models": [...]}
+# -> {"analyses": [...], "torch_embedding_available": bool,
+#     "available_encoders": {...}, "models": [...]}
 
 # Nuclei + QC on the live selection patch:
 raw = get_current_selection()
@@ -213,10 +214,15 @@ if raw != "NO_SELECTION":
     roi = ROI(kind=sel["kind"],
               points=tuple(tuple(p) for p in sel["points_level0"]))
     patch = extract_patch(get_source(), roi, max_size=1024)
-    labels, stats = hescope.detect_nuclei(patch, mpp=sel["mpp"])
+    # NOT sel["mpp"] -- that is the LEVEL-0 mpp, and extract_patch downsamples
+    # anything wider than max_size. detect_nuclei's mpp is microns per PATCH
+    # pixel, so the level-0 value overstates density_per_mm2 by the extraction
+    # downsample SQUARED (16x for a 4096 px ROI). patch_mpp does the division.
+    mpp = patch_mpp(get_source(), roi, patch)
+    labels, stats = hescope.detect_nuclei(patch, mpp=mpp)
     # stats: NucleiStats(count, density_per_mm2, mean_area_px,
     #                    mean_intensity_h, mask_coverage)
-    qc = hescope.qc_report(patch, mpp=sel["mpp"])
+    qc = hescope.qc_report(patch, mpp=mpp)
     # qc: {"tissue_fraction", "blur_score", "is_blurry", "brightness_mean"}
 
 # Whole-slide metric grid + heatmap overlay (tissue_fraction_proxy is the

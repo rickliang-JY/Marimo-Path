@@ -8,7 +8,14 @@ from .agent_bridge import (
     make_marimo_tool,
     selection_stats,
 )
-from .rois import ROI, ViewportState, extract_patch, roi_stats, viewport_transform
+from .rois import (
+    ROI,
+    ViewportState,
+    extract_patch,
+    patch_mpp,
+    roi_stats,
+    viewport_transform,
+)
 from .slides import (
     OpenSlideSource,
     PillowSource,
@@ -144,6 +151,7 @@ __all__ = [
     "make_marimo_tool",
     "make_prob_metric",
     "open_slide",
+    "patch_mpp",
     "predict_patch",
     "qc_report",
     "reinhard_normalize",

@@ -125,6 +125,35 @@ def extract_patch(
     return patch
 
 
+def patch_mpp(
+    source: SlideSource, roi: ROI, patch: "Image.Image"
+) -> float | None:
+    """Microns per pixel OF ``patch``, as returned by :func:`extract_patch`.
+
+    ``extract_patch`` reads from a downsampled pyramid level and then
+    thumbnails whatever is still wider than ``max_size``, so a patch pixel is
+    generally NOT a level-0 pixel. Anything physically calibrated from the
+    patch has to use this rather than ``source.mpp`` — ``detect_nuclei``
+    derives an area in mm^2 from ``mpp`` and the PATCH's pixel dimensions, so
+    the level-0 value overstates ``density_per_mm2`` by the extraction
+    downsample SQUARED: 16x for a 4096 px ROI capped at 1024 px (R07-2).
+
+    Returns None when the slide has no mpp, matching ``SlideSource.mpp``.
+    """
+    if source.mpp is None:
+        return None
+    x0, y0, x1, y1 = roi.bbox()
+    w = max(1, x1 - x0)
+    h = max(1, y1 - y0)
+    pw, ph = patch.size
+    if pw <= 0 or ph <= 0:  # degenerate crop: no scale to derive
+        return float(source.mpp)
+    # Both the level read and the thumbnail preserve aspect, so the two axes
+    # agree up to the ceil() rounding in extract_patch's read_size; take the
+    # larger, which is the axis the thumbnail actually fitted.
+    return float(source.mpp) * max(w / float(pw), h / float(ph))
+
+
 def roi_shape_mask(patch: "Image.Image", roi: ROI) -> "np.ndarray":
     """Boolean mask of ``roi``'s shape on ``patch``'s pixel grid.
 

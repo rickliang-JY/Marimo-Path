@@ -643,6 +643,17 @@ class TileServer:
         name: str | None = None,
         refs: SlideRefs | None = None,
     ) -> str:
+        if self._shutdown:
+            # A shut-down server accepted registrations and handed back a
+            # perfectly well-formed tile_source dict on a port nothing is
+            # listening on. app.py's `except Exception -> fall back to the
+            # legacy plotly viewer` guard cannot fire on a success, so the
+            # user got a permanently blank OpenSeadragon canvas and no message
+            # (R07-12). Refusing here is what makes that guard reachable.
+            raise RuntimeError(
+                "tile server has been shut down; call ensure_server() for a "
+                "fresh one"
+            )
         downsamples = [float(d) for d in source.level_downsamples]
         if downsamples != sorted(downsamples):
             # best_level_for_downsample walks the list and breaks on the first
@@ -1031,6 +1042,14 @@ def ensure_server(*, allowed_origin: str | None = None) -> TileServer:
     srv = getattr(sys, _SINGLETON_ATTR, None)
     if isinstance(srv, TileServer) and srv.is_alive():
         return srv
+    if isinstance(srv, TileServer):
+        # Replacing a dead server: shut the old one down rather than drop the
+        # reference. is_alive() is False as soon as the listener THREAD dies --
+        # an exception escaping serve_forever does that without running
+        # shutdown() -- and the socket stays bound, so the port leaks, one per
+        # recovery. Leaking "the previous server *and its port*" is exactly
+        # what this module's singleton exists to prevent (R07-12).
+        srv.shutdown()
     srv = TileServer(allowed_origin=allowed_origin)
     setattr(sys, _SINGLETON_ATTR, srv)
     return srv

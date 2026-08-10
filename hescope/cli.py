@@ -9,7 +9,7 @@ Commands:
   init                          create database tables
   ingest PATH [--kind K] [--recursive]   register image files as slides
   list [--kind K]               list registered slides
-  dedupe-slides                 merge slide rows that name the same file
+  dedupe-slides [--dry-run]     merge slide rows that name the same file
 """
 
 from __future__ import annotations
@@ -19,7 +19,13 @@ import os
 import sys
 from pathlib import Path
 
-from .db import SlideRepo, get_engine, init_db, merge_duplicate_slide_paths
+from .db import (
+    SlideRepo,
+    get_engine,
+    init_db,
+    merge_duplicate_slide_paths,
+    plan_duplicate_slide_merge,
+)
 from .slides import open_slide
 
 IMAGE_EXTENSIONS = {".svs", ".tif", ".tiff", ".ndpi", ".png", ".jpg", ".jpeg"}
@@ -125,11 +131,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="recurse into subdirectories when PATH is a directory",
     )
 
-    sub.add_parser(
+    p_dedupe = sub.add_parser(
         "dedupe-slides",
         help="merge slide rows that name the same file under different "
         "path spellings (one-off repair for databases written before "
         "paths were canonicalized)",
+    )
+    p_dedupe.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the merges, ROI moves and path rewrites that WOULD be "
+        "made, and change nothing",
     )
 
     p_list = sub.add_parser("list", help="list registered slides")
@@ -207,8 +219,26 @@ def _cmd_list(engine, kind: str | None) -> int:
     return 0
 
 
-def _cmd_dedupe_slides(engine) -> int:
+def _cmd_dedupe_slides(engine, dry_run: bool = False) -> int:
     init_db(engine)
+    if dry_run:
+        # This command rewrites the table a user's annotations hang off, in
+        # one uncancellable transaction, and its input is the live database.
+        # Showing the blast radius first is what makes running it a reviewable
+        # decision instead of an unauthorized data change (R07-19).
+        plan = plan_duplicate_slide_merge(engine)
+        for dup_id, kept_id, canonical in plan["merges"]:
+            print(f"would merge slide id={dup_id} into id={kept_id} ({canonical})")
+        for roi_id, from_id, to_id in plan["moved_rois"]:
+            print(f"would move roi id={roi_id} from slide {from_id} to {to_id}")
+        for slide_id, old, new in plan["rewrites"]:
+            print(f"would rewrite slide id={slide_id} path {old!r} -> {new!r}")
+        print(
+            f"dry run: {len(plan['merges'])} merge(s), "
+            f"{len(plan['moved_rois'])} roi move(s), "
+            f"{len(plan['rewrites'])} path rewrite(s); nothing was changed"
+        )
+        return 0
     merged = merge_duplicate_slide_paths(engine)
     if not merged:
         print("no duplicate slide paths found")
@@ -231,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "list":
         return _cmd_list(engine, args.kind)
     if args.command == "dedupe-slides":
-        return _cmd_dedupe_slides(engine)
+        return _cmd_dedupe_slides(engine, getattr(args, "dry_run", False))
     return 1  # pragma: no cover - argparse enforces a valid command
 
 

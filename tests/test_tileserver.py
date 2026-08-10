@@ -923,3 +923,56 @@ def test_layout_is_immutable():
     assert isinstance(lay, DZILayout)
     with pytest.raises(dataclasses.FrozenInstanceError):
         lay.width = 1  # type: ignore[misc]
+
+
+def test_ensure_server_shuts_down_the_dead_server_it_replaces():
+    """R07-12: recovering from a dead listener must not leak its port.
+
+    ``is_alive()`` is False the moment the listener THREAD dies -- an
+    exception escaping ``serve_forever`` does that WITHOUT running
+    ``shutdown()`` -- and the socket stays bound. ``ensure_server`` used to
+    build a replacement and overwrite the ``sys`` attribute, dropping the last
+    reference to a still-listening server. The module docstring names that as
+    the exact failure the process-wide singleton exists to prevent: "leak the
+    previous server *and its port*, one per reload".
+    """
+    shutdown_server()
+    first = ensure_server()
+    try:
+        port = first.port
+        assert first.is_alive()
+        # kill the listener the way an escaping exception does: no shutdown()
+        first._thread.join(timeout=0)
+        first._httpd.shutdown()
+        first._thread.join(timeout=5)
+        assert not first.is_alive()
+        assert first._httpd.socket.fileno() != -1, "the socket is already closed"
+
+        second = ensure_server()
+
+        assert second is not first
+        assert second.port != port or not first.is_alive()
+        assert first._httpd.socket.fileno() == -1, (
+            "the replaced server's socket is still bound; its port is leaked "
+            "for the lifetime of the process, one per recovery"
+        )
+    finally:
+        shutdown_server()
+
+
+def test_a_shut_down_server_refuses_to_register(demo_source):
+    """R07-12: a registration on a dead server produced a valid-looking
+    tile_source dict on a port nothing is listening on.
+
+    app.py wraps ``serve_slide`` in ``except Exception -> fall back to the
+    legacy plotly viewer``. A guard cannot fire on a success, so the user got
+    a permanently blank OpenSeadragon canvas and no message at all.
+    """
+    srv = TileServer()
+    srv.shutdown()
+    srv.shutdown()  # still idempotent
+
+    with pytest.raises(RuntimeError, match="shut down"):
+        srv.register(demo_source)
+
+    assert srv.keys() == []

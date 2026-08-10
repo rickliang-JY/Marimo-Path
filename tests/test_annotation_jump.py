@@ -114,6 +114,7 @@ def _wire():
         "vp": ViewportState(center=(0.0, 0.0), downsample=8.0, size=(1024, 768))
     }
     cam_box = {"cam": None}
+    msgs: list = []
     env = {
         "set_vp": lambda v: vp_box.__setitem__("vp", v),
         "set_cam": lambda c: cam_box.__setitem__("cam", c),
@@ -137,6 +138,10 @@ def _wire():
         # the assertion that goes red then is "the camera never moved", not a
         # TypeError about a missing argument.
         "set_vp": env["set_vp"],
+        # Every camera action reports its own failure now: marimo swallows an
+        # exception raised inside an on_click callback, so an unguarded one is
+        # a click that does nothing and says nothing (R07-5).
+        "set_db_msg": lambda v: msgs.append(v),
     }
     cam_cell, cam_params = _cell("Camera actions for the toolbar buttons")
     missing = [p for p in cam_params if p not in common]

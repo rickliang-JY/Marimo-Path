@@ -578,3 +578,24 @@ def test_roipayload_from_json_tolerates_missing_roi_id(png_source, tmp_path):
     rt = ROIPayload.from_json(json.dumps(legacy))
     assert rt.roi_id is None
     assert rt.slide_name == payload.slide_name
+
+
+def test_the_roi_repository_reports_whether_it_did_anything(engine, slide_id):
+    """R07-14: both methods returned None whether or not the row existed.
+
+    A caller could therefore only distinguish "no exception was raised" from
+    "the write landed" by re-reading, and app.py's Save/Delete buttons did not
+    -- they wrote "Saved annotation for ROI N." / "Deleted ROI N." in green on
+    the sole condition that nothing raised, over two methods documented to
+    no-op when the row is gone.
+    """
+    repo = ROIRepo(engine)
+    rid = repo.add(slide_id, ROI(kind="rect", points=((0.0, 0.0), (4.0, 4.0))))
+
+    assert repo.update_annotation(rid, label="tumour") is True
+    assert repo.delete(rid) is True
+
+    assert repo.update_annotation(rid, label="tumour") is False
+    assert repo.delete(rid) is False
+    assert repo.update_annotation(999999, label="x") is False
+    assert repo.delete(999999) is False

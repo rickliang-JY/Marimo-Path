@@ -141,6 +141,26 @@ def test_slide_geojson_text_with_no_slide_open_is_an_empty_collection(engine):
     }
 
 
+def test_slide_geojson_text_with_no_slide_open_exports_every_roi(engine, slide_id):
+    """R07-7: `slide_id=None` means ALL ROIs, as it does for ``export_rois``.
+
+    The three Export buttons sit side by side under one comment promising
+    "the current slide's ROIs (or all when no slide is open)". JSON and CSV
+    honoured it; GeoJSON answered an empty FeatureCollection, which QuPath
+    opens happily and renders as "this slide has no annotations". The test
+    above only pinned that behaviour on an EMPTY database, where it is
+    indistinguishable from this one.
+    """
+    repo = ROIRepo(engine)
+    rid = repo.add(slide_id, _rect(), label="tumour")
+
+    fc = json.loads(slide_geojson_text(engine, None))
+
+    assert [f["properties"]["roi_id"] for f in fc["features"]] == [rid]
+    # mpp is per-slide and these rows can span slides, so it rides per row.
+    assert fc["features"][0]["properties"]["mpp"] == pytest.approx(0.25)
+
+
 # --- tier 1.1: the export must be faithful to the drawn shape --------------
 
 

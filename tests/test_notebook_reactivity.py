@@ -155,3 +155,26 @@ def test_sweep_controls_are_not_rebuilt_by_a_training_run(graph, element):
         "'Train from annotations', so the user's choice is silently reset by "
         "a click that has nothing to do with it"
     )
+
+
+@pytest.mark.parametrize("element", ["hm_model_dropdown", "hm_metric_dropdown"])
+def test_the_two_heatmap_dropdowns_are_in_the_training_closure(graph, element):
+    """The premise of ``tests/test_sweep_dropdowns.py``, asserted here.
+
+    ``.refs`` is NOT the rule: ``hm_metric_dropdown``'s cell does not
+    reference ``get_models_version`` at all -- it is a transitive DESCENDANT
+    of the cell that does, and marimo re-runs descendants because their inputs
+    changed. So the obvious extension of the test above (add
+    ``hm_metric_dropdown`` to its parametrize list) is a FALSE GREEN: measured
+    on this graph it passes while a successful train really does reset the
+    metric. Both dropdowns must therefore survive a rebuild by value, which is
+    what test_sweep_dropdowns.py checks; this test only pins the fact that
+    makes that necessary (R07-8).
+    """
+    owners = [cid for cid, cell in graph.cells.items() if element in cell.defs]
+    assert len(owners) == 1, f"expected one cell defining {element}, got {owners}"
+    assert owners[0] in _rerun_closure(graph, "get_models_version"), (
+        f"{element} is no longer rebuilt by a training run. If that is "
+        "deliberate, tests/test_sweep_dropdowns.py can be simplified; if it "
+        "is accidental, the model list has stopped refreshing after a train."
+    )

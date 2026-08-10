@@ -252,3 +252,74 @@ def test_list_models_and_missing_model(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="not found"):
         load_model("ghost", models_dir)
+
+
+def test_a_re_train_is_visible_to_a_concurrent_reader_all_or_nothing(tmp_path):
+    """R07-10: ``model.joblib``/``meta.json`` are written to temp names and
+    ``os.replace``d in, so a reader never sees half a generation.
+
+    Re-training under an EXISTING name is the documented workflow (annotate
+    more, train again), and every reader runs outside the training thread:
+    ``list_models()`` behind the model dropdown and ``get_analysis_capabilities()``,
+    and ``load_model()`` behind the heatmap's model_prob path. Overwriting in
+    place left a window in which ``list_models`` -- which swallows a partial
+    read at ``except (json.JSONDecodeError, OSError): continue`` -- silently
+    reported the model as GONE. Measured on one model re-trained 60x while two
+    readers polled: 39 vanishings in 535 list calls, 27 failures in 36 loads
+    (20x EOFError, 5x JSONDecodeError, 2x truncated joblib array).
+    """
+    import threading
+    import time
+
+    engine = _engine(tmp_path)
+    _seed_db(tmp_path, engine)
+    models_dir = tmp_path / "models"
+    train_from_annotations(engine, name="tumour_v1", models_dir=models_dir)
+
+    stop = threading.Event()
+    seen = {"missing": 0, "load_errors": [], "lists": 0, "loads": 0}
+
+    def _poll():
+        while not stop.is_set():
+            seen["lists"] += 1
+            if not any(m["name"] == "tumour_v1" for m in list_models(models_dir)):
+                seen["missing"] += 1
+            seen["loads"] += 1
+            try:
+                load_model("tumour_v1", models_dir)
+            except Exception as exc:  # noqa: BLE001 - that is the measurement
+                seen["load_errors"].append(f"{type(exc).__name__}: {exc}")
+            time.sleep(0)
+
+    reader = threading.Thread(target=_poll, daemon=True)
+    reader.start()
+    try:
+        for _ in range(12):
+            train_from_annotations(engine, name="tumour_v1", models_dir=models_dir)
+    finally:
+        stop.set()
+        reader.join(timeout=30)
+
+    assert seen["lists"] > 0 and seen["loads"] > 0, "the reader never ran"
+    assert seen["missing"] == 0, (
+        f"list_models() reported the model as absent {seen['missing']} times "
+        f"out of {seen['lists']} while it was being re-trained -- silently, "
+        "because it swallows a partial meta.json, so an agent that just "
+        "called get_analysis_capabilities() concludes the model does not exist"
+    )
+    assert seen["load_errors"] == [], (
+        f"load_model() saw a half-written model {len(seen['load_errors'])} "
+        f"times out of {seen['loads']}: {seen['load_errors'][:5]}"
+    )
+
+
+def test_training_leaves_no_temp_files_behind(tmp_path):
+    engine = _engine(tmp_path)
+    _seed_db(tmp_path, engine)
+    models_dir = tmp_path / "models"
+    train_from_annotations(engine, name="m", models_dir=models_dir)
+
+    assert sorted(p.name for p in (models_dir / "m").iterdir()) == [
+        "meta.json",
+        "model.joblib",
+    ]

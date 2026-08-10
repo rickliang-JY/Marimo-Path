@@ -58,6 +58,18 @@ test = ["pytest"]
 [project.scripts]
 hescope = "hescope.cli:main"
 
+# Two fixes (R01-5 remove_small_objects(min_size=), R01-7
+# binary_closing(footprint=)) are pinned ONLY by turning skimage's
+# FutureWarning into an error: reverting either leaves a plain `pytest -q`
+# fully green. Until now that lived in a command-line flag documented in
+# bugs/README.md and written in no configuration file anywhere in the repo, so
+# anything running the suite unattended silently lost the guard. Both
+# deprecations are still live in the installed toolchain (scikit-image 0.26.0
+# announces removal in 0.28 / 2.0.0), so this is a real regression channel and
+# not history.
+[tool.pytest.ini_options]
+filterwarnings = ["error::FutureWarning"]
+
 # app.py is shipped as a top-level module so that `hescope app` can locate it
 # next to the installed hescope package (site-packages/app.py) exactly the
 # same way it finds it at the repo root in an editable install.

@@ -220,3 +220,80 @@ def test_app_command_missing_marimo_binary(monkeypatch, capsys):
     monkeypatch.setattr("hescope.cli.os.execvp", _raise)
     assert main(["app"]) == 1
     assert "could not launch marimo" in capsys.readouterr().err
+
+
+def test_dedupe_slides_dry_run_shows_the_blast_radius_and_changes_nothing(
+    tmp_path, capsys
+):
+    """R07-19: ``dedupe-slides`` was an irreversible one-shot with no preview.
+
+    It rewrites the table a user's annotations hang off, in one uncancellable
+    transaction, and its input is the live ``data/hescope.db``. That is why the
+    repair of the shipped database sat parked for three review rounds: the tool
+    was correct and tested, but there was no way to see what it would do first.
+    """
+    from hescope.db import ROIRepo, Slide
+    from hescope.rois import ROI
+
+    db_url = f"sqlite:///{tmp_path}/dryrun.db"
+    slide = tmp_path / "dup.png"
+    Image.fromarray(np.full((8, 8, 3), 240, dtype=np.uint8), "RGB").save(slide)
+    main(["--db", db_url, "init"])
+    engine = get_engine(db_url)
+    with sa.orm.Session(engine) as s:  # pre-fix rows: bypass register()
+        for path in (str(slide.resolve()), str(slide).replace("\\", "/")):
+            s.add(Slide(source_kind="local", name="dup.png", path=path,
+                        width=8, height=8, extra_json="{}"))
+        s.commit()
+    ids = [row["id"] for row in SlideRepo(engine).list()]
+    roi_ids = [
+        ROIRepo(engine).add(sid, ROI(kind="rect", points=((0.0, 0.0), (4.0, 4.0))))
+        for sid in ids
+    ]
+    before = {row["id"]: row["path"] for row in SlideRepo(engine).list()}
+
+    assert main(["--db", db_url, "dedupe-slides", "--dry-run"]) == 0
+
+    out = capsys.readouterr().out
+    assert f"would merge slide id={ids[1]} into id={ids[0]}" in out
+    assert f"would move roi id={roi_ids[1]} from slide {ids[1]} to {ids[0]}" in out
+    assert "nothing was changed" in out
+    assert {row["id"]: row["path"] for row in SlideRepo(engine).list()} == before, (
+        "--dry-run wrote to the database"
+    )
+    assert len(ROIRepo(engine).for_slide(ids[1])) == 1
+
+    # ...and the real run then does exactly what the dry run described.
+    assert main(["--db", db_url, "dedupe-slides"]) == 0
+    assert len(SlideRepo(engine).list()) == 1
+    assert len(ROIRepo(engine).for_slide(ids[0])) == 2
+    engine.dispose()
+
+
+def test_dedupe_slides_dry_run_reports_only_real_path_rewrites(tmp_path, capsys):
+    """``merge_duplicate_slide_paths`` assigns the canonical path to EVERY
+    keeper, so counting assignments overstates the change by an order of
+    magnitude -- on the shipped database, 32 assignments for 2 real rewrites."""
+    from hescope.db import Slide, plan_duplicate_slide_merge
+
+    db_url = f"sqlite:///{tmp_path}/rewrites.db"
+    a = tmp_path / "a.png"
+    Image.fromarray(np.full((8, 8, 3), 240, dtype=np.uint8), "RGB").save(a)
+    main(["--db", db_url, "init"])
+    engine = get_engine(db_url)
+    SlideRepo(engine).register(  # already canonical -> no rewrite
+        source_kind="local", name="a.png", path=str(a), width=8, height=8
+    )
+    with sa.orm.Session(engine) as s:  # uncanonical -> one rewrite
+        b = tmp_path / "b.png"
+        Image.fromarray(np.full((8, 8, 3), 240, dtype=np.uint8), "RGB").save(b)
+        s.add(Slide(source_kind="local", name="b.png",
+                    path=str(b).replace("\\", "/"), width=8, height=8))
+        s.commit()
+
+    plan = plan_duplicate_slide_merge(engine)
+
+    assert plan["merges"] == []
+    assert len(plan["rewrites"]) == 1, plan["rewrites"]
+    assert plan["rewrites"][0][2] == str(b.resolve())
+    engine.dispose()

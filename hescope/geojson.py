@@ -125,18 +125,43 @@ def rois_to_geojson(rows: list[dict], mpp: float | None = None) -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
-def slide_feature_collection(engine: Any, slide_id: int) -> dict:
+def slide_feature_collection(engine: Any, slide_id: int | None) -> dict:
     """FeatureCollection for one slide's saved ROIs, straight from the DB.
 
     Split out of ``export_rois_geojson`` so the notebook's download button can
     hand the user the same bytes without writing a file first: the README
     advertises a one-click GeoJSON export, and for a while the only entry point
     was the file-writing function, which app.py never called (R05-8).
+
+    ``slide_id=None`` means EVERY saved ROI, exactly as it does for
+    ``hescope.db.export_rois``. It used to mean "an empty FeatureCollection,
+    so the button is always safe to click", which put the GeoJSON button out
+    of step with the JSON and CSV buttons beside it — same panel, same label
+    pattern, one shared comment promising "the current slide's ROIs (or all
+    when no slide is open)" — whenever no slide was open, which includes every
+    session before the first open and any session whose slide registration
+    failed. An empty-but-valid FeatureCollection is the worst possible answer
+    there: QuPath opens it and shows nothing, which reads as "this slide has
+    no annotations" rather than "the export exported nothing" (R07-7).
     """
     from .db import ROIRepo, SlideRepo
 
+    slide_repo = SlideRepo(engine)
+    if slide_id is None:
+        rows = ROIRepo(engine).search()
+        # mpp is a per-SLIDE constant and these rows span slides, so it rides
+        # on each row instead of on the call; rois_to_geojson lets a row-level
+        # mpp win over the argument.
+        mpp_by_slide: dict[Any, float | None] = {}
+        for row in rows:
+            sid = row.get("slide_id")
+            if sid not in mpp_by_slide:
+                slide = slide_repo.get(sid) if sid is not None else None
+                mpp_by_slide[sid] = slide.get("mpp") if slide else None
+            row["mpp"] = mpp_by_slide[sid]
+        return rois_to_geojson(rows)
     rows = ROIRepo(engine).for_slide(slide_id)
-    slide = SlideRepo(engine).get(slide_id)
+    slide = slide_repo.get(slide_id)
     mpp = slide.get("mpp") if slide else None
     return rois_to_geojson(rows, mpp=mpp)
 
@@ -144,11 +169,10 @@ def slide_feature_collection(engine: Any, slide_id: int) -> dict:
 def slide_geojson_text(engine: Any, slide_id: int | None) -> str:
     """``slide_feature_collection`` as the JSON text a download hands over.
 
-    ``slide_id`` of None (no slide open) yields an empty FeatureCollection
-    rather than an error, so the button is always safe to click.
+    ``slide_id`` of None (no slide open) exports every saved ROI, matching
+    ``export_rois(engine, slide_id=None)`` — see
+    :func:`slide_feature_collection`.
     """
-    if slide_id is None:
-        return json.dumps({"type": "FeatureCollection", "features": []}, indent=2)
     return json.dumps(slide_feature_collection(engine, slide_id), indent=2)
 
 
