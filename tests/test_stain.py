@@ -129,3 +129,152 @@ def test_reinhard_blank_image_no_crash():
     out = reinhard_normalize(blank)
     assert out.size == blank.size
     assert np.isfinite(np.asarray(out, dtype=float)).all()
+
+
+# --- tier 2a: Ruifrok and Vahadane -----------------------------------------
+#
+# The two normalizations TIAToolbox would have brought, implemented in-tree
+# instead. See docs/ROADMAP-INTEROP.md: tiatoolbox resolves to 152 installs and
+# 22 uninstalls against this environment, among them ipywidgets, which the
+# OpenSeadragon viewer depends on. Ruifrok is a fixed published matrix and
+# Vahadane is sparse NMF via scikit-learn, which is already a dependency.
+
+
+TRUE_STAINS = np.array([[0.60, 0.72, 0.35], [0.18, 0.86, 0.48]])
+
+
+def _mixed_stain_image(n: int = 220, seed: int = 7):
+    """A synthetic H&E field with a KNOWN stain matrix and CO-LOCALISED stains.
+
+    Every pixel mixes both stains, which is the regime the estimators actually
+    disagree in. A two-colour image cannot tell them apart: its OD cloud is two
+    rays, so Macenko's angular extremes and Vahadane's dictionary recover the
+    same pair, and a test built on one would pass no matter which was used.
+    """
+    from hescope.stain import _normalize_rows
+
+    truth = _normalize_rows(TRUE_STAINS.copy())
+    rng = np.random.default_rng(seed)
+    conc = np.stack([
+        rng.gamma(2.0, 0.35, n * n),          # hematoxylin: nuclei
+        rng.gamma(2.0, 0.30, n * n) + 0.15,   # eosin: stroma, everywhere
+    ])
+    od = (truth.T @ conc).T
+    rgb = np.clip((255.0 + 1) * np.exp(-od) - 1, 0, 255)
+    return Image.fromarray(rgb.reshape(n, n, 3).astype(np.uint8), "RGB"), truth
+
+
+def _angle_error_deg(estimated, truth):
+    from hescope.stain import _normalize_rows
+
+    cos = (_normalize_rows(np.asarray(estimated)) * truth).sum(axis=1)
+    return np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
+
+
+@pytest.mark.parametrize("method", ["macenko", "ruifrok", "vahadane", "reinhard"])
+def test_every_method_returns_a_usable_image(method):
+    from hescope.stain import STAIN_METHODS, normalize_stain
+
+    assert method in STAIN_METHODS
+    img, _ = _mixed_stain_image(64)
+    out = normalize_stain(img, method)
+    assert out.size == img.size and out.mode == "RGB"
+    assert np.isfinite(np.asarray(out, dtype=float)).all()
+
+
+def test_unknown_method_names_the_ones_that_exist():
+    from hescope.stain import normalize_stain
+
+    with pytest.raises(ValueError, match="vahadane"):
+        normalize_stain(Image.new("RGB", (8, 8), (200, 150, 200)), "not-a-method")
+
+
+def test_ruifrok_uses_the_fixed_matrix_and_ignores_the_image():
+    """Its whole point: no estimation, so two different patches give the same
+    stain vectors and two runs are comparable."""
+    from hescope.stain import STANDARD_STAIN_MATRIX, _normalize_rows, fit_reference
+
+    a, _ = _mixed_stain_image(64, seed=1)
+    b = Image.fromarray(
+        np.full((64, 64, 3), (250, 245, 250), np.uint8), "RGB"  # nearly blank
+    )
+    ma = np.array(fit_reference(a, method="ruifrok")["stain_matrix"])
+    mb = np.array(fit_reference(b, method="ruifrok")["stain_matrix"])
+    assert np.allclose(ma, mb)
+    assert np.allclose(ma, _normalize_rows(np.array(STANDARD_STAIN_MATRIX)), atol=1e-6)
+
+
+def test_vahadane_is_not_macenko_under_another_name():
+    """The silent fallback in _stain_matrix_vahadane could hide a broken
+    configuration -- it did during development, where positive_code=True was
+    rejected by the 'lars' coder and every call quietly returned the Macenko
+    estimate. Pin that it really factorises."""
+    from hescope.stain import fit_reference
+
+    img, _ = _mixed_stain_image()
+    mac = np.array(fit_reference(img, method="macenko")["stain_matrix"])
+    vah = np.array(fit_reference(img, method="vahadane")["stain_matrix"])
+    assert not np.allclose(vah, mac, atol=1e-4)
+
+
+def test_vahadane_recovers_co_localised_stains_better_than_macenko():
+    """The documented reason Vahadane exists. Macenko takes the extremes of the
+    OD angular distribution, which degrades when both stains contribute to the
+    same pixel; sparse NMF holds up."""
+    from hescope.stain import fit_reference
+
+    img, truth = _mixed_stain_image()
+    mac = _angle_error_deg(fit_reference(img, method="macenko")["stain_matrix"], truth)
+    vah = _angle_error_deg(fit_reference(img, method="vahadane")["stain_matrix"], truth)
+    assert vah.max() < mac.max(), f"vahadane {vah} should beat macenko {mac}"
+    assert vah.max() < 10.0, f"vahadane should land within 10 deg of truth, got {vah}"
+
+
+def test_vahadane_is_deterministic():
+    from hescope.stain import fit_reference
+
+    img, _ = _mixed_stain_image(96)
+    first = fit_reference(img, method="vahadane")["stain_matrix"]
+    second = fit_reference(img, method="vahadane")["stain_matrix"]
+    assert np.allclose(first, second)
+
+
+def test_vahadane_falls_back_rather_than_raising_without_sklearn(monkeypatch):
+    """scikit-learn lives in the .[ml] extra, so a core install has no NMF.
+    Stain normalization is a display aid; losing it must not take a slide down."""
+    import builtins
+
+    from hescope.stain import _stain_matrix_from_od, _stain_matrix_vahadane, _optical_density, _to_rgb_array, _tissue_pixels
+
+    real_import = builtins.__import__
+
+    def no_sklearn(name, *args, **kwargs):
+        if name.startswith("sklearn"):
+            raise ImportError("no scikit-learn")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_sklearn)
+    img, _ = _mixed_stain_image(64)
+    tissue = _tissue_pixels(_optical_density(_to_rgb_array(img)), 0.85)
+    assert np.allclose(_stain_matrix_vahadane(tissue), _stain_matrix_from_od(tissue))
+
+
+@pytest.mark.parametrize("method", ["macenko", "ruifrok", "vahadane"])
+def test_stain_vectors_are_unit_length_and_hematoxylin_first(method):
+    """All three must agree on row order, or a reference fitted with one and
+    applied with another silently swaps the two stains."""
+    from hescope.stain import fit_reference
+
+    img, _ = _mixed_stain_image(96)
+    m = np.array(fit_reference(img, method=method)["stain_matrix"])
+    assert np.allclose(np.linalg.norm(m, axis=1), 1.0, atol=1e-6)
+    assert m[0][0] >= m[1][0], "row 0 must be the hematoxylin-like vector"
+
+
+@pytest.mark.parametrize("method", ["macenko", "ruifrok", "vahadane"])
+def test_a_blank_patch_does_not_raise(method):
+    """Below _MIN_TISSUE_PIXELS there is nothing to estimate from."""
+    from hescope.stain import normalize_stain
+
+    blank = Image.new("RGB", (32, 32), (255, 255, 255))
+    assert normalize_stain(blank, method).size == (32, 32)

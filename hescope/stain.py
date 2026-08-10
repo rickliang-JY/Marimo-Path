@@ -1,9 +1,24 @@
 """Stain normalization for H&E images (Part A.2).
 
-Two methods, both deterministic and implemented with numpy/scikit-image only:
+Four methods, all deterministic and implemented here rather than pulled in:
 
-* Macenko stain normalization (from scratch, no external stain-norm package).
-* Reinhard normalization in CIE-LAB space.
+* **Macenko** -- stain matrix from the extremes of the OD angular distribution.
+* **Reinhard** -- moment matching in CIE-LAB space (no deconvolution).
+* **Ruifrok & Johnston** -- the published fixed H&E matrix, estimated from
+  nothing, so two runs are comparable and a mostly-blank patch cannot mislead it.
+* **Vahadane** -- sparse non-negative factorisation of the OD cloud, which holds
+  up where the stains co-localise and Macenko's extremes degrade.
+
+Only Vahadane needs anything beyond numpy/scikit-image, and it uses
+scikit-learn's ``DictionaryLearning`` -- already a dependency of the ``.[ml]``
+extra -- falling back to Macenko when that is absent. This is the whole of what
+TIAToolbox would have contributed on this front; adopting it for these four
+would have cost 152 installs and 22 uninstalls in this environment, including
+ipywidgets, which the OpenSeadragon viewer sits on (docs/ROADMAP-INTEROP.md).
+
+Macenko, Ruifrok and Vahadane differ ONLY in how the stain matrix is estimated;
+they share one reconstruction path (:func:`_deconvolve_normalize`) so a fix
+there cannot apply to some and not others.
 
 Constants
 ---------
@@ -96,15 +111,106 @@ def _concentrations(od: np.ndarray, stain_matrix: np.ndarray) -> np.ndarray:
     return np.clip(conc, 0.0, None)
 
 
-def fit_reference(img: PIL.Image.Image, *, luminance_threshold: float = 0.85) -> dict:
-    """Fit Macenko reference statistics on ``img``.
+def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
+    """Unit-length stain vectors. A stain direction is a direction; leaving the
+    rows unnormalised would fold their magnitude into the concentrations and
+    change the reconstruction."""
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    return matrix / np.where(norms < 1e-12, 1.0, norms)
+
+
+def _order_he(matrix: np.ndarray) -> np.ndarray:
+    """Hematoxylin first, by the larger red-channel OD component.
+
+    Every estimator here has to agree on row order, or a reference fitted with
+    one method and applied with another silently swaps the two stains.
+    """
+    if matrix[0][0] >= matrix[1][0]:
+        return matrix
+    return matrix[::-1].copy()
+
+
+def _stain_matrix_vahadane(
+    od_tissue: np.ndarray, *, random_state: int = 0
+) -> np.ndarray:
+    """Vahadane stain matrix: sparse non-negative matrix factorisation.
+
+    Macenko takes the extremes of the OD angular distribution, which assumes
+    the two stains are separable at the edges of the cloud. Vahadane instead
+    asks for a sparse non-negative dictionary, which holds up better where the
+    stains co-localise -- nuclei in dense tissue, where the two contribute to
+    the same pixel.
+
+    Implemented with scikit-learn's ``DictionaryLearning`` because it is
+    already a dependency of the ``ml`` extra; there is no reason to pull a
+    heavyweight toolbox in for one factorisation. When scikit-learn is absent,
+    or the fit does not converge to something usable, this falls back to the
+    Macenko estimate rather than raising -- stain normalisation is a display
+    and preprocessing aid, and failing it should not take a slide down with it.
+    """
+    if od_tissue.shape[0] < _MIN_TISSUE_PIXELS:
+        return np.array(STANDARD_STAIN_MATRIX, dtype=np.float64)
+    try:
+        from sklearn.decomposition import DictionaryLearning
+    except Exception:  # scikit-learn not installed (it lives in .[ml])
+        return _stain_matrix_from_od(od_tissue)
+    try:
+        # Learn 2 atoms over the OD pixels. transform_alpha controls the
+        # sparsity of the concentrations; 0.1 is the value the Vahadane
+        # reference implementations use.
+        # Coordinate descent, not LARS: sklearn refuses positive_code with
+        # 'lars' ("Positive constraint not supported for 'lars' coding
+        # method"), and the non-negativity is the whole point -- a stain
+        # cannot contribute a negative amount of absorbance.
+        learner = DictionaryLearning(
+            n_components=2,
+            alpha=0.1,
+            transform_alpha=0.1,
+            fit_algorithm="cd",
+            transform_algorithm="lasso_cd",
+            positive_dict=True,
+            positive_code=True,
+            max_iter=20,
+            random_state=random_state,
+        )
+        # rows are observations; the learned dictionary rows are stain vectors
+        learner.fit(od_tissue)
+        stains = np.asarray(learner.components_, dtype=np.float64)
+    except Exception:
+        return _stain_matrix_from_od(od_tissue)
+    if stains.shape != (2, 3) or not np.isfinite(stains).all():
+        return _stain_matrix_from_od(od_tissue)
+    if np.linalg.norm(stains, axis=1).min() < 1e-9:
+        return _stain_matrix_from_od(od_tissue)  # a degenerate atom
+    return _order_he(_normalize_rows(stains))
+
+
+def fit_reference(
+    img: PIL.Image.Image,
+    *,
+    method: str = "macenko",
+    luminance_threshold: float = 0.85,
+) -> dict:
+    """Fit deconvolution reference statistics on ``img``.
 
     Returns ``{"stain_matrix": [[..], [..]], "max_conc": [.., ..]}`` where
     ``max_conc`` holds the 99th-percentile concentration of each stain.
+
+    ``method`` selects the estimator (``macenko``, ``ruifrok`` or
+    ``vahadane``) and must match the method the reference is later applied
+    with: the two share a row order (hematoxylin first) but not a basis, so a
+    Vahadane reference pushed through Macenko rescales against vectors that
+    were never fitted to it.
     """
+    key = (method or "").strip().lower()
+    if key not in _MATRIX_ESTIMATORS:
+        raise ValueError(
+            f"unknown stain method {method!r}; expected one of "
+            f"{', '.join(sorted(_MATRIX_ESTIMATORS))}"
+        )
     rgb = _to_rgb_array(img)
     od = _optical_density(rgb)
-    he = _stain_matrix_from_od(_tissue_pixels(od, luminance_threshold))
+    he = _MATRIX_ESTIMATORS[key](_tissue_pixels(od, luminance_threshold))
     conc = _concentrations(od, he)
     max_conc = np.percentile(conc, 99.0, axis=1)
     max_conc = np.maximum(max_conc, 1e-6)  # guard flat/blank images
@@ -129,10 +235,46 @@ def macenko_normalize(
     against its own statistics; otherwise the given reference dict
     (``{"stain_matrix", "max_conc"}``) is applied.
     """
+    return _deconvolve_normalize(
+        img, _macenko_matrix, reference=reference,
+        luminance_threshold=luminance_threshold,
+    )
+
+
+# --- the shared deconvolution path -----------------------------------------
+#
+# Macenko, Ruifrok and Vahadane differ ONLY in how they estimate the stain
+# matrix; the OD transform, concentration solve, percentile scaling and
+# reconstruction are identical. Keeping one implementation means a fix to the
+# reconstruction cannot apply to some methods and not others -- this codebase
+# has already had four findings of the "a second place re-deriving what one
+# owner decides" class (bugs/SUMMARY.md).
+
+
+def _macenko_matrix(od_tissue: np.ndarray) -> np.ndarray:
+    return _stain_matrix_from_od(od_tissue)
+
+
+def _ruifrok_matrix(_od_tissue: np.ndarray) -> np.ndarray:
+    """Ruifrok & Johnston: the published fixed H&E matrix, estimated from
+    nothing. Deterministic and immune to a patch that holds too little tissue
+    to estimate from -- which is exactly when the data-driven methods are least
+    trustworthy."""
+    return _order_he(_normalize_rows(np.array(STANDARD_STAIN_MATRIX, dtype=np.float64)))
+
+
+def _deconvolve_normalize(
+    img: PIL.Image.Image,
+    matrix_fn,
+    *,
+    reference: dict | None = None,
+    luminance_threshold: float = 0.85,
+) -> PIL.Image.Image:
+    """OD -> concentrations -> rescale to the reference -> back to RGB."""
     rgb = _to_rgb_array(img)
     h, w = rgb.shape[:2]
     od = _optical_density(rgb)
-    src_he = _stain_matrix_from_od(_tissue_pixels(od, luminance_threshold))
+    src_he = matrix_fn(_tissue_pixels(od, luminance_threshold))
     conc = _concentrations(od, src_he)
     src_max = np.maximum(np.percentile(conc, 99.0, axis=1), 1e-6)
 
@@ -142,11 +284,84 @@ def macenko_normalize(
         ref_he = np.asarray(reference["stain_matrix"], dtype=np.float64)
         ref_max = np.asarray(reference["max_conc"], dtype=np.float64)
 
-    conc *= (ref_max / src_max)[:, None]
+    conc = conc * (ref_max / src_max)[:, None]
     od_out = ref_he.T @ conc  # (3, n_pixels)
     out = (_IO + 1.0) * np.exp(-od_out) - 1.0
     out = np.clip(out, 0.0, 255.0).T.reshape(h, w, 3).astype(np.uint8)
     return PIL.Image.fromarray(out, "RGB")
+
+
+def ruifrok_normalize(
+    img: PIL.Image.Image,
+    *,
+    reference: dict | None = None,
+    luminance_threshold: float = 0.85,
+) -> PIL.Image.Image:
+    """Ruifrok & Johnston colour deconvolution with the fixed H&E matrix.
+
+    The stain vectors are the published constants rather than an estimate, so
+    the result depends only on the pixels and not on what else happened to be
+    in the patch. That makes it the right choice when a patch is mostly
+    background, where Macenko's SVD is fitting noise, and the right baseline
+    when two runs must be comparable.
+    """
+    return _deconvolve_normalize(
+        img, _ruifrok_matrix, reference=reference,
+        luminance_threshold=luminance_threshold,
+    )
+
+
+def vahadane_normalize(
+    img: PIL.Image.Image,
+    *,
+    reference: dict | None = None,
+    luminance_threshold: float = 0.85,
+) -> PIL.Image.Image:
+    """Vahadane structure-preserving normalization (sparse NMF stain matrix).
+
+    Falls back to the Macenko estimate when scikit-learn is unavailable or the
+    factorisation does not converge to a usable pair of stain vectors; see
+    :func:`_stain_matrix_vahadane`.
+    """
+    return _deconvolve_normalize(
+        img, _stain_matrix_vahadane, reference=reference,
+        luminance_threshold=luminance_threshold,
+    )
+
+
+#: The stain-matrix estimator behind each method name.
+_MATRIX_ESTIMATORS = {
+    "macenko": _macenko_matrix,
+    "ruifrok": _ruifrok_matrix,
+    "vahadane": _stain_matrix_vahadane,
+}
+
+#: Every normalization this module offers, by name -- what a UI dropdown or an
+#: agent should enumerate rather than hardcoding a list that drifts.
+STAIN_METHODS: tuple[str, ...] = ("macenko", "reinhard", "ruifrok", "vahadane")
+
+
+def normalize_stain(
+    img: PIL.Image.Image,
+    method: str = "macenko",
+    *,
+    reference: dict | None = None,
+    luminance_threshold: float = 0.85,
+) -> PIL.Image.Image:
+    """Apply a stain normalization by name. Raises ValueError on an unknown
+    name, listing the ones that exist."""
+    key = (method or "").strip().lower()
+    if key == "reinhard":
+        return reinhard_normalize(img)
+    if key not in _MATRIX_ESTIMATORS:
+        raise ValueError(
+            f"unknown stain method {method!r}; expected one of "
+            f"{', '.join(STAIN_METHODS)}"
+        )
+    return _deconvolve_normalize(
+        img, _MATRIX_ESTIMATORS[key], reference=reference,
+        luminance_threshold=luminance_threshold,
+    )
 
 
 def reinhard_normalize(

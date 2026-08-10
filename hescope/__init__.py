@@ -57,7 +57,15 @@ from .ml import (
 )
 from .nuclei import NucleiStats, detect_nuclei
 from .qc import blur_score, qc_report, tissue_mask
-from .stain import fit_reference, macenko_normalize, reinhard_normalize
+from .stain import (
+    STAIN_METHODS,
+    fit_reference,
+    macenko_normalize,
+    normalize_stain,
+    reinhard_normalize,
+    ruifrok_normalize,
+    vahadane_normalize,
+)
 
 
 def analysis_capabilities(models_dir: str = "data/models") -> dict:
@@ -85,7 +93,13 @@ def analysis_capabilities(models_dir: str = "data/models") -> dict:
                 "detect_nuclei",        # hescope.nuclei.detect_nuclei
                 "qc_report",            # hescope.qc.qc_report
                 "extract_features",     # hescope.features.extract_features
-                "macenko_normalize",    # hescope.stain.macenko_normalize
+                "STAIN_METHODS",
+    "macenko_normalize",
+    "normalize_stain",
+    "ruifrok_normalize",
+    "vahadane_normalize",    # hescope.stain.macenko_normalize
+                "ruifrok_normalize",    # hescope.stain.ruifrok_normalize
+                "vahadane_normalize",   # hescope.stain.vahadane_normalize
                 "reinhard_normalize",   # hescope.stain.reinhard_normalize
                 "compute_grid",         # hescope.heatmap.compute_grid
                 "render_heatmap",       # hescope.heatmap.render_heatmap
