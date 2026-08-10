@@ -120,6 +120,9 @@ class GDCClient:
     def __init__(self, api_base: str = GDC_API, timeout: int = 30) -> None:
         self.api_base = api_base.rstrip("/")
         self.timeout = timeout
+        #: Raw hits from the most recent search_slides call. The normalized
+        #: catalog is built from fields _record_from_hit discards.
+        self.last_hits: list[dict] = []
 
     def search_slides(
         self,
@@ -163,6 +166,35 @@ class GDCClient:
             "size": int(size),
             "from": int(offset),
         }
+        hits, total = self._search_hits(params)
+        # Kept for the caller that wants the last raw response: _record_from_hit
+        # collapses cases[0]/samples[0] into four columns and drops sample_id,
+        # the sample's own barcode, tissue_type and disease_type, which is
+        # exactly what hescope.tcga_schema needs to build the hierarchy.
+        self.last_hits = hits
+        return [_record_from_hit(h) for h in hits], total
+
+    def search_slide_hits(
+        self,
+        project_id: str | None = None,
+        sample_type: str | None = None,
+        size: int = 25,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """Same query as :meth:`search_slides`, returning the RAW GDC hits.
+
+        The hierarchy the normalized catalog is built from lives in the parts
+        of the response ``_record_from_hit`` throws away, so anything
+        populating :mod:`hescope.tcga_schema` has to see the hits themselves.
+        """
+        records, total = self.search_slides(
+            project_id=project_id, sample_type=sample_type,
+            size=size, offset=offset,
+        )
+        del records
+        return list(self.last_hits), total
+
+    def _search_hits(self, params: dict) -> tuple[list[dict], int]:
         resp = requests.get(
             f"{self.api_base}/files", params=params, timeout=self.timeout
         )
@@ -171,7 +203,7 @@ class GDCClient:
         data = payload.get("data") or {}
         hits = data.get("hits") or []
         total = int((data.get("pagination") or {}).get("total") or 0)
-        return [_record_from_hit(h) for h in hits], total
+        return hits, total
 
     def download_slide(
         self,

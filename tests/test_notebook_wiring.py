@@ -50,13 +50,26 @@ def test_the_annotations_panel_offers_a_geojson_download(graph):
     assert cell.code.count("mo.download(") == 3
 
 
+#: The functions allowed to stand between TCGA_DATA_DIR and a server-supplied
+#: string. safe_file_id contains one component; tcga_storage_relpath contains
+#: every component of the <project>/<case>/<file> layout it builds (its escape
+#: tests are in tests/test_tcga_schema.py). Anything else joined onto the
+#: download root is unsanitised by definition.
+_CONTAINMENT_FUNCTIONS = {"safe_file_id", "tcga_storage_relpath"}
+
+
 def test_the_tcga_download_contains_the_server_supplied_file_id(graph):
-    """R05-1: every join of TCGA_DATA_DIR must go through safe_file_id."""
+    """R05-1: every join of TCGA_DATA_DIR must go through a containment
+    function. The download path now lays files out as <project>/<case>/<name>,
+    all three of which come from the GDC response, so the requirement got
+    wider rather than narrower."""
     cell = _cell_defining(graph, "tcga_results_table")
-    assert "safe_file_id" in cell.refs
+    assert _CONTAINMENT_FUNCTIONS & cell.refs, (
+        "the download handler references no containment function at all"
+    )
     joins = re.findall(r"TCGA_DATA_DIR\s*/\s*([A-Za-z_][\w.]*)", cell.code)
     assert joins, "the download handler no longer joins onto TCGA_DATA_DIR"
-    assert set(joins) == {"safe_file_id"}, (
+    assert set(joins) <= _CONTAINMENT_FUNCTIONS, (
         "a server-supplied name is joined onto the download root unsanitized: "
         f"TCGA_DATA_DIR / {joins}"
     )

@@ -27,6 +27,8 @@ composed inside those cells and nowhere else:
 
 from __future__ import annotations
 
+import pathlib
+
 import ast
 import pathlib
 
@@ -132,6 +134,13 @@ class _MO:
         return getattr(mo, name)
 
 
+class _NoDb:
+    """DB-free mode: the cell must take the no-database path."""
+
+    enabled = False
+    slide_repo = None
+
+
 def _results_cell(catalog, tcga_dl, rows, tmp_path, client):
     published: dict = {}
     panel = _PanelSpy()
@@ -147,6 +156,18 @@ def _results_cell(catalog, tcga_dl, rows, tmp_path, client):
         "tcga_client": client,
         "tcga_dl": tcga_dl,
         "tcga_panel": panel,
+        # The cell now also registers a finished download into the main
+        # database and lays it out under <project>/<case>/ (tier 1 wiring).
+        "db": _NoDb(),
+        "open_slide": lambda p: (_ for _ in ()).throw(
+            AssertionError("open_slide must not run on the click path")
+        ),
+        "tcga_db": None,
+        "tcga_storage_relpath": lambda fid, name=None, proj=None, case=None: (
+            pathlib.Path(proj or "unknown-project")
+            / (case or "unknown-case")
+            / (name or f"{fid}.svs")
+        ),
     }
     missing = [p for p in params if p not in deps]
     assert not missing, f"the TCGA results cell grew new dependencies: {missing}"
@@ -329,6 +350,9 @@ def _click_browse(catalog):
         "set_tcga_records": lambda v: published.__setitem__("records", v),
         "tcga_catalog": catalog,
         "tcga_client": object(),
+        # the search half of this cell now also seeds the TCGA hierarchy
+        "tcga_db": None,
+        "tcga_hits_to_rows": lambda hits: [],
         "tcga_panel": panel,
     }
     missing = [p for p in params if p not in deps]

@@ -354,12 +354,35 @@ class TifffileSource:
 
 
 def open_slide(path: str | Path) -> SlideSource:
-    """Open a slide. Priority: OpenSlideSource (if openslide is importable,
-    the extension matches, and it opens) -> TifffileSource (if tifffile can
-    open it; for .svs/.tiff/.tif) -> PillowSource. Never raises for a
-    readable image file."""
+    """Open a slide. Priority: DicomSource (a DICOM WSI, which none of the
+    others can read) -> OpenSlideSource (if openslide is importable, the
+    extension matches, and it opens) -> TifffileSource (if tifffile can open
+    it; for .svs/.tiff/.tif) -> PillowSource. Never raises for a readable
+    image file.
+
+    DICOM goes first because it is identified by CONTENT, not extension, and
+    because nothing below it can read one: a DICOM WSI is commonly a directory
+    of instances, or a single extensionless file, either of which would
+    otherwise fall through to PillowSource and fail there instead of here.
+    """
     p = Path(path)
     ext = p.suffix.lower()
+    dicom_error: Exception | None = None
+    looks_dicom = False
+    try:
+        from .dicom_source import DicomSource, is_dicom_slide
+
+        looks_dicom = is_dicom_slide(p)
+        if looks_dicom:
+            try:
+                return DicomSource(p)
+            except Exception as exc:
+                # Remembered rather than swallowed: if nothing below can read
+                # it either, the user needs to hear about DICOM and wsidicom,
+                # not PIL's "cannot identify image file".
+                dicom_error = exc
+    except Exception:  # pragma: no cover - the module itself failing to import
+        pass
     if _HAS_OPENSLIDE and ext in OPENSLIDE_EXTENSIONS:
         try:
             return OpenSlideSource(p)
@@ -370,6 +393,12 @@ def open_slide(path: str | Path) -> SlideSource:
             return TifffileSource(p)
         except Exception:
             pass
+    if looks_dicom:
+        raise RuntimeError(
+            f"{p.name} looks like DICOM but could not be opened as a "
+            f"whole-slide image: {dicom_error}. Install the DICOM backend "
+            'with: pip install -e ".[dicom]"'
+        )
     return PillowSource(p)
 
 

@@ -2167,7 +2167,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(Path, mo):
+def _(Path, db, mo):
     from hescope import tcga_panel
     from hescope.tcga import GDCClient, SlideCatalog, safe_file_id
 
@@ -2184,6 +2184,22 @@ def _(Path, mo):
 
     tcga_client = GDCClient()
     tcga_catalog = SlideCatalog(TCGA_DATA_DIR / "catalog.db")
+
+    # The TCGA-shaped catalog (project -> case -> sample -> file), in the MAIN
+    # database rather than a second one, so a downloaded file joins to its
+    # slides row and from there to its annotations. The flat SlideCatalog above
+    # stays: it still drives the results table, and both are written on
+    # download until the flat one is retired.
+    from hescope.tcga_schema import TcgaCatalog as _TcgaCatalog
+    from hescope.tcga_schema import hits_to_rows as _hits_to_rows
+    from hescope.tcga_schema import storage_relpath as _storage_relpath
+
+    try:
+        tcga_db = _TcgaCatalog(db.engine) if db.enabled else None
+    except Exception:  # a DB that cannot take the additive tables
+        tcga_db = None
+    tcga_hits_to_rows = _hits_to_rows
+    tcga_storage_relpath = _storage_relpath
 
     get_tcga_records, set_tcga_records = mo.state([])
     get_tcga_msg, set_tcga_msg = mo.state(None)  # (kind, text) or None
@@ -2213,7 +2229,10 @@ def _(Path, mo):
         set_tcga_records,
         tcga_catalog,
         tcga_client,
+        tcga_db,
         tcga_dl,
+        tcga_hits_to_rows,
+        tcga_storage_relpath,
         tcga_panel,
         tcga_ticker,
     )
@@ -2226,6 +2245,8 @@ def _(
     set_tcga_records,
     tcga_catalog,
     tcga_client,
+    tcga_db,
+    tcga_hits_to_rows,
     tcga_panel,
 ):
     def _on_search_gdc(_):
@@ -2237,6 +2258,18 @@ def _(
                 size=50,
             )
             tcga_catalog.upsert(_records)
+            # Build the hierarchy at SEARCH time, from the raw hits: the
+            # project/case/sample rows exist before anything is downloaded, so
+            # the catalog can answer "which cases are there" without a single
+            # byte of pixel data. Best effort -- the results table is driven by
+            # the flat catalog above and must not depend on this.
+            if tcga_db is not None:
+                try:
+                    tcga_db.upsert_rows(
+                        tcga_hits_to_rows(getattr(tcga_client, "last_hits", []))
+                    )
+                except Exception:
+                    pass
             set_tcga_records(
                 tcga_panel.merge_download_state(
                     _records, tcga_catalog.search(limit=100000)
@@ -2288,14 +2321,17 @@ def _(
 @app.cell(hide_code=True)
 def _(
     TCGA_DATA_DIR,
+    db,
     get_tcga_records,
     mo,
-    safe_file_id,
+    open_slide,
     set_tcga_msg,
     tcga_catalog,
     tcga_client,
+    tcga_db,
     tcga_dl,
     tcga_panel,
+    tcga_storage_relpath,
 ):
     tcga_results_table = tcga_panel.make_results_table(get_tcga_records())
 
@@ -2347,20 +2383,63 @@ def _(
         # sit on disk never opened and never mentioned (R07-17).
         tcga_dl["progress"] = (0, None)
 
+        # Where this download belongs: <project>/<case>/ under the TCGA root,
+        # so the directory tree mirrors the hierarchy instead of being a wall
+        # of file UUIDs. Falls back a level at a time when the row is missing
+        # metadata, and every component is sanitised inside storage_relpath --
+        # these names come from the server (R02-3, R05-1).
+        _row = _sel[0]
+        _dest_dir = (
+            TCGA_DATA_DIR
+            / tcga_storage_relpath(
+                _fid,
+                _row.get("file_name"),
+                _row.get("project_id"),
+                _row.get("case_submitter_id"),
+            ).parent
+        )
+
         def _work():
             try:
                 _path = tcga_client.download_slide(
                     _fid,
                     # file_id is server-supplied: contained before it is
                     # joined onto a path, or a "../" in it walks the
-                    # download out of TCGA_DATA_DIR (R05-1).
-                    TCGA_DATA_DIR / safe_file_id(_fid),
+                    # download out of TCGA_DATA_DIR (R05-1). storage_relpath
+                    # applies the same containment to the other components.
+                    _dest_dir,
                     progress_cb=lambda _d, _t: tcga_dl.__setitem__(
                         "progress", (_d, _t)
                     ),
                     expected_md5=_md5,
                 )
                 tcga_catalog.mark_downloaded(_fid, str(_path))
+                # STRAIGHT INTO THE DATABASE, not on first open. Registering
+                # here is what makes a downloaded slide a first-class row with
+                # its TCGA hierarchy attached, rather than a file that only
+                # becomes known if somebody happens to open it. Both writes
+                # are best-effort: a catalog that cannot be written must not
+                # cost the user the download.
+                if tcga_db is not None:
+                    try:
+                        _sid = None
+                        if db.enabled:
+                            _src_reg = open_slide(_path)
+                            _w_reg, _h_reg = _src_reg.dimensions
+                            _sid = db.slide_repo.register(
+                                source_kind="tcga",
+                                name=_src_reg.name,
+                                path=str(_path),
+                                width=_w_reg,
+                                height=_h_reg,
+                                mpp=_src_reg.mpp,
+                            )
+                            _close = getattr(_src_reg, "close", None)
+                            if callable(_close):
+                                _close()
+                        tcga_db.mark_downloaded(_fid, str(_path), slide_id=_sid)
+                    except Exception:
+                        pass
                 # consumed on the main thread by the status cell (ticker).
                 # Report only what this thread actually did: opening happens
                 # later on the main thread and can still fail, so the final

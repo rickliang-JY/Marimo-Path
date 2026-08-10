@@ -176,3 +176,119 @@ def test_hits_to_rows_survives_a_sparse_response():
 def test_upsert_skips_rows_with_no_file_id(catalog):
     assert catalog.upsert_rows([{"file_name": "x.svs"}]) == 0
     assert catalog.stats()["files"] == 0
+
+
+# --- migrating the flat catalog into the hierarchy -------------------------
+
+
+def _flat_catalog(tmp_path, rows):
+    """A legacy data/tcga/catalog.db, written by the flat SlideCatalog."""
+    from hescope.tcga import SlideCatalog, SlideRecord
+
+    cat = SlideCatalog(tmp_path / "catalog.db")
+    cat.upsert([
+        SlideRecord(
+            file_id=r["file_id"], file_name=r["file_name"],
+            file_size=r["file_size"], project_id=r["project_id"],
+            case_submitter_id=r["case_submitter_id"],
+            sample_type=r["sample_type"], primary_site=r["primary_site"],
+            local_path=None, md5sum=r["md5sum"],
+        )
+        for r in rows
+    ])
+    return cat
+
+
+def test_migration_dry_run_changes_nothing(tmp_path, rows, capsys):
+    from hescope.cli import main
+
+    _flat_catalog(tmp_path, rows)
+    db_url = f"sqlite:///{tmp_path / 'main.db'}"
+    assert main(["--db", db_url, "init"]) == 0
+    capsys.readouterr()
+
+    assert main([
+        "--db", db_url, "migrate-tcga-catalog",
+        "--catalog-db", str(tmp_path / "catalog.db"), "--dry-run",
+    ]) == 0
+    out = capsys.readouterr().out
+    assert "would import 3 file row(s)" in out
+    assert "nothing was changed" in out
+
+    from hescope.db import get_engine
+    assert TcgaCatalog(get_engine(db_url)).stats()["files"] == 0
+
+
+def test_migration_builds_the_hierarchy_and_keeps_downloads(tmp_path, rows, capsys):
+    from hescope.cli import main
+    from hescope.db import get_engine
+
+    cat = _flat_catalog(tmp_path, rows)
+    slide = tmp_path / "already-downloaded.svs"
+    slide.write_bytes(b"x" * 16)
+    cat.mark_downloaded(rows[0]["file_id"], str(slide))
+
+    db_url = f"sqlite:///{tmp_path / 'main.db'}"
+    main(["--db", db_url, "init"])
+    capsys.readouterr()
+    assert main([
+        "--db", db_url, "migrate-tcga-catalog",
+        "--catalog-db", str(tmp_path / "catalog.db"),
+    ]) == 0
+    out = capsys.readouterr().out
+    assert "imported 3 new file row(s)" in out
+    assert "files were not moved" in out
+
+    catalog = TcgaCatalog(get_engine(db_url))
+    stats = catalog.stats()
+    assert stats["files"] == 3 and stats["downloaded"] == 1
+    assert stats["cases"] == 2
+    # the download survived, and the file was left exactly where it was
+    assert catalog.local_file(rows[0]["file_id"]) == slide
+    assert slide.is_file()
+
+
+def test_migration_recovers_the_sample_level_from_the_barcode(tmp_path, rows, capsys):
+    """The flat table never stored a sample id. The barcode in the file name is
+    the only place sample identity survived, so the level is reconstructed
+    rather than dropped."""
+    from hescope.cli import main
+    from hescope.db import get_engine
+
+    _flat_catalog(tmp_path, rows)
+    db_url = f"sqlite:///{tmp_path / 'main.db'}"
+    main(["--db", db_url, "init"])
+    main(["--db", db_url, "migrate-tcga-catalog",
+          "--catalog-db", str(tmp_path / "catalog.db")])
+    capsys.readouterr()
+
+    files = TcgaCatalog(get_engine(db_url)).files()
+    barcodes = {f["sample_submitter_id"] for f in files}
+    assert any(b and b.startswith("TCGA-") for b in barcodes), barcodes
+
+
+def test_migration_is_idempotent(tmp_path, rows, capsys):
+    from hescope.cli import main
+    from hescope.db import get_engine
+
+    _flat_catalog(tmp_path, rows)
+    db_url = f"sqlite:///{tmp_path / 'main.db'}"
+    main(["--db", db_url, "init"])
+    args = ["--db", db_url, "migrate-tcga-catalog",
+            "--catalog-db", str(tmp_path / "catalog.db")]
+    main(args)
+    capsys.readouterr()
+    assert main(args) == 0
+    assert "imported 0 new file row(s)" in capsys.readouterr().out
+    assert TcgaCatalog(get_engine(db_url)).stats()["files"] == 3
+
+
+def test_migration_without_a_catalog_is_not_an_error(tmp_path, capsys):
+    from hescope.cli import main
+
+    db_url = f"sqlite:///{tmp_path / 'main.db'}"
+    main(["--db", db_url, "init"])
+    capsys.readouterr()
+    assert main(["--db", db_url, "migrate-tcga-catalog",
+                 "--catalog-db", str(tmp_path / "absent.db")]) == 0
+    assert "nothing to migrate" in capsys.readouterr().out

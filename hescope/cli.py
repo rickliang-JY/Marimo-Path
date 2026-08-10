@@ -10,6 +10,8 @@ Commands:
   ingest PATH [--kind K] [--recursive]   register image files as slides
   list [--kind K]               list registered slides
   dedupe-slides [--dry-run]     merge slide rows that name the same file
+  migrate-tcga-catalog [--dry-run]  import the flat TCGA catalog into the
+                                TCGA-shaped tables (never moves files)
 """
 
 from __future__ import annotations
@@ -144,6 +146,24 @@ def build_parser() -> argparse.ArgumentParser:
         "made, and change nothing",
     )
 
+    p_migrate = sub.add_parser(
+        "migrate-tcga-catalog",
+        help="import the flat data/tcga/catalog.db into the TCGA-shaped "
+        "tables (project/case/sample/file) in the main database; files are "
+        "never moved and the old catalog is left in place",
+    )
+    p_migrate.add_argument(
+        "--catalog-db",
+        default=None,
+        metavar="PATH",
+        help="the flat catalog to read (default: <runtime>/data/tcga/catalog.db)",
+    )
+    p_migrate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what WOULD be imported and change nothing",
+    )
+
     p_list = sub.add_parser("list", help="list registered slides")
     p_list.add_argument(
         "--kind",
@@ -249,6 +269,97 @@ def _cmd_dedupe_slides(engine, dry_run: bool = False) -> int:
     return 0
 
 
+def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> int:
+    """Carry the flat ``tcga_slides`` catalog into the TCGA-shaped tables.
+
+    The old catalog is a separate SQLite file holding one denormalized row per
+    file. This reads it, recovers the hierarchy each row belongs to (the
+    barcode in the file name carries case and sample when the columns do not),
+    and writes projects/cases/samples/files into the MAIN database, preserving
+    download state. It never moves a file and never deletes the old catalog:
+    an existing download keeps working from its recorded absolute path.
+    """
+    import sqlite3
+    from pathlib import Path as _Path
+
+    from .paths import resolve_runtime_dir
+    from .tcga_schema import TcgaCatalog, parse_barcode
+
+    src = _Path(catalog_db) if catalog_db else (
+        resolve_runtime_dir(_Path(__file__).resolve().parent.parent)
+        / "data" / "tcga" / "catalog.db"
+    )
+    if not src.is_file():
+        print(f"no flat catalog at {src}; nothing to migrate")
+        return 0
+
+    con = sqlite3.connect(str(src))
+    try:
+        rows = con.execute(
+            "SELECT file_id, file_name, file_size, project_id, "
+            "case_submitter_id, sample_type, primary_site, local_path, md5sum "
+            "FROM tcga_slides"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        print(f"error: cannot read {src}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        con.close()
+
+    prepared, downloaded = [], []
+    for (fid, fname, fsize, pid, case_id, stype, site, lpath, md5) in rows:
+        bc = parse_barcode(fname)
+        prepared.append(
+            {
+                "file_id": fid, "file_name": fname, "file_size": fsize,
+                "md5sum": md5, "project_id": pid,
+                "case_submitter_id": case_id or bc.case,
+                # The flat table never stored a sample id. The barcode is the
+                # only place the sample identity survives, so synthesise a
+                # stable key from it rather than dropping the level entirely.
+                "sample_id": (bc.sample or f"{fid}-sample"),
+                "sample_submitter_id": bc.sample,
+                "sample_type": stype or bc.sample_type,
+                "tissue_type": None, "primary_site": site,
+                "project_name": None, "disease_type": None,
+                "program": bc.program, "case_uuid": None,
+            }
+        )
+        if lpath:
+            downloaded.append((fid, lpath))
+
+    if dry_run:
+        print(f"would import {len(prepared)} file row(s) from {src}")
+        print(f"would preserve {len(downloaded)} recorded download(s)")
+        print(f"  projects: {len({r['project_id'] for r in prepared if r['project_id']})}"
+              f"  cases: {len({r['case_submitter_id'] for r in prepared if r['case_submitter_id']})}"
+              f"  samples: {len({r['sample_id'] for r in prepared if r['sample_id']})}")
+        missing = [p for _f, p in downloaded if not _Path(p).is_file()]
+        if missing:
+            print(f"  {len(missing)} recorded path(s) no longer exist and will "
+                  "import without download state")
+        print("dry run: nothing was changed")
+        return 0
+
+    init_db(engine)
+    catalog = TcgaCatalog(engine)
+    inserted = catalog.upsert_rows(prepared)
+    kept = 0
+    for fid, lpath in downloaded:
+        if _Path(lpath).is_file():
+            catalog.mark_downloaded(fid, lpath)
+            kept += 1
+    stats = catalog.stats()
+    print(f"imported {inserted} new file row(s) from {src}")
+    print(f"preserved {kept} download(s) (files were not moved)")
+    print(
+        f"catalog now: {stats['projects']} project(s), {stats['cases']} case(s), "
+        f"{stats['samples']} sample(s), {stats['files']} file(s), "
+        f"{stats['downloaded']} downloaded"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command in (None, "app"):
@@ -262,6 +373,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list(engine, args.kind)
     if args.command == "dedupe-slides":
         return _cmd_dedupe_slides(engine, getattr(args, "dry_run", False))
+    if args.command == "migrate-tcga-catalog":
+        return _cmd_migrate_tcga_catalog(
+            engine,
+            getattr(args, "catalog_db", None),
+            getattr(args, "dry_run", False),
+        )
     return 1  # pragma: no cover - argparse enforces a valid command
 
 
