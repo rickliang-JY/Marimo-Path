@@ -62,13 +62,23 @@ def test_roi_actions_do_not_raise_when_clicked(ui_actions, name):
     ui_actions[name](None)
 
 
-def test_pan_moves_the_viewport_when_a_slide_is_open(notebook_defs):
-    """Not just 'does not raise' -- the arrows must actually pan."""
+def test_pan_moves_the_viewport_when_a_slide_is_open():
+    """Not just 'does not raise' -- the arrows must actually pan.
+
+    Takes its OWN snapshot rather than the module-scoped fixture. `app` is a
+    module-level singleton, and several test modules now call `app.run()`, so
+    a fixture captured once per module can be left holding getters whose state
+    another module has since reset -- which made this assertion fail
+    intermittently in the full suite while passing in isolation.
+    """
+    import app as appmod
+
     from hescope.demo import generate_demo_slide
 
-    open_slide_path = notebook_defs["open_slide_path"]
-    get_vp = notebook_defs["get_vp"]
-    actions = notebook_defs["ui_actions"]
+    _outputs, defs = appmod.app.run()
+    open_slide_path = defs["open_slide_path"]
+    get_vp = defs["get_vp"]
+    actions = defs["ui_actions"]
 
     open_slide_path(str(generate_demo_slide("assets/demo_he.png")))
     before = get_vp().center
