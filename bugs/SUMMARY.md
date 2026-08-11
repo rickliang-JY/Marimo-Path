@@ -160,6 +160,8 @@ in `file_id`, at the site R02-3's fix did not cover. Both fixes were then placed
 | 6 | **`records_to_rows` omits `md5sum`,** so app.py's `_sel[0].get("md5sum") or <catalog lookup>` has a permanently dead first branch. | Round 02 observation, still latent. |
 | 7 | **Factory-produced click handlers are outside R07-5's lint.** `on_click=_make_view(_i)` is not reachable by name, so the per-ROI View/Delete buttons are neither guarded nor checked. | Round 07, R07-5; the test docstring says so rather than papering over it. Still true after F01 widened the `ui_actions` guard — that guard starts from `ui_actions[...] = <name>`, and a factory call is neither. |
 
+**Open item 4 is now measured** (2026-08-11, `docs/DESIGN-AGENT-WORKBENCH.md` §4.1): 28 cold 256 px tiles at DZI level 15 of the 81671x18211 slide. Flag unset: 2163 ms sequential, 2168 ms on 8 threads — **1.00x**, the reads are fully serialised. Flag set: 2210 ms sequential, **425 ms** on 8 threads — **5.20x**, and the parallel fetch returned byte-identical tiles. Not yet proven and required before changing the default: the OpenSlide backend, sustained load, memory, and distributions rather than single runs.
+
 **Field reports** (defects hit in the running app rather than found by review)
 are in `2026-08-10-field-reports.md`. F01 — Add ROI raising `NameError` on every
 click — matters beyond its one-line fix: the guard written for the *previous*
