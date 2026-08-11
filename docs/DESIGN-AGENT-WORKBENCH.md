@@ -6,7 +6,7 @@ Four questions, answered against the code as it stands on `main` (`f541b68`,
 1. Does the front end actually expose what we built?
 2. How far can the marimo ↔ code-agent channel really go?
 3. How deep should an agent be allowed to go on one slide, and what would let
-   it iterate rather than answer once?
+   it iterate rather than answer once? (Reviewed **LoopX** for this — §3.0.)
 4. Zoom, ROI editing, ROI storage, ROI loading — what is slow, and why.
 
 Every number below was measured on the 81671 x 18211 TCGA/HCMI slide in this
@@ -150,9 +150,78 @@ of which are schema-shaped:
 
 ## Part 3 — How deep, and how to iterate
 
-### 3.1 The loop engine
+### 3.0 Do not build the loop engine — LoopX is one, and it is free
 
-An agent that answers once is a fancier button. The loop worth building is the
+Reviewed `E:\Good Github Repo\Agent\loopx` (2026-08-11). It is **a state kernel
+and local-first control plane for long-running agents**, explicitly not an agent
+framework: it holds objective, gates, todos, scope, evidence and quota across
+turns while Codex / Claude Code / Cursor execute bounded slices. That is the
+part §3.1 below was about to specify from scratch.
+
+**Cost, measured the same way as every other dependency this session:**
+
+```
+uv pip install --dry-run -e <loopx>   ->   1 package, 0 removals
+pyproject.toml                        ->   dependencies = []
+requires-python                       ->   >=3.11   (this venv is 3.11.14)
+```
+
+One package, **zero transitive dependencies**, nothing uninstalled. Compare
+`wsidicom` (7 installs / 0 removals, adopted) and `tiatoolbox` (152 installs /
+22 removals including `ipywidgets`, which the viewer sits on — rejected). This
+is the cheapest integration measured in this project.
+
+State is JSONL ledgers on disk under the project, keyed by `goal_id` and
+`domain_pack` (`upsert_domain_state_jsonl`, `ledger.jsonl`) — local-first, no
+server, reviewable in git. `loopx/claude_goal_mode/` ships `commands`, `hooks`,
+`mcp`, `statusline` and a `settings.example.json`: it integrates with the exact
+harness this project is already driven from.
+
+#### The pack that already fits
+
+`loopx/domain_packs/ml_experiment.py` is a built-in pack for iterative
+experiments, and its vocabulary maps onto slide analysis almost term for term:
+
+| LoopX (`ml_experiment`) | HE-Scope |
+| --- | --- |
+| `hypothesis_ledger_v0`, status `active → supported \| weakened \| retired` | "tumour reads higher than stroma on this cohort" |
+| `dataset_window_contract_v0` | the cohort — project / case / sample from `DATABASE-DESIGN.md` |
+| `primary_metric`, `baseline_value` vs `candidate_value`, `higher_is_better` | `tissue_fraction`, `hematoxylin_mean`, nuclei density; label A vs label B, or model v1 vs v2 |
+| `classify_primary_metric_delta` → `improved / flat / regressed` | the comparison the Statistics panel makes by eye today |
+| **`guardrail_status`: `clean / warning / failed`** | **the comparability check** |
+| `experiment_replan_v0` | the next sweep, narrowed to where the metric separated |
+
+**The `guardrail_status` slot is the important one.** LoopX supplies the field
+and refuses to record a result without it; we supply the domain check — and we
+already know what it is. Two ROIs measured this session came out at 0.355 and
+0.971 µm/px with eosin means 40% apart. A hypothesis "supported" by comparing
+those two is not supported; it is `guardrail_status="failed"`. LoopX gives the
+loop a place to say so, which is precisely what ten bug rounds say this codebase
+needs: **plausible output is the failure mode, not crashes.**
+
+#### One constraint that lands on our schema
+
+The pack enforces a public/private boundary in code: `_compact_public_text`
+rejects absolute paths, `~`, drive letters, URLs (`https|file|s3|gs|tos|hdfs`),
+and credential-like markers. Our slide identity is
+`E:\...\data\tcga\<uuid>\HCM-CSHL-...svs` — **an absolute path, which the pack
+will refuse.** A ledger entry has to name a slide by a public alias.
+
+That is one more argument for `DATABASE-DESIGN.md`'s content identity: a
+`content_key` prefix and a case `submitter_id` are public aliases by
+construction, and a file path never can be.
+
+#### What we would actually build
+
+A `packages/loopx-pathology-slide-discovery` pack mirroring the shipped
+`packages/loopx-finance-value-discovery` (`CONTRACT.md`, `extension.toml`,
+`gates.py`, `metric_packs.py`, `reducer.py`, `replay.py`, `boundary.py`) — the
+domain vocabulary, the gates, and the guardrails. **Not** the scheduler, the
+quota, the evidence store, or the handoff protocol, all of which exist.
+
+### 3.1 The loop, expressed in that vocabulary
+
+An agent that answers once is a fancier button. The loop worth running is the
 one a pathologist actually runs:
 
 ```
@@ -221,6 +290,15 @@ version is proposed, run against the ROIs the previous version was run against,
 and kept only if it agrees with the human labels at least as well. Without
 `skill_runs` there is no such comparison, and "the skill improves itself" is a
 claim nobody can audit.
+
+**With LoopX (§3.0) that comparison is not ours to invent.** A skill version is
+a `candidate_value` against the previous version's `baseline_value` on the same
+`dataset_window`, classified by `classify_primary_metric_delta` into
+`improved / flat / regressed`, and admitted only when `guardrail_status` is
+`clean`. `skills` / `skill_runs` remain ours — they are the *catalogue* and the
+per-ROI execution record, which is domain data. The *promotion decision* is
+LoopX's ledger. Building both would be building the comparison twice, which is
+the recurring defect class this repository has spent ten rounds naming.
 
 **The honest caution.** Everything in 3.1–3.3 is generative: an agent that writes
 code, runs it, and stores what it found. This repository's ten bug rounds are
@@ -343,7 +421,17 @@ store that does not exist yet.
 | 4 | Viewport-scoped ROI loading on the new bbox columns | 10³–10⁴ ROIs | small, after 2 |
 | 5 | Canvas ROI editing (select / move / vertex / delete) | §1.3 | medium, client-side |
 | 6 | Exploration notebook + `cm` promotion path | agent-authored analysis without silting up `app.py` | small |
-| 7 | `skills` / `skill_runs`, then the loop engine on top | Part 3 | large |
+| 7 | Install LoopX; drive one real loop with the built-in `ml_experiment` pack | proves the control plane before any pathology code is written | **small** |
+| 8 | `packages/loopx-pathology-slide-discovery`: gates, metric packs, guardrails | Part 3 as a governed loop | medium |
+| 9 | `skills` / `skill_runs` as the domain catalogue under it | skill iteration with an auditable promotion rule | medium |
 
 Steps 1 and 4 are the ones a user feels immediately. Step 2 is the one
-everything after it depends on.
+everything after it depends on. **Step 7 moved ahead of the pathology pack on
+purpose**: LoopX costs one dependency-free package, so the honest order is to
+run a governed loop with the generic pack first and find out where its
+vocabulary does not fit, rather than designing a domain pack against a control
+plane nobody here has operated yet.
+
+Note what step 7 does *not* require: no schema change, no `app.py` change, no
+new UI. It is a control plane beside the app, reading the same database. That is
+why it can run in parallel with steps 2–5 instead of queueing behind them.
