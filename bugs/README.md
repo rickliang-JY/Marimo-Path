@@ -7,7 +7,7 @@ regressions a previous round claimed to have fixed.
 
 ## Files
 
-**Start here: [SUMMARY.md](SUMMARY.md)** — all seven rounds by area and
+**Start here: [SUMMARY.md](SUMMARY.md)** — all ten rounds by area and
 severity, the bug classes that recurred, and what is still open.
 
 | Round | Date | Findings | Status |
@@ -19,6 +19,9 @@ severity, the bug classes that recurred, and what is still open.
 | [round-05](2026-08-09-round-05.md) | 2026-08-09 | 7 | fixed — **record reconstructed 2026-08-10**, see its header for what is and is not recoverable |
 | [round-06](2026-08-09-round-06.md) | 2026-08-09 | 5 | fixed (+2 refuted) |
 | [round-07](2026-08-10-round-07.md) | 2026-08-10 | 19 | fixed (+2 refuted, +2 corrected) |
+| [round-08](2026-08-11-round-08.md) | 2026-08-11 | 5 | 2 fixed, 3 filed |
+| [round-09](2026-08-11-round-09.md) | 2026-08-11 | 4 | 2 fixed, 2 carried |
+| [round-10](2026-08-11-round-10.md) | 2026-08-11 | 3 | 2 fixed, 1 deferred |
 
 ## Conventions
 

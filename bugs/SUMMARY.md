@@ -1,9 +1,12 @@
-﻿# HE-Scope bug review — seven rounds, 2026-08-09/10
+﻿# HE-Scope bug review — ten rounds, 2026-08-09/11
 
-**50 findings fixed** (12 high, 17 medium, 21 low), 1 wontfix, 4 refuted, 1
-demoted to an observation. Every fix carries a named regression test; the suite
-grew 286 -> 705. Nothing is committed — all seven rounds live in one working
-tree on `feature/interop-and-hardening`.
+**56 findings fixed** (rounds 01–07: 50, of them 12 high / 17 medium / 21 low;
+rounds 08–10: 6 more), 1 wontfix, 4 refuted, 1 demoted to an observation, and 4
+open from the user-experience rounds. Every fix carries a named regression test
+**verified to fail against the un-fixed code**; the suite grew 286 -> 790.
+
+Rounds 01–07 landed on `feature/interop-and-hardening`; rounds 08–10 are on
+`bugs/2026-08-11-round-08` and `bugs/2026-08-11-round-10`.
 
 State as of round 07 (2026-08-10), all four commands run and green:
 
@@ -248,3 +251,52 @@ store would not get it — which is the real form of the concern.
    widget instead of digging through layout internals; and **assert on the
    cell's parameter list** (`missing = [p for p in params if p not in deps]`),
    which is what caught every new dependency this round introduced.
+
+---
+
+## Rounds 08-10 — the user-experience lens (2026-08-11)
+
+Three rounds run against one question: **what the code can do, versus what the
+person operating it can reach and can see.** Ten distinct findings, six fixed,
+four open. (R10-2 and R10-3 are R08-4 and R09-4 carried forward, not new
+numbers.)
+
+**The widest gap.** "Add ROI" wrote the session list only, so an ROI added with
+that button was invisible to the Statistics panel, to all three exports and to
+the annotation editor — every one of which reads the database — and gone at the
+next restart. The button that actually saved was "Send to code agent". Fixed:
+the database is the owner when there is one, the session list stays the store in
+DB-free mode.
+
+**Two regressions caught in the round after the one that caused them.** Moving
+that store left the status strip counting an empty list ("0 ROI(s)" over an
+image drawing four), and left "not added yet" describing regions the user had
+just saved. Both fixed before either shipped. A third — `set_ann_version(
+get_ann_version() + 1)` inventing an integer contract for an opaque token —
+raised **after** the row was written, so the ROI was saved and the strip said
+"Add ROI failed".
+
+**Doors that did not exist.** `hescope/importers.py` was complete, tested and
+referenced by nothing outside its own tests: QuPath and ASAP annotations could
+not get in, while export had three buttons. Now wired, and reporting `skipped`
+and `warnings` rather than a count alone.
+
+**An integrity claim the app could not always keep.** R07-13 established that
+"Downloaded" means md5-verified in this app; the download path said it whether
+or not a checksum was available to check against. Now three distinguishable
+outcomes, failing closed when the flag is absent.
+
+**Still open from these rounds:** a whole-slide sweep's grid is never persisted
+(only its settings reach `interactions`, so the database can say a sweep ran and
+not what it found); three of four stain-normalisation methods have no way to be
+selected, for the documented reason that Macenko refits per tile and blanks a
+background tile to black; and the sidebar's per-ROI View/Delete now render only
+in DB-free mode, the capability having moved to the Annotations browser.
+
+**Checked and recorded as clean**, so a later round does not repeat them: all 39
+UI controls have a handler or a reader; the nine module-scope names AGENTS.md
+promises all resolve in marimo's graph; every expensive action guards its
+precondition; the two status-strip channels stack rather than overwrite; all 20
+panels cover their empty and error states; and marimo's `_invalidate_cell_state`
+deletes a cell's defs before re-running it, which is what makes the Statistics
+panel's `dir()` guard sound.

@@ -253,13 +253,25 @@ def test_an_already_downloaded_slide_is_not_reported_as_downloaded(
 
 
 def test_a_real_download_is_still_reported_as_downloaded(catalog, tmp_path):
-    """Guard against the fix overreaching."""
+    """Guard against the fix overreaching.
+
+    ``md5_verified=True`` is what a real download is: the catalog carries a
+    checksum for every file the GDC returns, so ``_finalize_part`` compares it
+    (R10-1 is about the case where it could not be resolved, which is why the
+    flag has to be set explicitly here rather than defaulted).
+    """
     tcga_dl = _new_dl()
-    tcga_dl.update(open_path=str(tmp_path / "TCGA-YY-0002.svs"), downloaded=True)
+    tcga_dl.update(
+        open_path=str(tmp_path / "TCGA-YY-0002.svs"),
+        downloaded=True,
+        md5_verified=True,
+    )
 
     published, opened = _run_status_cell(tcga_dl, catalog)
 
-    assert published["msg"] == ("success", "Downloaded and opened TCGA-YY-0002.svs")
+    assert published["msg"] == (
+        "success", "Downloaded, md5-verified and opened TCGA-YY-0002.svs"
+    )
 
 
 # --- R01-4 / R07-18 --------------------------------------------------------
@@ -378,3 +390,80 @@ def test_browsing_the_catalog_lists_all_of_it_and_says_so(catalog):
         "the browse wrote no message of its own, so a red 'GDC search failed' "
         f"from an earlier click stands over a successful listing: {published}"
     )
+
+
+# --- R10-1 -----------------------------------------------------------------
+
+
+def test_a_verified_download_says_so(catalog, tmp_path):
+    """The happy path must still be a plain success, and must name the check
+    that was actually performed."""
+    dl = _new_dl()
+    dl.update(
+        open_path=str(tmp_path / "TCGA-XX-0001.svs"),
+        downloaded=True,
+        md5_verified=True,
+    )
+    published, opened = _run_status_cell(dl, catalog)
+
+    kind, text = published["msg"]
+    assert kind == "success"
+    assert "md5-verified" in text and "NOT" not in text
+    assert opened, "the slide was never opened"
+
+
+def test_an_unverified_download_is_not_announced_like_a_verified_one(
+    catalog, tmp_path
+):
+    """``_finalize_part`` verifies only ``if expected_md5:``. The md5 comes
+    from a catalog scan, because ``records_to_rows`` carries none -- so a file
+    whose checksum could not be resolved is written on a size check alone.
+
+    "Downloaded" is an integrity claim in this app (R07-13). Announcing that
+    file with the same sentence as a checksummed one makes a verified gigabyte
+    and an unverified one identical on screen, which is the single thing the
+    word is there to settle.
+    """
+    dl = _new_dl()
+    dl.update(
+        open_path=str(tmp_path / "TCGA-XX-0001.svs"),
+        downloaded=True,
+        md5_verified=False,
+    )
+    published, _opened = _run_status_cell(dl, catalog)
+
+    kind, text = published["msg"]
+    assert kind != "success", (
+        f"an unverified download reported as a plain success: {text!r}"
+    )
+    assert "NOT" in text and "md5" in text
+    assert "no checksum was available" in text
+
+
+def test_an_absent_flag_is_treated_as_unverified(catalog, tmp_path):
+    """Fail closed: a hand-off dict that predates the flag must not be read as
+    a verification that happened."""
+    dl = _new_dl()
+    dl.update(open_path=str(tmp_path / "TCGA-XX-0001.svs"), downloaded=True)
+    dl.pop("md5_verified", None)
+    published, _opened = _run_status_cell(dl, catalog)
+    assert published["msg"][0] != "success"
+
+
+def test_the_already_on_disk_branch_is_unchanged_by_the_md5_wording(
+    catalog, tmp_path
+):
+    """R07-13's message must survive: nothing was fetched, so neither
+    'Downloaded' nor a verification claim belongs in it."""
+    dl = _new_dl()
+    dl.update(
+        open_path=str(tmp_path / "TCGA-XX-0001.svs"),
+        downloaded=False,
+        md5_verified=False,
+    )
+    published, _opened = _run_status_cell(dl, catalog)
+
+    kind, text = published["msg"]
+    assert kind == "success"
+    assert text.startswith("Opened ") and "already downloaded" in text
+    assert "Downloaded and" not in text and "md5" not in text

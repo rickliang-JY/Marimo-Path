@@ -34,6 +34,11 @@ import pytest
 
 from hescope.db import ROIRepo, SlideRepo, export_rois, get_engine, init_db
 from hescope.geojson import slide_geojson_text
+from hescope.importers import (
+    import_annotations,
+    parse_asap_xml,
+    parse_geojson_annotations,
+)
 from hescope.rois import ROI
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app.py"
@@ -95,6 +100,7 @@ def _run_editor(engine, *, slide_id, table_value=None, db=None):
     published: dict = {}
     downloads: dict = {}
     buttons: dict = {}
+    handlers: dict = {}
     db = db if db is not None else _DB(engine)
 
     class _Table:
@@ -131,6 +137,13 @@ def _run_editor(engine, *, slide_id, table_value=None, db=None):
                 buttons[kw.get("label")] = el
                 return el
 
+            @staticmethod
+            def file(**kw):
+                # The annotation IMPORT control (R10-2). Captured by label so a
+                # test can hand it a file the way the browser would.
+                handlers[kw.get("label")] = kw["on_change"]
+                return mo.md(str(kw.get("label")))
+
     cell, params = _editor_cell()
     deps = {
         "annotation_table": _Table() if table_value is not None else None,
@@ -142,6 +155,10 @@ def _run_editor(engine, *, slide_id, table_value=None, db=None):
         "set_ann_version": lambda v: published.__setitem__("ann_version", v),
         "set_db_msg": lambda v: published.__setitem__("msg", v),
         "slide_geojson_text": slide_geojson_text,
+        # R10-2 wired the annotation IMPORT beside the exports.
+        "import_annotations": import_annotations,
+        "parse_asap_xml": parse_asap_xml,
+        "parse_geojson_annotations": parse_geojson_annotations,
         # The editor now also exports the MEASUREMENTS, not just the
         # annotations, which needs the slide (for mpp) and the stats reshape.
         "get_source": lambda: None,
@@ -151,7 +168,7 @@ def _run_editor(engine, *, slide_id, table_value=None, db=None):
     missing = [p for p in params if p not in deps]
     assert not missing, f"the annotation editor cell grew new dependencies: {missing}"
     cell(**{p: deps[p] for p in params})
-    return db, published, downloads, buttons
+    return db, published, downloads, buttons, handlers
 
 
 def _download(downloads, label):
@@ -170,7 +187,7 @@ def test_with_no_slide_open_all_three_exports_agree(engine, slide_id):
     repo = ROIRepo(engine)
     ids = [repo.add(slide_id, _rect(x)) for x in (10.0, 200.0, 400.0)]
 
-    _db, _pub, downloads, _b = _run_editor(engine, slide_id=None)
+    _db, _pub, downloads, _b, _h = _run_editor(engine, slide_id=None)
 
     _n, js = _download(downloads, "Export ROIs (JSON)")
     _n, cs = _download(downloads, "Export ROIs (CSV)")
@@ -211,7 +228,7 @@ def test_a_failed_export_is_not_delivered_as_the_data_file(
     broken = get_engine(
         f"sqlite:///{(tmp_path / 'gone' / 'h.db').as_posix()}"
     )
-    _db, _pub, downloads, _b = _run_editor(
+    _db, _pub, downloads, _b, _h = _run_editor(
         engine, slide_id=slide_id, db=_DB(broken)
     )
 
@@ -229,7 +246,7 @@ def test_a_failed_export_is_not_delivered_as_the_data_file(
 
 def test_a_successful_export_keeps_its_plain_filename(engine, slide_id):
     ROIRepo(engine).add(slide_id, _rect())
-    _db, _pub, downloads, _b = _run_editor(engine, slide_id=slide_id)
+    _db, _pub, downloads, _b, _h = _run_editor(engine, slide_id=slide_id)
 
     for label, good in (
         ("Export ROIs (JSON)", "rois.json"),
@@ -246,7 +263,7 @@ def test_each_click_re_reads_the_database(engine, slide_id):
     a stale body to the NEXT click."""
     repo = ROIRepo(engine)
     repo.add(slide_id, _rect())
-    _db, _pub, downloads, _b = _run_editor(engine, slide_id=slide_id)
+    _db, _pub, downloads, _b, _h = _run_editor(engine, slide_id=slide_id)
 
     _n, first = _download(downloads, "Export ROIs (JSON)")
     repo.add(slide_id, _rect(500.0))
@@ -265,7 +282,7 @@ def test_saving_an_roi_that_is_gone_is_not_reported_as_saved(engine, slide_id):
     the table selection."""
     repo = ROIRepo(engine)
     rid = repo.add(slide_id, _rect(), label="tumour")
-    _db, published, _d, buttons = _run_editor(
+    _db, published, _d, buttons, _h = _run_editor(
         engine, slide_id=slide_id, table_value=[{"id": rid, "kind": "rect", "label": "tumour"}]
     )
     repo.delete(rid)  # out of band
@@ -283,7 +300,7 @@ def test_saving_an_roi_that_is_gone_is_not_reported_as_saved(engine, slide_id):
 def test_deleting_an_roi_that_is_gone_is_not_reported_as_deleted(engine, slide_id):
     repo = ROIRepo(engine)
     rid = repo.add(slide_id, _rect(), label="tumour")
-    _db, published, _d, buttons = _run_editor(
+    _db, published, _d, buttons, _h = _run_editor(
         engine, slide_id=slide_id, table_value=[{"id": rid, "kind": "rect", "label": "tumour"}]
     )
     repo.delete(rid)
@@ -297,7 +314,7 @@ def test_deleting_an_roi_that_is_gone_is_not_reported_as_deleted(engine, slide_i
 def test_the_normal_save_and_delete_still_report_success(engine, slide_id):
     repo = ROIRepo(engine)
     rid = repo.add(slide_id, _rect(), label="")
-    db, published, _d, buttons = _run_editor(
+    db, published, _d, buttons, _h = _run_editor(
         engine, slide_id=slide_id, table_value=[{"id": rid, "kind": "rect", "label": "tumour"}]
     )
 
@@ -308,3 +325,121 @@ def test_the_normal_save_and_delete_still_report_success(engine, slide_id):
     buttons["Delete ROI"]._update(object())
     assert published["msg"] == ("success", f"Deleted ROI {rid}.")
     assert repo.get(rid) is None
+
+
+# --- R10-2: the import door ------------------------------------------------
+
+IMPORT_LABEL = "Import annotations (QuPath GeoJSON / ASAP XML)"
+
+
+class _Uploaded:
+    def __init__(self, name, text):
+        self.name = name
+        self.contents = text.encode("utf-8")
+
+
+def _import(engine, slide_id, name, text, *, db=None):
+    _db, published, _d, _b, handlers = _run_editor(
+        engine, slide_id=slide_id, db=db
+    )
+    assert IMPORT_LABEL in handlers, (
+        "the Annotations panel has three export buttons and no way to import: "
+        "hescope/importers.py is complete, tested, and reachable from nothing"
+    )
+    handlers[IMPORT_LABEL]([_Uploaded(name, text)])
+    return published
+
+
+def _fc(*features):
+    return json.dumps({"type": "FeatureCollection", "features": list(features)})
+
+
+def _poly(coords, label="tumour"):
+    return {
+        "type": "Feature",
+        "properties": {"classification": {"name": label}},
+        "geometry": {"type": "Polygon", "coordinates": [coords]},
+    }
+
+
+SQUARE = [[0, 0], [100, 0], [100, 100], [0, 100], [0, 0]]
+
+
+def test_a_qupath_geojson_becomes_rois_on_this_slide(engine, slide_id):
+    published = _import(
+        engine, slide_id, "annotations.geojson", _fc(_poly(SQUARE))
+    )
+
+    rows = ROIRepo(engine).for_slide(slide_id)
+    assert len(rows) == 1
+    assert rows[0]["label"] == "tumour"
+    assert rows[0]["bbox"] == [0, 0, 100, 100]
+    assert published["msg"][0] == "success"
+    assert "Imported 1 annotation(s)" in published["msg"][1]
+    assert "ann_version" in published, "the panels were never told to refresh"
+
+
+def test_what_the_parser_could_not_represent_is_reported(engine, slide_id):
+    """An import that keeps some features and reports plain success is this
+    project's signature failure. Points and LineStrings are skipped on purpose;
+    the message has to say so, and must not be a green tick."""
+    point = {"type": "Feature", "properties": {},
+             "geometry": {"type": "Point", "coordinates": [5, 5]}}
+    published = _import(
+        engine, slide_id, "mixed.geojson", _fc(_poly(SQUARE), point)
+    )
+
+    kind, text = published["msg"]
+    assert len(ROIRepo(engine).for_slide(slide_id)) == 1
+    assert kind == "warn", f"one of two features was dropped under {kind!r}: {text!r}"
+    assert "Skipped" in text and "1" in text
+
+
+def test_an_asap_xml_is_routed_by_extension(engine, slide_id):
+    xml = (
+        '<ASAP_Annotations><Annotations>'
+        '<Annotation Name="A" PartOfGroup="tumour" Type="Polygon"><Coordinates>'
+        '<Coordinate Order="0" X="0" Y="0"/><Coordinate Order="1" X="50" Y="0"/>'
+        '<Coordinate Order="2" X="50" Y="40"/>'
+        '</Coordinates></Annotation></Annotations></ASAP_Annotations>'
+    )
+    published = _import(engine, slide_id, "camelyon.xml", xml)
+
+    rows = ROIRepo(engine).for_slide(slide_id)
+    assert len(rows) == 1 and rows[0]["kind"] == "polygon"
+    assert rows[0]["label"] == "tumour"
+    assert published["msg"][0] == "success"
+
+
+def test_a_malformed_file_reports_instead_of_writing_nothing_silently(
+    engine, slide_id
+):
+    """``parse_geojson_annotations`` is deliberately tolerant: it does not
+    raise on bad JSON, it records ``skipped={'unreadable GeoJSON
+    (JSONDecodeError)': 1}``. So the correct outcome is not `danger` (nothing
+    crashed) but a `warn` that NAMES the reason — what must never happen is a
+    green tick, or silence, over a file that contributed nothing."""
+    published = _import(engine, slide_id, "broken.geojson", "{not json")
+    kind, text = published["msg"]
+    assert kind != "success"
+    assert "broken.geojson" in text
+    assert "unreadable GeoJSON" in text, f"the reason was not reported: {text!r}"
+    assert ROIRepo(engine).for_slide(slide_id) == []
+
+
+def test_a_valid_but_empty_file_is_not_a_green_tick(engine, slide_id):
+    published = _import(engine, slide_id, "empty.geojson", _fc())
+    assert published["msg"][0] == "warn"
+    assert "Imported 0 annotation(s)" in published["msg"][1]
+
+
+def test_importing_with_no_slide_open_says_what_to_do(engine):
+    published = _import(engine, None, "a.geojson", _fc(_poly(SQUARE)))
+    kind, text = published["msg"]
+    assert kind == "warn" and "Open a slide" in text
+
+
+def test_an_empty_upload_is_a_no_op(engine, slide_id):
+    _db, published, _d, _b, handlers = _run_editor(engine, slide_id=slide_id)
+    handlers[IMPORT_LABEL]([])
+    assert "msg" not in published

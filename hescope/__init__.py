@@ -55,6 +55,13 @@ from .ml import (
     predict_patch,
     train_from_annotations,
 )
+from .importers import (
+    ImportReport,
+    ImportedROI,
+    import_annotations,
+    parse_asap_xml,
+    parse_geojson_annotations,
+)
 from .nuclei import NucleiStats, detect_nuclei
 from .qc import blur_score, qc_report, tissue_mask
 from .stain import (
@@ -95,7 +102,10 @@ def analysis_capabilities(models_dir: str = "data/models") -> dict:
                 "extract_features",     # hescope.features.extract_features
                 "STAIN_METHODS",
     "macenko_normalize",
+    "import_annotations",
     "normalize_stain",
+    "parse_asap_xml",
+    "parse_geojson_annotations",
     "ruifrok_normalize",
     "vahadane_normalize",    # hescope.stain.macenko_normalize
                 "ruifrok_normalize",    # hescope.stain.ruifrok_normalize
@@ -128,6 +138,8 @@ __all__ = [
     "FEATURE_NAMES",
     "GDC_API",
     "GDCClient",
+    "ImportReport",
+    "ImportedROI",
     "ModelInfo",
     "NucleiStats",
     "OpenSlideSource",

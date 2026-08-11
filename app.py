@@ -48,6 +48,11 @@ def _():
     )
     from hescope.db import export_rois
     from hescope.geojson import slide_geojson_text
+    from hescope.importers import (
+        import_annotations,
+        parse_asap_xml,
+        parse_geojson_annotations,
+    )
     from hescope.stats_table import (
         label_summary,
         roi_stats_rows,
@@ -153,6 +158,7 @@ def _():
         extract_patch,
         format_measurement,
         grid_coverage,
+        import_annotations,
         json,
         jump_viewport_for_bbox,
         label_summary,
@@ -173,6 +179,8 @@ def _():
         open_slide,
         os,
         osd_current_selection,
+        parse_asap_xml,
+        parse_geojson_annotations,
         parse_osd_measure,
         patch_mpp,
         qc_report,
@@ -2127,7 +2135,10 @@ def _(
     export_rois,
     get_slide_id,
     get_source,
+    import_annotations,
     mo,
+    parse_asap_xml,
+    parse_geojson_annotations,
     roi_stats_rows,
     rows_to_csv,
     set_ann_version,
@@ -2344,6 +2355,58 @@ def _(
             mimetype="text/csv",
             label="Export statistics (CSV)",
         )
+        # IMPORT, beside the three exports. Round 08 found hescope/importers.py
+        # complete, tested and referenced by nothing outside its own tests: the
+        # roadmap presented Tier 1.1 interop as delivered, export had three
+        # buttons and import had no door at all, so QuPath and ASAP annotations
+        # could not get in (R08-4 / R10-2).
+        def _on_import_annotations(files):
+            if not files:
+                return
+            _f = files[0]
+            _isid = get_slide_id()
+            if not db.enabled or _isid is None:
+                set_db_msg(
+                    ("warn", "Open a slide with the database enabled to import.")
+                )
+                return
+            try:
+                _text = _f.contents.decode("utf-8", errors="replace")
+                _report = (
+                    parse_asap_xml(_text)
+                    if _f.name.lower().endswith(".xml")
+                    else parse_geojson_annotations(_text)
+                )
+                _new_ids = import_annotations(db.engine, _isid, _report)
+            except Exception as _exc:
+                set_db_msg(("danger", f"Import of {_f.name} failed: {_exc}"))
+                return
+            # An import that keeps 40 of 47 features and reports "imported" is
+            # this project's signature failure. Everything the parser could not
+            # represent is in report.skipped / report.warnings, so say it here
+            # and drop the kind to `warn` whenever anything was lost.
+            _bits = [f"Imported {len(_new_ids)} annotation(s) from {_f.name}."]
+            if _report.skipped:
+                _bits.append(
+                    "Skipped "
+                    + ", ".join(
+                        f"{_n} {_reason}"
+                        for _reason, _n in sorted(_report.skipped.items())
+                    )
+                    + "."
+                )
+            _bits.extend(_report.warnings[:3])
+            if len(_report.warnings) > 3:
+                _bits.append(f"(+{len(_report.warnings) - 3} more warnings)")
+            _lossless = bool(_new_ids) and not _report.skipped and not _report.warnings
+            set_db_msg(("success" if _lossless else "warn", " ".join(_bits)))
+            set_ann_version(object())
+
+        import_ann_button = mo.ui.file(
+            filetypes=[".geojson", ".json", ".xml"],
+            label="Import annotations (QuPath GeoJSON / ASAP XML)",
+            on_change=_on_import_annotations,
+        )
         ann_edit_view = mo.vstack(
             [
                 mo.hstack([label_input, notes_input]),
@@ -2352,6 +2415,7 @@ def _(
                     [export_json_button, export_csv_button, export_geojson_button]
                 ),
                 mo.hstack([export_stats_button]),
+                import_ann_button,
             ]
         )
     return (ann_edit_view,)
@@ -2635,8 +2699,29 @@ def _(
                 # later on the main thread and can still fail, so the final
                 # message is written there.
                 tcga_dl["downloaded"] = True
+                # Carried alongside `downloaded` for the same reason it exists:
+                # the main-thread cell rewrites this message after opening, so
+                # a flag the worker sets is the only way the wording it chose
+                # survives (R10-1).
+                tcga_dl["md5_verified"] = bool(_md5)
                 tcga_dl["open_path"] = str(_path)
-                tcga_dl["msg"] = ("success", f"Downloaded {_path.name}")
+                # "Downloaded" is an integrity claim in this app (R07-13), and
+                # _finalize_part verifies only `if expected_md5:`. When the md5
+                # could not be resolved -- the table rows carry none, so the
+                # catalog scan above is the only source -- the file is written
+                # on a size check alone. Saying "Downloaded" either way makes a
+                # verified gigabyte and an unverified one byte-identical on
+                # screen, which is the one thing that word is supposed to
+                # settle (R10-1).
+                tcga_dl["msg"] = (
+                    ("success", f"Downloaded and md5-verified {_path.name}")
+                    if _md5
+                    else (
+                        "warn",
+                        f"Downloaded {_path.name}, size checked but NOT "
+                        "md5-verified: no checksum was available for this file.",
+                    )
+                )
             except Exception as _exc:  # network / HTTP error: never crash
                 tcga_dl["msg"] = ("danger", f"Download failed: {_exc}")
             finally:
@@ -2694,13 +2779,24 @@ def _(
         # that SVS variant). Report that honestly instead of letting the
         # exception break this cell and leave the worker's message claiming
         # success.
+        _verified = tcga_dl.get("md5_verified", False)
         try:
             open_slide_path(_p, source_kind="tcga")
-            tcga_dl["msg"] = (
-                ("success", f"Downloaded and opened {_name}")
-                if _fetched
-                else ("success", f"Opened {_name} (already downloaded)")
-            )
+            if not _fetched:
+                tcga_dl["msg"] = ("success", f"Opened {_name} (already downloaded)")
+            elif _verified:
+                tcga_dl["msg"] = (
+                    "success", f"Downloaded, md5-verified and opened {_name}"
+                )
+            else:
+                # Fetched, but on a size check alone. "Downloaded" is an
+                # integrity claim here (R07-13); do not make it on a file
+                # nothing checksummed (R10-1).
+                tcga_dl["msg"] = (
+                    "warn",
+                    f"Downloaded and opened {_name}, but it was NOT "
+                    "md5-verified: no checksum was available for this file.",
+                )
         except Exception as _exc:
             tcga_dl["msg"] = (
                 "danger",
