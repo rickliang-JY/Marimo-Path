@@ -254,8 +254,16 @@ Recording the mpp lets you *notice*. It does not make the number mean anything.
 > `rejected:out_of_range`. This is stronger than anything in the two design docs
 > and it replaces their `mpp_effective` conclusion.
 
-Two further measured hazards: `blur_score` moves 6.72x with the same cap, and
-two functions both named `tissue_fraction` disagree by **2378x** on one patch.
+Two further measured hazards. `blur_score` moves 6.72x with the same cap. And the
+two implementations of tissue fraction disagree — but **not** by the 2378x one
+agent reported: re-measured here, `roi_stats` vs `grid.tissue_fraction_proxy`
+differ by 1.4x on the user's ROI 10 and 1.1x on ROI 9. The 2378x came from a
+background patch where both are ~0 (0.0001 vs 0.0000), i.e. a near-zero
+denominator, not a real disagreement. **The actual defect is worse in kind and
+smaller in number:** on a region `roi_stats` scores 0.74, the sweep's proxy
+returns a saturated **1.0000** — the whole-slide sweep and the per-ROI
+measurement are not measuring the same quantity, and the sweep's version cannot
+distinguish 74% tissue from 100%.
 
 ### 4.2 QC does not cover what autonomy needs
 
