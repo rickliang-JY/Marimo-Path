@@ -213,6 +213,14 @@ def _(Path):
     DEMO_SLIDE_PATH = _runtime_dir / "assets" / "demo_he.png"
     OUT_DIR = _runtime_dir / "agent_out"
     MODELS_DIR = _runtime_dir / "data" / "models"
+    # Uploads land HERE, not in tempfile.mkdtemp(). A slide's identity is its
+    # path (SlideRepo.register is idempotent on UNIQUE(path)), and mkdtemp
+    # returns a fresh directory on every call -- so uploading one file twice
+    # used to make two unrelated slides, the second of which reported that the
+    # slide had no annotations. A stable directory plus a content-derived file
+    # name makes re-uploading the same bytes resolve to the same slide, and
+    # keeps the row's path from being swept by the OS (R08-1).
+    UPLOAD_DIR = _runtime_dir / "data" / "uploads"
 
     def ensure_demo_slide():
         """Return the demo slide path, generating it in-process if missing.
@@ -224,7 +232,7 @@ def _(Path):
             generate_demo_slide(DEMO_SLIDE_PATH)
         return DEMO_SLIDE_PATH
 
-    return MODELS_DIR, OUT_DIR, ensure_demo_slide
+    return MODELS_DIR, OUT_DIR, UPLOAD_DIR, ensure_demo_slide
 
 
 @app.cell(hide_code=True)
@@ -445,6 +453,7 @@ def _(
     OSD_AVAILABLE,
     Path,
     SlideRefs,
+    UPLOAD_DIR,
     ViewportState,
     db,
     ensure_demo_slide,
@@ -463,7 +472,6 @@ def _(
     set_source,
     set_tiles,
     set_vp,
-    tempfile,
     viewer_bus,
 ):
     # Sidebar "Open slide" panel. Hardened: every widget is constructed in
@@ -604,9 +612,19 @@ def _(
         if files:
             _f = files[0]
             try:
-                _tmp = Path(tempfile.mkdtemp(prefix="hescope_upload_")) / _f.name
-                _tmp.write_bytes(_f.contents)
-                _open_slide_path(str(_tmp), source_kind="upload")
+                # Content-derived name in a STABLE directory: the same bytes
+                # always land on the same path, so re-uploading one file
+                # resolves to the same slide row and its annotations come with
+                # it. mkdtemp gave every upload a new identity and put the row
+                # on a path the OS is free to delete (R08-1).
+                import hashlib as _hashlib
+
+                UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                _digest = _hashlib.sha256(_f.contents).hexdigest()[:12]
+                _dest = UPLOAD_DIR / f"{_digest}-{Path(_f.name).name}"
+                if not _dest.exists():
+                    _dest.write_bytes(_f.contents)
+                _open_slide_path(str(_dest), source_kind="upload")
             except Exception as _exc:
                 set_db_msg(("danger", f"Could not open {_f.name}: {_exc}"))
 
@@ -1596,6 +1614,7 @@ def _(
 @app.cell(hide_code=True)
 def _(
     db,
+    db_roi_rows,
     db_status_detail,
     get_db_msg,
     get_measure_msg,
@@ -1636,11 +1655,35 @@ def _(
                 # level-0 px * mpp: the bbox is level-0, unlike the patch
                 # dimensions in roi_stats (R07-2).
                 _sel_s += f" ({_sw * _src.mpp:.0f}x{_sh * _src.mpp:.0f} um)"
-            _sel_s += " — not added yet"
-        _n_rois = len(get_rois())
+            # "not added yet" used to be unconditional, so it went on
+            # describing a region the user had just saved -- the selection
+            # outline is deliberately persistent, so the one sentence whose
+            # job is to separate "drawn" from "saved" gave the same answer in
+            # both states (R09-2). Compare the selection against what is
+            # actually stored for this slide.
+            _saved_boxes = [
+                [int(v) for v in (_r.get("bbox") or [])] for _r in db_roi_rows
+            ]
+            try:
+                _saved_boxes += [[int(v) for v in _r.bbox()] for _r in get_rois()]
+            except Exception:  # a status line must never be what breaks
+                pass
+            _sel_s += (
+                " — added" if [_bx0, _by0, _bx1, _by1] in _saved_boxes
+                else " — not added yet"
+            )
+        # Count what the VIEWER draws: overlay_rois is session + persisted, and
+        # this line used to count the session list alone. R08-2 moved "Add ROI"
+        # into the database, which left the counter reading 0 however many ROIs
+        # the user had added, over an image showing every one of them (R09-1).
+        _n_session = len(get_rois())
+        _n_saved = len(db_roi_rows)
+        _roi_s = f"{_n_session + _n_saved} ROI(s) on this slide"
+        if _n_session and _n_saved:
+            _roi_s += f" ({_n_saved} saved + {_n_session} this session)"
         _parts.append(
             mo.md(
-                f"**{_sel_s}** | {_n_rois} ROI(s) this session | "
+                f"**{_sel_s}** | {_roi_s} | "
                 f"center=({_vp.center[0]:.0f}, {_vp.center[1]:.0f}) | "
                 f"{_mag_s} | viewport {_vp.size[0]}x{_vp.size[1]} px"
             )
@@ -1664,13 +1707,16 @@ def _(
 def _(
     ROI,
     circle_checkbox,
+    db,
     format_measurement,
     get_rois,
+    get_slide_id,
     get_source,
     live_measure,
     live_selection,
     measure_box,
     measure_checkbox,
+    set_ann_version,
     set_measure_msg,
     set_rois,
     ui_actions,
@@ -1729,6 +1775,29 @@ def _(
             _roi = ROI(kind="circle", points=((_cx, _cy), (_cx + _r, _cy)))
         else:
             _roi = ROI(kind=_kind, points=_pts)
+        # The DATABASE is the owner when there is one (R08-2). This used to
+        # write the session list only, so an ROI "added" here was absent from
+        # the Statistics panel, from all three exports and from the annotation
+        # editor -- every one of which reads the rois table -- and was gone at
+        # the next restart. The button that actually saved was the one labelled
+        # "Send to code agent". The session list remains the store in DB-free
+        # mode, where db.enabled is False and there is nowhere else to put it.
+        _sid = get_slide_id()
+        if db.enabled and _sid is not None:
+            try:
+                _rid = db.roi_repo.add(_sid, _roi)
+            except Exception as _exc:
+                set_measure_msg(("danger", f"Could not save ROI: {_exc}"))
+                return
+            # An OPAQUE token, like every other writer of this state -- it is
+            # `mo.state(None)` and the six other call sites all pass object().
+            # `get_ann_version() + 1` invented an integer contract for it and
+            # raised TypeError on the None it starts as, AFTER the row had
+            # already been written: the ROI was saved and the strip said
+            # "Add ROI failed".
+            set_ann_version(object())  # refresh the panels
+            set_measure_msg(("success", f"Saved ROI {_rid} to this slide."))
+            return
         set_rois(get_rois() + [_roi])
         set_measure_msg(None)
 

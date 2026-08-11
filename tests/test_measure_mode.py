@@ -102,10 +102,33 @@ def test_measure_mode_with_nothing_drawn_still_says_so(notebook_defs, viewer):
 
 
 def test_add_roi_outside_measure_mode_is_unchanged(notebook_defs, viewer):
-    """Guard against the fix overreaching: the ordinary path must still add."""
+    """Guard against the fix overreaching: the ordinary path must still add.
+
+    R08-2 moved the destination, not the intent: with a database available the
+    ROI is written to the ``rois`` table rather than to the session list, so
+    that the Statistics panel, the three exports and the annotation editor --
+    all of which read the database -- can see it. What this test guards is
+    unchanged: an ordinary drag plus Add ROI stores exactly that geometry, and
+    says nothing in the measurement channel.
+    """
+    db = notebook_defs["db"]
+    slide_id = notebook_defs["get_slide_id"]()
+
+    def _stored():
+        if db.enabled and slide_id is not None:
+            return [
+                (r["kind"], tuple(r["bbox"]))
+                for r in db.roi_repo.for_slide(slide_id)
+            ]
+        return [(r.kind, r.bbox()) for r in notebook_defs["get_rois"]()]
+
+    before = _stored()
     _drag(viewer, "rect", [[300.0, 400.0], [700.0, 900.0]], 13)
     notebook_defs["ui_actions"]["add_roi"](None)
 
-    rois = notebook_defs["get_rois"]()
-    assert [(r.kind, r.bbox()) for r in rois] == [("rect", (300, 400, 700, 900))]
-    assert notebook_defs["get_measure_msg"]() is None
+    added = _stored()[len(before):]
+    assert added == [("rect", (300, 400, 700, 900))]
+    # The measurement channel is for measurements; a save reports its own id
+    # there, and must never leave a stale measurement behind.
+    _msg = notebook_defs["get_measure_msg"]()
+    assert _msg is None or _msg[0] == "success"

@@ -140,12 +140,21 @@ def test_clicking_add_roi_after_the_cell_ends_adds_an_roi():
     class _Check:
         value = False
 
+    # DB-free stubs: with no database the session list is still the store, so
+    # this test keeps exercising the mangling fix it was written for. The
+    # database path that R08-2 added has its own tests below.
+    class _DB:
+        enabled = False
+        roi_repo = None
+
     ns: dict = {
         "ROI": ROI,
         "circle_checkbox": _Check(),
         "measure_checkbox": _Check(),
+        "db": _DB(),
         "format_measurement": lambda m: "measured",
         "get_rois": lambda: list(added),
+        "get_slide_id": lambda: None,
         "get_source": lambda: None,
         "live_measure": lambda: None,
         "live_selection": lambda: {
@@ -153,6 +162,7 @@ def test_clicking_add_roi_after_the_cell_ends_adds_an_roi():
             "points_level0": ((10.0, 20.0), (110.0, 100.0)),
         },
         "measure_box": lambda a, b, mpp: {},
+        "set_ann_version": lambda v: None,
         "set_measure_msg": published.append,
         "set_rois": lambda rois: added.__setitem__(slice(None), rois),
         "ui_actions": (actions := {}),
