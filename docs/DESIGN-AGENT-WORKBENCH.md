@@ -1,5 +1,13 @@
 # Design — from a toolbox to an analysis partner
 
+> **Superseded in two places by `docs/PLATFORM-SPEC.md` (2026-08-11).** §1.2's
+> "needs a slide-level reference matrix" is wrong — the matrix is already fitted
+> and stored (`hescope/tileserver.py:334-337`). And §2.4 / §3.1's treatment of
+> `mpp_effective` as the comparability fix is necessary but far from sufficient:
+> nuclei density moves **29.4x on one unchanged ROI** from the extraction cap
+> alone. A skill needs a declared, measured validity range, not just a recorded
+> resolution.
+
 Four questions, answered against the code as it stands on `main` (`f541b68`,
 2026-08-11) rather than against intentions:
 

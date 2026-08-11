@@ -31,24 +31,45 @@ latent). The data to connect the two graphs is sitting in the database.
 
 ## 2. Six structural faults, with evidence
 
-### 2.1 Foreign keys are not enforced
+### 2.1 Two references are undeclared, and the pragma is per-connection
 
-```sql
-PRAGMA foreign_keys;   -- 0
+> **CORRECTED 2026-08-11.** This section previously claimed "foreign keys are not
+> enforced… every `ON DELETE CASCADE` in the DDL is decorative", on the strength
+> of `PRAGMA foreign_keys` returning `0`. **That measurement was taken on a bare
+> `sqlite3.connect`, which is not how the application connects.** `get_engine`
+> registers a SQLAlchemy `connect` listener that executes `PRAGMA
+> foreign_keys=ON` (`hescope/db.py:63-70`), present since the initial commit
+> (`git log -S "PRAGMA foreign_keys" -- hescope/db.py` → `70f435f`). Verified:
+> bare connection `0`, `get_engine` connection **`1`**; and `tests/test_db.py`
+> already covers the cascade. Three independent reviews caught this. The real
+> defects are narrower and are stated below.
+
+```
+sqlite3.connect(...)           PRAGMA foreign_keys -> 0
+get_engine(...)                PRAGMA foreign_keys -> 1     <- the app
 ```
 
-SQLite ignores foreign keys unless the pragma is set **per connection**, and
-nothing sets it. Every `ON DELETE CASCADE` and `ON DELETE SET NULL` in the DDL
-is decorative. Deleting a slide today leaves its ROIs behind, pointing at a row
-that is gone — silently.
+**What is actually wrong:**
 
-There are no orphans yet only because nothing has been deleted. The first slide
-deletion creates them.
+1. **Two references are not declared at all.** `interactions.roi_id`
+   (`hescope/db.py:203`) and `tcga_files.slide_id`
+   (`hescope/tcga_schema.py:131`) are indexed but carry no `ForeignKey`, while
+   `agent_runs.roi_id` next door has one. Measured consequence: inserting
+   `interactions(roi_id=9999)` is **accepted**, and the same shape on
+   `rois.slide_id` or `agent_runs.roi_id` is rejected. After a slide delete, the
+   declared `SET NULL` fires on `interactions.slide_id` while
+   `interactions.roi_id` still points at the deleted ROI.
 
-Two references are not even declared: `interactions.roi_id` and
-`tcga_files.slide_id` are indexed but unconstrained, while `agent_runs.roi_id`
-next door has a proper FK. Nothing distinguishes these cases; the difference is
-an accident.
+2. **The pragma is per-connection and nothing pins it.** Write paths that use
+   raw `sqlite3` — `SlideCatalog._connect` (`hescope/tcga.py:608-610`),
+   `hescope/cli.py:296` — do not get it. A delete through one of those orphans
+   rows that a delete through the ORM would have cascaded. No test asserts the
+   pragma (`grep -rn "foreign_keys" tests/` → no match), so nothing stops a
+   future engine being built without it.
+
+3. **The live database is clean.** `PRAGMA foreign_key_check` → `[]`, zero
+   dangling `interactions.roi_id`, `interactions.slide_id`, `agent_runs.roi_id`.
+   These are latent, not present.
 
 ### 2.2 A slide's identity is its file path
 
@@ -315,7 +336,7 @@ live file gets a backup before any step (as `dedupe-slides` already does).
 
 | v | Step | Risk |
 | --- | --- | --- |
-| 1 | `schema_migrations`; turn `PRAGMA foreign_keys=ON`; declare the two missing FKs | **Behaviour change**: deletes start cascading. Needs tests before, not after. |
+| 1 | `schema_migrations` + stamp the current version; declare the two missing FKs; assert the pragma in a test; make the raw-`sqlite3` write paths set it too | Additive, not the behaviour change this table first claimed — the pragma is already on and the cascade tests already pass (§2.1, corrected). |
 | 2 | `slides.content_key` / `file_size` / `md5sum` + `slide_files`; backfill by hashing paths that still resolve; merge rows sharing a key, moving annotations to the survivor | Merging is the destructive part. Report the plan, apply on confirmation — the `--dry-run` pattern R07-3 established. |
 | 3 | `projects` / `cases` / `samples` from the `tcga_*` tables with `source='tcga'`; add `slides.sample_id`; **backfill via `md5sum`** | Low: additive. This is the step that gives §1's empty join its first rows. |
 | 4 | `measurements`; backfill from `stats_json` (uniform 5-key shape, 10 rows); keep `stats_json` as a cache for one release | Low: additive, old readers keep working. |
