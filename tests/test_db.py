@@ -22,6 +22,7 @@ from hescope.db import (
     export_rois,
     get_engine,
     init_db,
+    normalize_slide_path,
 )
 from hescope.rois import ROI
 
@@ -213,6 +214,73 @@ def test_register_keeps_extra_json_when_extra_is_omitted(engine):
         extra={},
     )
     assert json.loads(repo.get(sid)["extra_json"]) == {}
+
+
+# --- normalize_slide_path: foreign paths (defect 1.3) ----------------------
+
+
+def test_normalize_slide_path_keeps_a_foreign_posix_path_unresolved():
+    """Defect 1.3, measured against ``hescope/db.py`` reverted to its
+    pre-Phase-1 committed state (``git show ba84d17:hescope/db.py``, R-2):
+
+        input:   /mnt/nfs/slides/A1.svs
+        output:  E:\\mnt\\nfs\\slides\\A1.svs
+        BUG REPRODUCED (output != input): True
+
+    On Windows, ``/mnt/nfs/slides/A1.svs`` (the spelling a Linux-mounted
+    network share, or a path recorded by a different-OS workstation, would
+    use) has a root but no drive to ``pathlib.PureWindowsPath`` -- so it is
+    not "absolute" in the sense ``Path.resolve()`` requires, and resolve()
+    silently attaches THIS PROCESS's current drive. Two workstations on the
+    same shared store then normalize the SAME file to two different keys,
+    splitting the store one slide per workstation. The fix keeps the
+    original string instead.
+    """
+    if os.name != "nt":
+        pytest.skip("defect 1.3 is a Windows-specific failure mode of Path.resolve()")
+    foreign = "/mnt/nfs/slides/A1.svs"
+    assert normalize_slide_path(foreign) == foreign
+
+
+def test_normalize_slide_path_still_resolves_a_real_local_relative_path(tmp_path, monkeypatch):
+    """The fix must not overreach: an ordinary relative local path (the
+    normal case, e.g. ``assets/demo_he.png``) still resolves against the
+    current directory exactly as before -- only a ROOTED-but-driveless
+    POSIX spelling is treated specially."""
+    monkeypatch.chdir(tmp_path)
+    real = tmp_path / "sub" / "s.svs"
+    real.parent.mkdir()
+    real.write_bytes(b"x")
+    result = normalize_slide_path("sub/s.svs")
+    assert result == str(real.resolve())
+
+
+def test_normalize_slide_path_still_resolves_a_real_windows_absolute_path(tmp_path):
+    """A path that already carries a drive letter (a normal Windows
+    absolute path) is unaffected by the foreign-path guard, which only
+    fires for a rooted path with NO drive of its own."""
+    if os.name != "nt":
+        pytest.skip("this exercises Windows drive-letter semantics specifically")
+    real = tmp_path / "s.svs"
+    real.write_bytes(b"x")
+    assert normalize_slide_path(str(real)) == str(real.resolve())
+
+
+def test_register_and_find_by_path_agree_on_a_foreign_path(engine):
+    """The normalization the register/find_by_path pair share must be
+    self-consistent even for a foreign path that is kept as-is: the same
+    string in must mean the same slide out, under any spelling THAT
+    normalizes to it."""
+    if os.name != "nt":
+        pytest.skip("defect 1.3 is a Windows-specific failure mode")
+    repo = SlideRepo(engine)
+    foreign = "/mnt/nfs/shared/A1.svs"
+    sid = repo.register(
+        source_kind="local", name="A1.svs", path=foreign, width=10, height=10
+    )
+    found = repo.find_by_path(foreign)
+    assert found is not None and found["id"] == sid
+    assert found["path"] == foreign
 
 
 def test_merge_duplicate_slide_paths_reunites_a_split_slide(engine, tmp_path):
