@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # <cwd>/hescope_runtime for non-editable installs (never site-packages).
 _RUNTIME_ROOT = resolve_runtime_dir(_PROJECT_ROOT)
 DEFAULT_DB_URL = f"sqlite:///{_RUNTIME_ROOT / 'data' / 'hescope.db'}"
+
+_LOG = logging.getLogger(__name__)
+
+#: How long a sqlite connection waits for a lock before raising "database is
+#: locked". The measured failure this prevents took 5.5 s to surface, so the
+#: window has to be wider than a slow write, not wider than a human's patience.
+SQLITE_BUSY_TIMEOUT_MS = 10_000
 
 
 def _utcnow() -> datetime:
@@ -61,14 +69,69 @@ def get_engine(url: str | None = None) -> sa.Engine:
             Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
     engine = sa.create_engine(resolved)
     if sa_url.get_backend_name() == "sqlite":
-        # Enforce foreign keys (ON DELETE CASCADE / SET NULL) on sqlite.
+        _file_backed = bool(db_path) and db_path != ":memory:"
+
         @event.listens_for(engine, "connect")
-        def _fk_pragma_on(dbapi_conn: Any, _record: Any) -> None:
+        def _sqlite_pragmas(dbapi_conn: Any, _record: Any) -> None:
             cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
+            try:
+                # Enforce foreign keys (ON DELETE CASCADE / SET NULL).
+                cursor.execute("PRAGMA foreign_keys=ON")
+                # Wait for a lock instead of failing instantly. Without this a
+                # write raises "database is locked" the moment any other
+                # connection holds a read -- and this app's normal shape is two
+                # readers (the notebook and an agent over marimo-pair) around
+                # one writer.
+                cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+                if _file_backed:
+                    # WAL lets readers and the writer proceed concurrently.
+                    # Measured on this database: an ROI save under the default
+                    # `delete` journal fails after 5.5 s with "database is
+                    # locked" while a reader is open; under WAL the same write
+                    # completes in 0.00 s.
+                    cursor.execute("PRAGMA journal_mode=WAL")
+                    row = cursor.fetchone()
+                    mode = (row[0] if row else "") or ""
+                    if mode.lower() != "wal":
+                        # WAL is unavailable on some network filesystems. Say so
+                        # -- a silent fall back to `delete` reintroduces exactly
+                        # the failure this exists to prevent.
+                        _LOG.warning(
+                            "SQLite journal_mode is %r, not WAL: concurrent "
+                            "readers can make a write fail with 'database is "
+                            "locked'. Common cause: the database is on a "
+                            "network filesystem.",
+                            mode,
+                        )
+            finally:
+                cursor.close()
 
     return engine
+
+
+def sqlite_pragma_report(engine: sa.Engine) -> dict[str, Any]:
+    """The three connection pragmas that govern concurrency, read back.
+
+    For a status panel and for tests. Returns ``{}`` for non-sqlite engines;
+    never raises -- a diagnostic must not be the thing that breaks.
+    """
+    if engine.url.get_backend_name() != "sqlite":
+        return {}
+    try:
+        with engine.connect() as conn:
+            return {
+                "foreign_keys": bool(
+                    conn.execute(sa.text("PRAGMA foreign_keys")).scalar()
+                ),
+                "journal_mode": str(
+                    conn.execute(sa.text("PRAGMA journal_mode")).scalar()
+                ).lower(),
+                "busy_timeout": int(
+                    conn.execute(sa.text("PRAGMA busy_timeout")).scalar() or 0
+                ),
+            }
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        return {"error": str(exc)}
 
 
 def normalize_slide_path(path: str | Path) -> str:
