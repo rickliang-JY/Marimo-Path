@@ -54,12 +54,23 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
-def get_engine(url: str | None = None) -> sa.Engine:
+def get_engine(url: str | None = None, *, read_only: bool = False) -> sa.Engine:
     """Resolve the database URL and create an engine.
 
     Resolution order: explicit ``url`` argument -> ``HESCOPE_DB_URL``
     environment variable -> ``DEFAULT_DB_URL``. For sqlite URLs, parent
     directories of the database file are created as needed.
+
+    ``read_only=True`` skips the one pragma below that persists a header
+    change to the FILE (``journal_mode=WAL``); ``busy_timeout`` and
+    ``foreign_keys`` are per-connection settings that never touch the file on
+    disk, so they are still applied. Use this for any code path that promises
+    not to write -- a plain ``get_engine(url)`` silently flips a non-WAL
+    database to WAL the moment anything (even a read) connects through it.
+    Measured: ``hescope migrate --dry-run`` against a copy of
+    ``data/hescope.db`` forced to ``journal_mode=DELETE`` changed the file's
+    sha256 and left it in ``journal_mode=WAL``, while printing "nothing was
+    changed" -- exactly the guarantee R-1 asks a dry run to keep.
     """
     resolved = url or os.environ.get("HESCOPE_DB_URL") or DEFAULT_DB_URL
     sa_url = sa.engine.make_url(resolved)
@@ -96,7 +107,7 @@ def get_engine(url: str | None = None) -> sa.Engine:
                 # readers (the notebook and an agent over marimo-pair) around
                 # one writer.
                 cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-                if _file_backed:
+                if _file_backed and not read_only:
                     # WAL lets readers and the writer proceed concurrently.
                     # Measured on this database: an ROI save under the default
                     # `delete` journal fails after 5.5 s with "database is
@@ -125,7 +136,24 @@ def get_engine(url: str | None = None) -> sa.Engine:
             # own transaction management disabled, nothing starts a
             # transaction unless we do -- this is what makes DDL rollback on
             # exception instead of auto-committing.
-            conn.exec_driver_sql("BEGIN")
+            #
+            # Must be BEGIN IMMEDIATE, not a bare (deferred) BEGIN. A
+            # deferred BEGIN takes no lock until the first statement, and a
+            # transaction that reads before it writes (SlideRepo.register,
+            # ROIRepo.update_annotation, ROIRepo.delete -- every
+            # read-then-write repo call) pins its read at a WAL snapshot on
+            # that first SELECT. A later write in the SAME transaction then
+            # has to upgrade that snapshot, which fails immediately with
+            # SQLITE_BUSY (surfaced as "database is locked") the moment a
+            # second connection has committed anything since the snapshot
+            # was taken -- and does NOT honour busy_timeout, because that is
+            # a wait-for-lock retry, not a snapshot-upgrade retry. Measured:
+            # 8 threads calling update_annotation on 8 DIFFERENT rois -> 6
+            # of 8 raised "database is locked" with a bare BEGIN, 0 of 8
+            # with BEGIN IMMEDIATE (which takes the write lock up front and
+            # so instead queues, honouring busy_timeout, exactly like the
+            # bare-INSERT case tests/test_db_concurrency.py already covers).
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
 
     return engine
 
@@ -179,6 +207,81 @@ def normalize_slide_path(path: str | Path) -> str:
         return str(path)
 
 
+def plan_init_db(engine: sa.Engine, conn: sa.Connection | None = None) -> dict:
+    """What :func:`init_db` WOULD do, computed without executing anything.
+
+    Read-only: uses ``sa.inspect`` only, never opens a write transaction.
+    Returns ``{"new_tables": [name, ...], "new_table_indexes": {name:
+    [index_name, ...]}, "alter_statements": [sql, ...],
+    "create_index_statements": [sql, ...]}`` -- ``new_tables`` lists tables
+    ``create_all`` would create (with all of their own columns and indexes
+    in one ``CREATE TABLE``, so those are not re-listed as separate ALTER /
+    CREATE INDEX statements in the other two lists); ``new_table_indexes``
+    names the indexes each new table would carry (informational only --
+    ``CREATE TABLE`` creates them, nothing here executes a statement for
+    them) so a report naming "every object this would create" does not have
+    to omit the indexes on a table that does not exist yet.
+    ``alter_statements``/``create_index_statements`` are the exact
+    ``ALTER TABLE`` / ``CREATE INDEX`` SQL :func:`init_db` runs on tables
+    that already exist but are missing a column or index declared on the
+    current ORM models.
+
+    ``init_db`` calls this function too (passing the connection it is about
+    to write through) and executes exactly the statements it returns, so the
+    two can no longer drift: before this function existed, ``migrate
+    --dry-run`` computed its own separate (and wrong) idea of "nothing to do"
+    while the real ``migrate`` command called ``init_db`` and, on a database
+    from before ``interactions``/``agent_runs`` existed, actually created 2
+    tables, added 3 columns to ``rois`` and created 8 indexes -- all silently,
+    because the dry run never looked at ``init_db`` at all. Measured with a
+    narrow (old-schema) scratch database carrying 1 slide + 1 roi:
+    ``migrate --dry-run`` printed only "would apply migration 1 ... (stamp
+    only, no schema change)" / "nothing was changed", while the real
+    ``migrate`` on an identical copy added tables
+    ``['agent_runs', 'interactions']``, indexes
+    ``['ix_agent_runs_roi_id', 'ix_interactions_kind', 'ix_interactions_roi_id',
+    'ix_interactions_session_tag', 'ix_interactions_slide_id', 'ix_rois_label',
+    'ix_rois_slide_id', 'ix_slides_source_kind']`` and columns
+    ``['patch_path', 'stats_json', 'magnification']`` on ``rois``.
+    """
+    inspector = sa.inspect(conn) if conn is not None else sa.inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    new_tables: list[str] = []
+    new_table_indexes: dict[str, list[str]] = {}
+    alter_statements: list[str] = []
+    create_index_statements: list[str] = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            new_tables.append(table.name)
+            if table.indexes:
+                new_table_indexes[table.name] = sorted(ix.name for ix in table.indexes)
+            continue
+        existing_cols = {c["name"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing_cols:
+                continue
+            # Added without NOT NULL on purpose: existing rows have no
+            # value for it and SQLite rejects ADD COLUMN NOT NULL without
+            # a default.
+            type_sql = column.type.compile(engine.dialect)
+            alter_statements.append(
+                f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {type_sql}'
+            )
+        existing_indexes = {ix["name"] for ix in inspector.get_indexes(table.name)}
+        for index in table.indexes:
+            if index.name in existing_indexes:
+                continue
+            create_index_statements.append(
+                str(sa.schema.CreateIndex(index).compile(dialect=engine.dialect)).strip()
+            )
+    return {
+        "new_tables": new_tables,
+        "new_table_indexes": new_table_indexes,
+        "alter_statements": alter_statements,
+        "create_index_statements": create_index_statements,
+    }
+
+
 def init_db(engine: sa.Engine) -> None:
     """Create all tables, then add any columns OR indexes an older database
     is missing.
@@ -204,6 +307,11 @@ def init_db(engine: sa.Engine) -> None:
     ``ROIRepo.search`` depend on for anything beyond a table scan. Fixed the
     same way as the column gap: compare declared indexes to what actually
     exists and create only what is missing.
+
+    The ALTER/CREATE INDEX diff itself is computed by :func:`plan_init_db`
+    (passed the SAME connection these statements execute on -- see that
+    function's docstring for why this matters and for the dry-run report
+    that also depends on it).
     """
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
@@ -214,29 +322,15 @@ def init_db(engine: sa.Engine) -> None:
         # connection shared engine-wide) that collided with the transaction
         # this block already holds open ("cannot start a transaction within
         # a transaction") once DDL here became genuinely transactional.
-        inspector = sa.inspect(conn)
-        for table in Base.metadata.sorted_tables:
-            existing = {c["name"] for c in inspector.get_columns(table.name)}
-            for column in table.columns:
-                if column.name in existing:
-                    continue
-                # Added without NOT NULL on purpose: existing rows have no
-                # value for it and SQLite rejects ADD COLUMN NOT NULL without
-                # a default.
-                type_sql = column.type.compile(engine.dialect)
-                conn.execute(
-                    sa.text(
-                        f'ALTER TABLE "{table.name}" '
-                        f'ADD COLUMN "{column.name}" {type_sql}'
-                    )
-                )
-            existing_indexes = {
-                ix["name"] for ix in inspector.get_indexes(table.name)
-            }
-            for index in table.indexes:
-                if index.name in existing_indexes:
-                    continue
-                index.create(bind=conn, checkfirst=True)
+        plan = plan_init_db(engine, conn)
+        for stmt in plan["alter_statements"]:
+            conn.execute(sa.text(stmt))
+        # Indexes run after ALTERs: an index on a column added above must
+        # wait for that column to exist, and since both statement lists came
+        # from the SAME plan (computed before either ran), executing ALTERs
+        # first then indexes is enough -- no need to recompute the plan.
+        for stmt in plan["create_index_statements"]:
+            conn.execute(sa.text(stmt))
 
 
 class Base(DeclarativeBase):

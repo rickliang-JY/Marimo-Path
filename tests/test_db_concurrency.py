@@ -161,6 +161,91 @@ def test_two_writers_serialise_rather_than_fail(db_url):
     assert len(ROIRepo(engine).for_slide(slide_id)) == 8
 
 
+def test_concurrent_annotation_saves_on_different_rois_do_not_fail(db_url):
+    """Read-then-write in one transaction (``s.get`` then mutate then commit)
+    is the app's Save-annotation button's actual shape, and it is different
+    from the bare-INSERT shape ``test_two_writers_serialise_rather_than_fail``
+    covers above: a bare (deferred) ``BEGIN`` lets the SELECT pin a WAL read
+    snapshot that the later UPDATE then has to upgrade, which fails
+    immediately with "database is locked" and does NOT honour
+    ``busy_timeout`` (that pragma governs waiting for a lock, not upgrading a
+    snapshot). Measured against the un-fixed engine (bare ``BEGIN`` in
+    ``get_engine``'s "begin" hook): 6 of 8 threads raised
+    ``sqlite3.OperationalError: database is locked``. Fixed by issuing
+    ``BEGIN IMMEDIATE`` instead, which takes the write lock up front and so
+    queues (honouring busy_timeout) rather than snapshot-conflicting.
+    """
+    engine = get_engine(db_url)
+    init_db(engine)
+    slide_id = _slide(engine)
+    repo = ROIRepo(engine)
+    roi_ids = [
+        repo.add(slide_id, ROI(kind="rect", points=((float(i), 0.0), (float(i) + 5, 5.0))))
+        for i in range(8)
+    ]
+
+    errors: list = []
+    saved: list = []
+
+    def _save(roi_id, i):
+        try:
+            ok = ROIRepo(get_engine(db_url)).update_annotation(roi_id, label=f"label-{i}")
+            if ok:
+                saved.append(roi_id)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_save, args=(rid, i)) for i, rid in enumerate(roi_ids)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert not errors, f"concurrent annotation saves failed: {errors[:3]}"
+    assert len(saved) == 8
+
+
+def test_concurrent_slide_registration_of_distinct_slides_does_not_fail(db_url):
+    """``SlideRepo.register`` is SELECT-by-path then (insert-or-update) then
+    commit -- the same read-then-write shape as ``update_annotation`` above,
+    hit every time a slide is opened. Measured against the un-fixed engine:
+    16 threads registering 16 DISTINCT slides -> 13 errors, 4 rows written
+    (expected 16). Fixed by the same ``BEGIN IMMEDIATE`` change."""
+    engine = get_engine(db_url)
+    init_db(engine)
+
+    errors: list = []
+    written: list = []
+
+    def _register(i):
+        try:
+            eng = get_engine(db_url)
+            written.append(
+                SlideRepo(eng).register(
+                    source_kind="local",
+                    name=f"s{i}.svs",
+                    path=f"s{i}.svs",
+                    width=4000,
+                    height=3000,
+                    mpp=0.25,
+                )
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_register, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert not errors, f"concurrent registrations failed: {errors[:3]}"
+    assert len(written) == 16
+    assert len(SlideRepo(engine).list()) == 16
+
+
 # --- the three pragmas -----------------------------------------------------
 
 

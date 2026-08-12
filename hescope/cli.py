@@ -29,6 +29,7 @@ from .db import (
     init_db,
     merge_duplicate_slide_paths,
     plan_duplicate_slide_merge,
+    plan_init_db,
 )
 from .slides import open_slide
 
@@ -287,15 +288,49 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
     from .migrations import migrate
 
     if dry_run:
-        report = migrate(engine, dry_run=True)
-        if not report.skipped:
+        # A plain get_engine(url) flips journal_mode to WAL (a persistent
+        # file-header change) the moment ANYTHING connects through it, even
+        # a read -- read_only=True skips just that one pragma, so inspecting
+        # this database cannot be the thing that violates R-1. Rebuilt from
+        # the resolved URL rather than reusing `engine` because `engine` was
+        # already created (in main()) through the writing get_engine() and
+        # may already have flipped the file by the time we get here.
+        ro_engine = get_engine(engine.url.render_as_string(hide_password=False), read_only=True)
+
+        # The real command runs init_db(engine) BEFORE migrate(engine) (see
+        # below) -- a dry run that only asks migrate() what it would do
+        # silently omits init_db's effect. Measured on a narrow (old-schema)
+        # database: this under-report was 2 tables, 8 indexes and 3 columns
+        # that init_db actually adds. plan_init_db is the same computation
+        # init_db itself runs (see its docstring), so this cannot drift from
+        # what `migrate` (no --dry-run) actually does.
+        init_plan = plan_init_db(ro_engine)
+        report = migrate(ro_engine, dry_run=True)
+
+        init_db_changes = False
+        for table_name in init_plan["new_tables"]:
+            indexes = init_plan["new_table_indexes"].get(table_name, [])
+            suffix = f" (with index(es): {', '.join(indexes)})" if indexes else ""
+            print(f"would create table: {table_name}{suffix}")
+            init_db_changes = True
+        for stmt in init_plan["alter_statements"]:
+            print(f"would run: {stmt}")
+            init_db_changes = True
+        for stmt in init_plan["create_index_statements"]:
+            print(f"would run: {stmt}")
+            init_db_changes = True
+
+        if not report.skipped and not init_db_changes:
             print(f"dry run: already at version {report.from_version}; nothing to do")
             return 0
         for item in report.skipped:
             print(f"would apply migration {item}")
         print(
             f"dry run: would go from version {report.from_version} to "
-            f"version {report.to_version} ({len(report.skipped)} pending); "
+            f"version {report.to_version} ({len(report.skipped)} pending migration(s), "
+            f"{len(init_plan['new_tables'])} new table(s), "
+            f"{len(init_plan['alter_statements'])} new column(s), "
+            f"{len(init_plan['create_index_statements'])} new index(es) from init_db); "
             "nothing was changed"
         )
         return 0

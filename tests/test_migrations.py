@@ -105,6 +105,43 @@ def test_dry_run_touches_nothing(engine):
     assert real.to_version == SCHEMA_VERSION
 
 
+def test_dry_run_through_a_read_only_engine_does_not_mutate_a_non_wal_file(tmp_path):
+    """A dry run must be safe to point at a database this process must never
+    write to (R-1) -- including the FILE ITSELF, not just its rows.
+
+    A plain ``get_engine(url)`` flips ``journal_mode`` to WAL (a persistent
+    header change) on the very first connection, dry run or not -- so
+    ``migrate(engine, dry_run=True)`` through a plain engine silently writes
+    to a non-WAL file. Measured: sha256 changed and ``journal_mode`` read
+    back as ``'wal'`` after a dry run that reported "nothing was changed".
+    ``get_engine(url, read_only=True)`` (used here) skips exactly that one
+    pragma.
+    """
+    import hashlib
+
+    db_path = tmp_path / "ro.db"
+    setup_engine = get_engine(f"sqlite:///{db_path}")
+    init_db(setup_engine)
+    setup_engine.dispose()  # release the pooled connection before flipping the journal mode below
+    con = sqlite3.connect(db_path)
+    con.execute("PRAGMA journal_mode=DELETE")
+    con.close()
+
+    before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+
+    ro_engine = get_engine(f"sqlite:///{db_path}", read_only=True)
+    report = migrate(ro_engine, dry_run=True)
+
+    after = hashlib.sha256(db_path.read_bytes()).hexdigest()
+    con = sqlite3.connect(db_path)
+    mode_after = con.execute("PRAGMA journal_mode").fetchone()[0]
+    con.close()
+
+    assert report.skipped, "sanity: there must have been something pending to report"
+    assert after == before, "the read-only dry run wrote to the database file"
+    assert mode_after == "delete"
+
+
 def test_dry_run_on_an_up_to_date_database_reports_nothing_pending(engine):
     migrate(engine)  # bring it to SCHEMA_VERSION for real
 

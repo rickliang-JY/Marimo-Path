@@ -297,3 +297,201 @@ def test_dedupe_slides_dry_run_reports_only_real_path_rewrites(tmp_path, capsys)
     assert len(plan["rewrites"]) == 1, plan["rewrites"]
     assert plan["rewrites"][0][2] == str(b.resolve())
     engine.dispose()
+
+
+# --- migrate (Phase 0: versioned schema migrations) -------------------------
+#
+# Before these, `grep -rn "_cmd_migrate|'migrate'" tests/` matched nothing:
+# the CLI subcommand's init_db-before-migrate ordering, its error branch,
+# exit code, and both dry-run/real-run report paths were entirely
+# unexercised -- which is exactly why the dry-run/real-run divergence below
+# went unnoticed by a green suite.
+
+
+def test_migrate_on_empty_database_reaches_schema_version(db_url, capsys):
+    """A fresh database, migrated for real, ends at SCHEMA_VERSION."""
+    from hescope.migrations import SCHEMA_VERSION, current_version
+
+    assert main(["--db", db_url, "migrate"]) == 0
+    out = capsys.readouterr().out
+    assert "migrated: version 0 ->" in out
+    engine = get_engine(db_url)
+    assert current_version(engine) == SCHEMA_VERSION
+    engine.dispose()
+
+
+def test_migrate_second_call_reports_already_at_version(db_url, capsys):
+    """A second `migrate` call applies nothing and says so."""
+    main(["--db", db_url, "migrate"])
+    capsys.readouterr()
+
+    assert main(["--db", db_url, "migrate"]) == 0
+    out = capsys.readouterr().out
+    assert "already at version" in out
+
+
+def test_migrate_reports_error_and_exits_1_on_a_raising_migration(
+    db_url, capsys, monkeypatch
+):
+    """A migration that raises: exit code 1, and the error lands on stderr
+    (not swallowed, not printed as if it were success)."""
+    import hescope.migrations as mig
+
+    def _boom(conn):
+        raise RuntimeError("synthetic failure for the CLI test")
+
+    monkeypatch.setattr(
+        mig,
+        "MIGRATIONS",
+        (mig.Migration(version=1, name="synthetic failing migration", apply=_boom),),
+    )
+
+    rc = main(["--db", db_url, "migrate"])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "synthetic failure for the CLI test" in captured.err
+    assert "migration stopped" in captured.err
+
+
+def test_migrate_dry_run_leaves_schema_migrations_absent(db_url, capsys):
+    """--dry-run never creates schema_migrations (or anything else)."""
+    assert main(["--db", db_url, "migrate", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "nothing was changed" in out
+    engine = get_engine(db_url)
+    assert "schema_migrations" not in sa.inspect(engine).get_table_names()
+    engine.dispose()
+
+
+def _build_narrow_db(path: Path) -> None:
+    """The pre-Phase-0 schema: no agent_runs/interactions tables, no indexes
+    on rois, no patch_path/stats_json/magnification columns -- carrying 1
+    slide + 1 roi, same shape used by
+    tests/test_migrations.py::test_upgraded_database_has_the_same_rois_indexes_as_a_fresh_one.
+    """
+    import sqlite3
+
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE slides (
+            id INTEGER PRIMARY KEY, source_kind VARCHAR(32), name VARCHAR(512),
+            path VARCHAR(1024) UNIQUE, width INTEGER, height INTEGER,
+            mpp FLOAT, extra_json TEXT, created_at DATETIME
+        );
+        CREATE TABLE rois (
+            id INTEGER PRIMARY KEY, slide_id INTEGER, kind VARCHAR(32),
+            points_json TEXT, bbox_json TEXT, label VARCHAR(512), notes TEXT,
+            created_at DATETIME
+        );
+        INSERT INTO slides (id, source_kind, name, path, width, height, mpp, extra_json, created_at)
+        VALUES (1, 'local', 's.svs', 's.svs', 4000, 3000, 0.25, '{}', '2024-01-01T00:00:00');
+        INSERT INTO rois (id, slide_id, kind, points_json, bbox_json, label, notes, created_at)
+        VALUES (1, 1, 'rect', '[[0,0],[10,10]]', '[0,0,10,10]', '', '', '2024-01-01T00:00:00');
+        """
+    )
+    con.commit()
+    con.close()
+
+
+def test_migrate_dry_run_names_every_object_init_db_would_create(tmp_path, capsys):
+    """`migrate --dry-run` is supposed to be a preview of `migrate`. The real
+    command runs ``init_db(engine)`` before ``migrate(engine)``
+    (hescope/cli.py:_cmd_migrate) -- a dry run that only asks ``migrate()``
+    what it would do silently omits everything ``init_db`` would add.
+
+    Measured against the pre-fix CLI (dry-run branch called only
+    ``migrate(engine, dry_run=True)``) on a narrow (old-schema) database with
+    1 slide + 1 roi: the dry run printed just "would apply migration 1:
+    baseline schema (stamp only, no schema change)" / "nothing was changed",
+    while running the SAME database for real added tables
+    ``agent_runs``/``interactions``, 8 indexes and 3 columns on ``rois`` --
+    none of them named anywhere in the dry-run output.
+    """
+    import sqlite3
+
+    dry_db = tmp_path / "dry.db"
+    real_db = tmp_path / "real.db"
+    _build_narrow_db(dry_db)
+    _build_narrow_db(real_db)
+
+    assert main(["--db", f"sqlite:///{dry_db}", "migrate", "--dry-run"]) == 0
+    dry_out = capsys.readouterr().out
+
+    assert main(["--db", f"sqlite:///{real_db}", "migrate"]) == 0
+    capsys.readouterr()
+
+    def _objects(path):
+        con = sqlite3.connect(path)
+        names = {
+            row[0]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'index') "
+                "AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        roi_cols = {row[1] for row in con.execute("PRAGMA table_info(rois)").fetchall()}
+        con.close()
+        return names, roi_cols
+
+    real_objects, real_roi_cols = _objects(real_db)
+    dry_objects_after, dry_roi_cols_after = _objects(dry_db)  # must equal the narrow baseline
+
+    assert dry_objects_after == {"slides", "rois"}, "the dry run itself must not have written"
+
+    # everything the real run created beyond the narrow baseline (schema_migrations
+    # is covered separately by the "would apply migration 1" line) must be named
+    new_objects = real_objects - dry_objects_after - {"schema_migrations"}
+    new_columns = real_roi_cols - dry_roi_cols_after
+    assert new_objects, "sanity: the real run must actually have created something"
+    for name in sorted(new_objects):
+        assert name in dry_out, (
+            f"{name!r} was created by the real `migrate` run but never named "
+            "in `migrate --dry-run`'s output"
+        )
+    for name in sorted(new_columns):
+        assert name in dry_out, (
+            f"column {name!r} was added by the real `migrate` run but never "
+            "named in `migrate --dry-run`'s output"
+        )
+
+
+def test_migrate_dry_run_does_not_mutate_a_non_wal_database(tmp_path, capsys):
+    """`migrate --dry-run` must not write to the file it promises not to
+    touch (R-1's whole premise for a dry run). Before the fix, the version
+    probe opened its connection through the same pragma-hooked engine
+    `migrate` (no --dry-run) writes through, and that hook flips
+    journal_mode to WAL -- a persistent header change -- the instant
+    anything connects, dry run or not.
+
+    Measured on a copy forced to journal_mode=DELETE: sha256 changed and
+    journal_mode read back as 'wal' after a --dry-run call that printed
+    'nothing was changed'.
+    """
+    import hashlib
+    import sqlite3
+
+    from hescope.db import init_db
+
+    db_path = tmp_path / "nonwal.db"
+    engine = get_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    engine.dispose()
+
+    con = sqlite3.connect(db_path)
+    con.execute("PRAGMA journal_mode=DELETE")
+    con.close()
+
+    before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+
+    assert main(["--db", f"sqlite:///{db_path}", "migrate", "--dry-run"]) == 0
+    capsys.readouterr()
+
+    after = hashlib.sha256(db_path.read_bytes()).hexdigest()
+    con = sqlite3.connect(db_path)
+    mode_after = con.execute("PRAGMA journal_mode").fetchone()[0]
+    con.close()
+
+    assert after == before, "dry run wrote to the database file"
+    assert mode_after == "delete"
