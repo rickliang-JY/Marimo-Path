@@ -369,11 +369,6 @@ def _legacy_roi(engine, slide_id: int, bbox: tuple[int, int, int, int]) -> int:
         return roi.id
 
 
-def test_schema_version_is_2_for_phase_1():
-    assert SCHEMA_VERSION == 2
-    assert [m.version for m in MIGRATIONS] == [1, 2]
-
-
 def test_migration_2_backfills_slide_files_preserving_first_seen_at(tmp_path):
     """R-3: the whole point. A slide row's created_at must appear UNCHANGED
     in its slide_files.first_seen_at -- compared here as the raw SQL value
@@ -621,16 +616,16 @@ def test_plan_migration_2_on_an_empty_database_is_all_zero(tmp_path):
 
 def test_migration_2_is_a_noop_on_an_already_up_to_date_empty_database(tmp_path):
     """A fresh database (created via init_db, which already writes the
-    current schema) must migrate cleanly to version 2 with zero backfill
-    work to do -- migration 2 must not assume there is always at least one
-    legacy row to process."""
+    current schema) must migrate cleanly through version 2 with zero
+    backfill work to do -- migration 2 must not assume there is always at
+    least one legacy row to process."""
     engine = get_engine(f"sqlite:///{tmp_path}/fresh.db")
     init_db(engine)
 
     report = migrate(engine)
 
     assert report.error is None
-    assert current_version(engine) == 2
+    assert current_version(engine) == SCHEMA_VERSION
     with engine.connect() as conn:
         assert conn.execute(sa.text("SELECT COUNT(*) FROM slide_files")).scalar_one() == 0
 
@@ -738,3 +733,227 @@ def test_migrate_dry_run_still_touches_nothing_and_does_not_call_init_db(tmp_pat
         "dry_run must not call init_db -- no new tables from it either"
     )
     assert current_version(engine) == 0
+
+
+# =============================================================================
+# Migration 3: TCGA download -> storage -> injection (BUILD-PLAN-DB.md Phase 2)
+# =============================================================================
+
+
+def test_schema_version_is_3_for_phase_2():
+    assert SCHEMA_VERSION == 3
+    assert [m.version for m in MIGRATIONS] == [1, 2, 3]
+
+
+def test_migration_3_gives_tcga_files_slide_id_a_real_foreign_key(tmp_path):
+    """Defect 2.1: tcga_files.slide_id was indexed but UNCONSTRAINED --
+    inserting a slide_id that names no row in `slides` was accepted
+    silently. Must be seen to fail today (before migration 3 exists): this
+    exact insert raises nothing and the bogus row is readable back."""
+    from hescope.tcga_schema import TcgaCatalog
+
+    engine = get_engine(f"sqlite:///{tmp_path}/mig3_fk.db")
+    init_db(engine)
+    TcgaCatalog(engine)  # creates tcga_files (and siblings)
+
+    report = migrate(engine)
+    assert report.error is None
+    assert current_version(engine) == SCHEMA_VERSION
+
+    with engine.connect() as conn:
+        with pytest.raises(sa.exc.IntegrityError, match="FOREIGN KEY"):
+            conn.execute(
+                sa.text(
+                    "INSERT INTO tcga_files (file_id, first_seen_at, slide_id) "
+                    "VALUES ('ghost-file', :now, 999999)"
+                ),
+                {"now": datetime(2024, 1, 1)},
+            )
+
+
+def test_migration_3_preserves_existing_tcga_files_data_across_the_fk_rebuild(tmp_path):
+    """Adding the FK requires SQLite's copy/drop/rename table-rebuild (no
+    ALTER TABLE ADD CONSTRAINT exists). Every column of every pre-existing
+    row must survive it byte-for-byte -- source vs destination (R-3), not a
+    count."""
+    from hescope.tcga_schema import TcgaCatalog
+
+    engine = get_engine(f"sqlite:///{tmp_path}/mig3_preserve.db")
+    init_db(engine)
+    cat = TcgaCatalog(engine)
+    cat.upsert_rows(
+        [
+            {
+                "file_id": "keep-1", "file_name": "keep.svs", "file_size": 42,
+                "md5sum": "f" * 32, "project_id": "TCGA-BRCA",
+                "case_submitter_id": "TCGA-AA-0001", "sample_id": "TCGA-AA-0001-01A",
+                "first_seen_at": datetime(2021, 5, 6, 7, 8, 9),
+            }
+        ]
+    )
+    with engine.connect() as conn:
+        before = dict(
+            conn.execute(
+                sa.text("SELECT * FROM tcga_files WHERE file_id='keep-1'")
+            ).mappings().one()
+        )
+
+    migrate(engine)
+
+    with engine.connect() as conn:
+        after = dict(
+            conn.execute(
+                sa.text("SELECT * FROM tcga_files WHERE file_id='keep-1'")
+            ).mappings().one()
+        )
+    assert after == before, f"the FK rebuild altered existing data:\n{before}\nvs\n{after}"
+
+
+def test_migration_3_links_a_downloaded_file_to_its_already_registered_slide(tmp_path):
+    """R-3: compares a SOURCE value (the slide.id a tcga_files row's
+    local_path actually content-matches) to a DESTINATION value
+    (tcga_files.slide_id after migration), not a count. Mirrors the real
+    database's actual state: exactly one TCGA file is downloaded, and it was
+    already registered as a slide (by the normal open path) before
+    migration 3 ever runs."""
+    from hescope.tcga_schema import TcgaCatalog
+
+    engine = get_engine(f"sqlite:///{tmp_path}/mig3_link.db")
+    init_db(engine)
+    real_file = tmp_path / "already-registered.svs"
+    real_file.write_bytes(b"the actual bytes of a downloaded tcga slide")
+    slide_id = SlideRepo(engine).register(
+        source_kind="tcga", name="already-registered.svs",
+        path=str(real_file.resolve()), width=10, height=10,
+    )
+    cat = TcgaCatalog(engine)
+    cat.upsert_rows([{"file_id": "fid-linked", "file_name": "already-registered.svs", "file_size": 44}])
+    assert cat.mark_downloaded("fid-linked", str(real_file.resolve())) is True
+
+    report = migrate(engine)
+    assert report.error is None
+
+    with engine.connect() as conn:
+        linked = conn.execute(
+            sa.text("SELECT slide_id FROM tcga_files WHERE file_id='fid-linked'")
+        ).scalar_one()
+    assert linked == slide_id, (
+        f"tcga_files.slide_id must equal the SOURCE slide's real id "
+        f"({slide_id!r}); got {linked!r}"
+    )
+
+
+def test_migration_3_does_not_link_a_file_with_no_matching_slide(tmp_path):
+    """A downloaded file that was never opened/registered has no slide row
+    to point at. Migration 3 must not invent one (that is exactly defect
+    2.4's shape) -- it leaves slide_id NULL and counts the row as
+    unlinkable."""
+    from hescope.migrations import plan_migration_3
+    from hescope.tcga_schema import TcgaCatalog
+
+    engine = get_engine(f"sqlite:///{tmp_path}/mig3_nomatch.db")
+    init_db(engine)
+    orphan_file = tmp_path / "never-opened.svs"
+    orphan_file.write_bytes(b"downloaded but never registered as a slide")
+    cat = TcgaCatalog(engine)
+    cat.upsert_rows([{"file_id": "fid-orphan", "file_name": "never-opened.svs", "file_size": 1}])
+    cat.mark_downloaded("fid-orphan", str(orphan_file.resolve()))
+
+    with engine.connect() as conn:
+        preview = plan_migration_3(conn)
+    assert preview["would_link"] == 0
+    assert preview["could_not_link"] == 1
+
+    migrate(engine)
+
+    with engine.connect() as conn:
+        linked = conn.execute(
+            sa.text("SELECT slide_id FROM tcga_files WHERE file_id='fid-orphan'")
+        ).scalar_one()
+        slides_count = conn.execute(sa.text("SELECT COUNT(*) FROM slides")).scalar_one()
+    assert linked is None
+    assert slides_count == 0, "migration 3 must never invent a slide row"
+
+
+def test_migration_3_does_not_relink_an_already_linked_file(tmp_path):
+    """A tcga_files row that already carries a slide_id (written at download
+    time by app.py, per BUILD-PLAN-DB.md Phase 2) must be left exactly as
+    is, not re-derived from a possibly-stale local_path."""
+    from hescope.tcga_schema import TcgaCatalog
+
+    engine = get_engine(f"sqlite:///{tmp_path}/mig3_already.db")
+    init_db(engine)
+    real_file = tmp_path / "s.svs"
+    real_file.write_bytes(b"content")
+    slide_id = SlideRepo(engine).register(
+        source_kind="tcga", name="s.svs", path=str(real_file.resolve()), width=1, height=1,
+    )
+    cat = TcgaCatalog(engine)
+    cat.upsert_rows([{"file_id": "fid-already", "file_name": "s.svs", "file_size": 7}])
+    cat.mark_downloaded("fid-already", str(real_file.resolve()), slide_id=slide_id)
+
+    migrate(engine)
+
+    with engine.connect() as conn:
+        linked = conn.execute(
+            sa.text("SELECT slide_id FROM tcga_files WHERE file_id='fid-already'")
+        ).scalar_one()
+    assert linked == slide_id
+
+
+def test_migration_3_is_idempotent(tmp_path):
+    from hescope.tcga_schema import TcgaCatalog
+
+    engine = get_engine(f"sqlite:///{tmp_path}/mig3_idem.db")
+    init_db(engine)
+    real_file = tmp_path / "s.svs"
+    real_file.write_bytes(b"idempotent content")
+    slide_id = SlideRepo(engine).register(
+        source_kind="tcga", name="s.svs", path=str(real_file.resolve()), width=1, height=1,
+    )
+    cat = TcgaCatalog(engine)
+    cat.upsert_rows([{"file_id": "fid-idem", "file_name": "s.svs", "file_size": 7}])
+    cat.mark_downloaded("fid-idem", str(real_file.resolve()))
+
+    first = migrate(engine)
+    second = migrate(engine)
+
+    assert first.error is None and second.error is None
+    assert second.applied == []
+    with engine.connect() as conn:
+        linked = conn.execute(
+            sa.text("SELECT slide_id FROM tcga_files WHERE file_id='fid-idem'")
+        ).scalar_one()
+        fk_rows = conn.execute(sa.text('PRAGMA foreign_key_list("tcga_files")')).all()
+    assert linked == slide_id
+    assert any(r[2] == "slides" for r in fk_rows), "the FK must still be present after a second run"
+
+
+def test_plan_migration_3_on_an_empty_database_is_all_zero(tmp_path):
+    from hescope.migrations import plan_migration_3
+
+    engine = get_engine(f"sqlite:///{tmp_path}/empty3.db")
+    with engine.connect() as conn:
+        preview = plan_migration_3(conn)
+    assert preview == {
+        "tcga_files_exists": False, "fk_present": False,
+        "with_local_path": 0, "already_linked": 0,
+        "would_link": 0, "could_not_link": 0,
+    }
+
+
+def test_migrate_reaches_schema_version_with_no_prior_tcga_tables(tmp_path):
+    """migrate() must be self-contained for migration 3 the same way it
+    already is for migration 2 (BUILD-PLAN-DB.md Phase 1 debugger round 2):
+    a database that never had a TcgaCatalog instantiated (no tcga_* tables
+    at all) must still reach SCHEMA_VERSION in one migrate() call."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig3_selfcontained.db")
+
+    report = migrate(engine)
+
+    assert report.error is None, f"migrate() must be self-contained: {report.error}"
+    assert current_version(engine) == SCHEMA_VERSION
+    with engine.connect() as conn:
+        assert "tcga_files" in sa.inspect(conn).get_table_names()
+        fk_rows = conn.execute(sa.text('PRAGMA foreign_key_list("tcga_files")')).all()
+    assert any(r[2] == "slides" for r in fk_rows)

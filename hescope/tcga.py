@@ -659,13 +659,49 @@ class SlideCatalog:
                     )
         return inserted
 
-    def mark_downloaded(self, file_id: str, local_path: str) -> None:
+    def mark_downloaded(self, file_id: str, local_path: str) -> bool:
+        """Record where ``file_id`` landed. Returns ``False`` (writing
+        nothing) when ``file_id`` is not already a row in this catalog --
+        same contract as ``TcgaCatalog.mark_downloaded`` (BUILD-PLAN-DB.md
+        Phase 2, defect 2.4): a completed download always names a file this
+        catalog already knows from a search, so an unmatched id is a stale
+        or wrong reference, not a new file to silently accept."""
         with self._connect() as con:
-            con.execute(
+            cur = con.execute(
                 "UPDATE tcga_slides SET local_path = ?, downloaded_at = ? "
                 "WHERE file_id = ?",
                 (str(local_path), self._now(), file_id),
             )
+            return cur.rowcount > 0
+
+    def get(self, file_id: str) -> SlideRecord | None:
+        """One record by ``file_id`` -- a ``PRIMARY KEY`` lookup, O(1) in the
+        number of rows. Replaces the pattern app.py used for its md5 lookup,
+        ``next((r for r in cat.search(limit=100000) if r.file_id == fid),
+        None)``: an O(n) scan of up to 100,000 catalog rows, in Python,
+        rebuilding every ``SlideRecord`` in the table, on every click
+        (BUILD-PLAN-DB.md Phase 2, defect 2.3). Returns ``None`` when
+        ``file_id`` is unknown."""
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT file_id, file_name, file_size, project_id, "
+                "case_submitter_id, sample_type, primary_site, local_path, md5sum "
+                "FROM tcga_slides WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return SlideRecord(
+            file_id=row[0],
+            file_name=row[1],
+            file_size=int(row[2] or 0),
+            project_id=row[3],
+            case_submitter_id=row[4],
+            sample_type=row[5],
+            primary_site=row[6],
+            local_path=row[7],
+            md5sum=row[8],
+        )
 
     def local_file(self, file_id: str) -> Path | None:
         """The recorded local copy of ``file_id``, if it is still on disk.

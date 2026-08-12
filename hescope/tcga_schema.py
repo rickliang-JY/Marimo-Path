@@ -49,6 +49,7 @@ __all__ = [
     "parse_barcode",
     "storage_relpath",
     "init_tcga_schema",
+    "plan_init_tcga_schema",
     "TcgaCatalog",
     "hits_to_rows",
 ]
@@ -56,6 +57,34 @@ __all__ = [
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _coerce_first_seen_at(value: object) -> datetime | None:
+    """Normalize a caller-supplied ``first_seen_at`` into the naive-UTC form
+    every ``DATETIME`` column in this project is stored as (see
+    ``hescope.db``'s naive-UTC convention: an aware datetime handed straight
+    to SQLAlchemy's sqlite ``DATETIME`` binding has its offset silently
+    discarded, not converted).
+
+    Accepts a ``datetime`` (aware or naive) or an ISO8601 string -- the flat
+    ``SlideCatalog`` writes ``datetime.now(timezone.utc).isoformat()``, e.g.
+    ``'2026-08-09T09:58:01.886485+00:00'`` (see ``SlideCatalog._now``).
+    Returns ``None`` for ``None`` or anything unparseable rather than
+    raising: a provenance timestamp that cannot be read must not abort an
+    otherwise-good import (the caller falls back to 'now', still better than
+    crashing on one bad row).
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+    return None
 
 
 class TcgaBase(DeclarativeBase):
@@ -245,6 +274,44 @@ def init_tcga_schema(engine: sa.Engine) -> None:
     TcgaBase.metadata.create_all(engine)
 
 
+def plan_init_tcga_schema(engine: sa.Engine, conn: sa.Connection | None = None) -> dict:
+    """What :func:`init_tcga_schema` WOULD do, computed read-only.
+
+    Mirrors ``hescope.db.plan_init_db``'s contract (see that function's
+    docstring for why this pairing exists at all): ``tcga_projects`` /
+    ``tcga_cases`` / ``tcga_samples`` / ``tcga_files`` live on their own
+    ``DeclarativeBase`` (``TcgaBase``, deliberately separate from
+    ``hescope.db.Base`` -- see this module's docstring), so ``plan_init_db``
+    never sees them and a ``migrate --dry-run`` that only asked it would
+    under-report exactly the class of gap ``plan_init_db`` itself exists to
+    close for the core schema -- measured: on a database with none of the
+    TCGA tables yet, a real (non-dry-run) ``migrate()`` call now creates them
+    (``hescope.migrations.migrate`` calls ``init_tcga_schema`` for migration
+    3's self-containment) while a dry run that only consulted
+    ``plan_init_db`` named none of them.
+
+    Returns ``{"new_tables": [name, ...], "new_table_indexes": {name:
+    [index_name, ...]}}`` -- no ``alter_statements``/``create_index_statements``
+    keys, unlike ``plan_init_db``: the TCGA tables have no pre-Phase-2
+    narrower schema to upgrade FROM (they shipped with every current index
+    from the start), so ``create_all`` either creates a table whole or
+    leaves an existing one untouched; there is no column/index gap on an
+    EXISTING tcga table for this function to compute (the one exception --
+    ``tcga_files.slide_id``'s foreign key -- is migration 3's own job, see
+    ``hescope.migrations.plan_migration_3``, not this function's).
+    """
+    inspector = sa.inspect(conn) if conn is not None else sa.inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    new_tables: list[str] = []
+    new_table_indexes: dict[str, list[str]] = {}
+    for table in TcgaBase.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            new_tables.append(table.name)
+            if table.indexes:
+                new_table_indexes[table.name] = sorted(ix.name for ix in table.indexes)
+    return {"new_tables": new_tables, "new_table_indexes": new_table_indexes}
+
+
 def hits_to_rows(hits: Iterable[dict]) -> list[dict]:
     """Flatten GDC ``/files`` hits into per-file dicts carrying the hierarchy.
 
@@ -299,6 +366,17 @@ class TcgaCatalog:
         Download state (``local_path``, ``downloaded_at``, ``slide_id``) is
         never touched: re-running a search must not forget that a file is
         already on disk.
+
+        ``row["first_seen_at"]``, when present, is used verbatim (via
+        :func:`_coerce_first_seen_at`) as the NEW row's ``first_seen_at``
+        instead of the ORM default (``_utcnow``, i.e. "the moment this
+        import ran"). This is what ``migrate-tcga-catalog`` needs: without
+        it, every file carried over from the flat catalog lost its real
+        discovery time and silently took on the import's timestamp instead
+        -- measured as a 25-hour loss across all 50 rows of the real
+        database (BUILD-PLAN-DB.md Phase 2, R-3's exemplar). A row with no
+        ``first_seen_at`` key (an ordinary GDC search result, genuinely
+        first seen right now) still gets ``_utcnow()``, unchanged.
         """
         n = 0
         with Session(self.engine) as s:
@@ -341,17 +419,19 @@ class TcgaCatalog:
                     )
                     s.flush()
                 if s.get(TcgaFile, fid) is None:
-                    s.add(
-                        TcgaFile(
-                            file_id=fid,
-                            file_name=row.get("file_name"),
-                            file_size=row.get("file_size"),
-                            md5sum=row.get("md5sum"),
-                            sample_id=sid,
-                            case_submitter_id=cid,
-                            project_id=pid,
-                        )
+                    kwargs: dict[str, Any] = dict(
+                        file_id=fid,
+                        file_name=row.get("file_name"),
+                        file_size=row.get("file_size"),
+                        md5sum=row.get("md5sum"),
+                        sample_id=sid,
+                        case_submitter_id=cid,
+                        project_id=pid,
                     )
+                    first_seen = _coerce_first_seen_at(row.get("first_seen_at"))
+                    if first_seen is not None:
+                        kwargs["first_seen_at"] = first_seen
+                    s.add(TcgaFile(**kwargs))
                     n += 1
                 else:
                     # backfill only what was missing; never clobber download state
@@ -363,20 +443,40 @@ class TcgaCatalog:
 
     def mark_downloaded(
         self, file_id: str, local_path: str | Path, slide_id: int | None = None
-    ) -> None:
+    ) -> bool:
         """Record where the file landed, and optionally the ``slides`` row it
         was registered as -- that link is what lets an annotation be traced
-        back to a case."""
+        back to a case.
+
+        Returns ``False`` and writes nothing when ``file_id`` is not already
+        a known ``TcgaFile`` row. Before this fix an unknown id silently
+        INSERTed a brand-new, metadata-free row (no project, case, sample or
+        even a ``first_seen_at`` derived from a real search) that then
+        counted as "downloaded" in every stat and listing -- defect 2.4
+        (BUILD-PLAN-DB.md Phase 2), measured by
+        ``tests/test_tcga_schema.py::test_mark_downloaded_on_unknown_id_returns_false_and_writes_nothing``
+        failing against the un-fixed code. A completed download always comes
+        from a row this catalog already knows (search results are upserted
+        before anything is downloaded), so "unknown id" is a caller bug or a
+        stale reference, not a legitimate new file to invent metadata for.
+
+        ``downloaded_at`` only advances when ``local_path`` actually changes
+        (or was unset) -- calling this again with the SAME path (the shape
+        ``migrate-tcga-catalog`` re-runs in) is then a true no-op on that
+        column too, not a provenance-erasing timestamp bump every time.
+        """
         with Session(self.engine) as s:
             rec = s.get(TcgaFile, file_id)
             if rec is None:
-                rec = TcgaFile(file_id=file_id)
-                s.add(rec)
-            rec.local_path = str(local_path)
-            rec.downloaded_at = _utcnow()
+                return False
+            new_path = str(local_path)
+            if rec.local_path != new_path:
+                rec.local_path = new_path
+                rec.downloaded_at = _utcnow()
             if slide_id is not None:
                 rec.slide_id = slide_id
             s.commit()
+        return True
 
     def local_file(self, file_id: str) -> Path | None:
         """The recorded local copy, if it is still on disk. Same contract as

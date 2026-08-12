@@ -216,6 +216,35 @@ def test_register_keeps_extra_json_when_extra_is_omitted(engine):
     assert json.loads(repo.get(sid)["extra_json"]) == {}
 
 
+def test_register_stores_the_gdc_supplied_md5sum(engine):
+    """BUILD-PLAN-DB.md Phase 2: 'slides gains its identity from the
+    GDC-supplied md5 ... store the GDC md5 in slides.md5sum'. register() had
+    no md5sum parameter at all -- slides.md5sum existed on the ORM model
+    (Phase 1) but nothing ever wrote it, so it was permanently NULL for
+    every TCGA slide."""
+    repo = SlideRepo(engine)
+    sid = repo.register(
+        source_kind="tcga", name="s.svs", path="/p/md5.svs", width=4, height=4,
+        md5sum="3c9a6590466db001e2e25f225af97e75",
+    )
+    assert repo.get(sid)["md5sum"] == "3c9a6590466db001e2e25f225af97e75"
+
+
+def test_register_keeps_md5sum_when_omitted(engine):
+    """Same 'omitting is not clearing' contract as extra_json above: a
+    caller that does not know the md5 (a plain local open) must not blank
+    out one already recorded from a GDC download."""
+    repo = SlideRepo(engine)
+    sid = repo.register(
+        source_kind="tcga", name="s.svs", path="/p/md5b.svs", width=4, height=4,
+        md5sum="a" * 32,
+    )
+    repo.register(  # a later open with no md5sum available
+        source_kind="tcga", name="s.svs", path="/p/md5b.svs", width=4, height=4,
+    )
+    assert repo.get(sid)["md5sum"] == "a" * 32
+
+
 # --- normalize_slide_path: foreign paths (defect 1.3) ----------------------
 
 

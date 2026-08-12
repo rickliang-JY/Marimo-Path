@@ -432,3 +432,24 @@ def test_opening_a_downloaded_slide_needs_no_network(tmp_path):
     offline = GDCClient(api_base="http://127.0.0.1:9", timeout=1)
     with _pytest.raises(Exception):
         offline.download_slide("fid-3", tmp_path)
+
+
+# --------------------------------------------------------------------------
+# hescope.tcga_panel.records_to_rows (BUILD-PLAN-DB.md Phase 2, defect 2.3)
+# --------------------------------------------------------------------------
+
+
+def test_records_to_rows_carries_md5sum():
+    """records_to_rows used to omit md5sum entirely, so app.py's
+    ``_sel[0].get("md5sum") or <catalog scan>`` had a permanently dead first
+    branch -- every download's integrity check went through the O(n) scan
+    fallback, never the table row itself."""
+    from hescope.tcga_panel import records_to_rows
+
+    rec = SlideRecord(
+        file_id="a", file_name="a.svs", file_size=1, project_id="TCGA-BRCA",
+        case_submitter_id="TCGA-AA", sample_type="Primary Tumor",
+        primary_site="Breast", md5sum="d" * 32,
+    )
+    rows = records_to_rows([rec])
+    assert rows[0]["md5sum"] == "d" * 32

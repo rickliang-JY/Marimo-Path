@@ -428,6 +428,34 @@ def test_upsert_never_overwrites_a_recorded_md5sum(tmp_path):
     assert rec.local_path == "/data/tcga/k.svs"
 
 
+def test_get_is_a_keyed_lookup_by_file_id(tmp_path):
+    """BUILD-PLAN-DB.md Phase 2 (2.3): app.py's md5 lookup fell back to
+    ``cat.search(limit=100000)`` filtered in Python -- an O(n) scan of up to
+    100,000 rows on every click. ``get`` is the keyed (PRIMARY KEY) query
+    that replaces it."""
+    cat = SlideCatalog(tmp_path / "keyed.db")
+    cat.upsert([
+        SlideRecord("a", "a.svs", 1, "TCGA-BRCA", "TCGA-AA", "Primary Tumor",
+                    "Breast", md5sum="1" * 32),
+        SlideRecord("b", "b.svs", 2, "TCGA-BRCA", "TCGA-BB", "Primary Tumor",
+                    "Breast", md5sum="2" * 32),
+    ])
+
+    got = cat.get("b")
+    assert got is not None
+    assert got.file_id == "b" and got.md5sum == "2" * 32
+
+    assert cat.get("no-such-id") is None
+
+
+def test_flat_catalog_mark_downloaded_on_unknown_id_returns_false(tmp_path):
+    """Same contract as TcgaCatalog.mark_downloaded (BUILD-PLAN-DB.md Phase 2,
+    2.4): an unknown file_id must be reported, not silently accepted."""
+    cat = SlideCatalog(tmp_path / "unknown.db")
+    assert cat.mark_downloaded("no-such-id", "/data/tcga/x.svs") is False
+    assert cat.stats()["total"] == 0
+
+
 # --------------------------------------------------------------------------
 # server-supplied file name containment
 # --------------------------------------------------------------------------

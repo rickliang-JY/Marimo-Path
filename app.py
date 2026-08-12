@@ -2622,15 +2622,13 @@ def _(
             return
 
         # integrity check source: md5 carried by the table row if any,
-        # otherwise look it up in the local catalog by file_id
-        _md5 = _sel[0].get("md5sum") or next(
-            (
-                _r.md5sum
-                for _r in tcga_catalog.search(limit=100000)
-                if _r.file_id == _fid and _r.md5sum
-            ),
-            None,
-        )
+        # otherwise a keyed (PRIMARY KEY) lookup in the local catalog by
+        # file_id -- previously an O(n) scan of up to 100,000 catalog rows,
+        # in Python, on every click (BUILD-PLAN-DB.md Phase 2, defect 2.3).
+        _md5 = _sel[0].get("md5sum")
+        if not _md5:
+            _cat_rec = tcga_catalog.get(_fid)
+            _md5 = _cat_rec.md5sum if _cat_rec is not None else None
         # Only `progress` is reset. Clearing `msg` and `open_path` here threw
         # away a hand-off the ticker had not drained yet -- and open_path is a
         # finished, md5-verified, possibly gigabyte download, which would then
@@ -2687,6 +2685,7 @@ def _(
                                 width=_w_reg,
                                 height=_h_reg,
                                 mpp=_src_reg.mpp,
+                                md5sum=_md5,
                             )
                             _close = getattr(_src_reg, "close", None)
                             if callable(_close):

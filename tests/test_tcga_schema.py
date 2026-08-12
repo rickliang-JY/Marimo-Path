@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sqlite3
+from datetime import datetime
 
 import pytest
+import sqlalchemy as sa
 
 from hescope.db import get_engine
 from hescope.tcga_schema import (
     TcgaCatalog,
+    TcgaFile,
     hits_to_rows,
     parse_barcode,
     storage_relpath,
@@ -292,3 +296,82 @@ def test_migration_without_a_catalog_is_not_an_error(tmp_path, capsys):
     assert main(["--db", db_url, "migrate-tcga-catalog",
                  "--catalog-db", str(tmp_path / "absent.db")]) == 0
     assert "nothing to migrate" in capsys.readouterr().out
+
+
+def test_migrate_tcga_catalog_preserves_first_seen_at_from_the_source(
+    tmp_path, rows, capsys
+):
+    """R-3, and the exact defect that lost 25 hours of provenance on all 50
+    rows of the real database: ``migrate-tcga-catalog`` used to SELECT the
+    flat catalog without ``first_seen_at`` at all, so every freshly-imported
+    ``TcgaFile`` fell back to the ORM's ``default=_utcnow`` -- the moment the
+    import ran, not the moment the flat catalog first saw the file. This
+    compares a SOURCE value (the flat catalog's backdated ``first_seen_at``)
+    to a DESTINATION value (the same row's ``first_seen_at`` after import),
+    not a count -- five count-asserting tests already existed and missed this
+    exact bug.
+    """
+    from hescope.cli import main
+    from hescope.db import get_engine
+
+    _flat_catalog(tmp_path, rows)
+    fid = rows[0]["file_id"]
+    backdated = "2020-06-15T08:00:00.123456+00:00"
+    con = sqlite3.connect(str(tmp_path / "catalog.db"))
+    con.execute(
+        "UPDATE tcga_slides SET first_seen_at = ? WHERE file_id = ?",
+        (backdated, fid),
+    )
+    con.commit()
+    con.close()
+
+    db_url = f"sqlite:///{tmp_path / 'main.db'}"
+    main(["--db", db_url, "init"])
+    capsys.readouterr()
+    assert main([
+        "--db", db_url, "migrate-tcga-catalog",
+        "--catalog-db", str(tmp_path / "catalog.db"),
+    ]) == 0
+
+    engine = get_engine(db_url)
+    with engine.connect() as conn:
+        dest = conn.execute(
+            sa.text("SELECT first_seen_at FROM tcga_files WHERE file_id=:f"),
+            {"f": fid},
+        ).scalar_one()
+    assert str(dest) == "2020-06-15 08:00:00.123456", (
+        "tcga_files.first_seen_at must equal the SOURCE catalog's value "
+        f"exactly; got {dest!r} (source was {backdated!r})"
+    )
+
+
+def test_upsert_rows_preserves_a_given_first_seen_at(catalog):
+    """Unit-level companion to the CLI-integration test above: TcgaCatalog
+    .upsert_rows must use a caller-supplied first_seen_at for a NEW row
+    instead of always defaulting to 'now'."""
+    given = datetime(2019, 3, 4, 5, 6, 7)
+    catalog.upsert_rows([
+        {
+            "file_id": "f1", "file_name": "f1.svs", "file_size": 1,
+            "project_id": "TCGA-BRCA", "case_submitter_id": "TCGA-AA-0001",
+            "sample_id": "TCGA-AA-0001-01A", "first_seen_at": given,
+        }
+    ])
+    with sa.orm.Session(catalog.engine) as s:
+        rec = s.get(TcgaFile, "f1")
+        assert rec.first_seen_at == given
+
+
+def test_mark_downloaded_on_unknown_id_returns_false_and_writes_nothing(catalog, tmp_path):
+    """Defect 2.4: TcgaCatalog.mark_downloaded on an unknown file_id used to
+    invent a metadata-free TcgaFile row (hescope/tcga_schema.py:370-379) that
+    then counted as 'downloaded' with no project/case/sample context at all.
+    Must return False and leave the table untouched."""
+    ghost = tmp_path / "ghost.svs"
+    ghost.write_bytes(b"x")
+
+    result = catalog.mark_downloaded("no-such-file-id", str(ghost))
+
+    assert result is False
+    assert catalog.stats()["files"] == 0
+    assert catalog.local_file("no-such-file-id") is None

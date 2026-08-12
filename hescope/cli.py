@@ -304,7 +304,8 @@ def _cmd_dedupe_slides(engine, dry_run: bool = False) -> int:
 def _cmd_migrate(engine, dry_run: bool) -> int:
     """Apply pending schema migrations, or (``--dry-run``) report what would
     run without opening a write transaction or touching the database."""
-    from .migrations import migrate, plan_migration_2
+    from .migrations import migrate, plan_migration_2, plan_migration_3
+    from .tcga_schema import plan_init_tcga_schema
 
     if dry_run:
         # A plain get_engine(url) flips journal_mode to WAL (a persistent
@@ -324,6 +325,11 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
         # init_db itself runs (see its docstring), so this cannot drift from
         # what `migrate` (no --dry-run) actually does.
         init_plan = plan_init_db(ro_engine)
+        # Same gap, TCGA side: migrate() also self-containedly calls
+        # init_tcga_schema (migration 3's self-containment, mirroring
+        # init_db's) -- see plan_init_tcga_schema's docstring for the
+        # measured under-report this closes.
+        tcga_init_plan = plan_init_tcga_schema(ro_engine)
         report = migrate(ro_engine, dry_run=True)
 
         init_db_changes = False
@@ -337,6 +343,11 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
             init_db_changes = True
         for stmt in init_plan["create_index_statements"]:
             print(f"would run: {stmt}")
+            init_db_changes = True
+        for table_name in tcga_init_plan["new_tables"]:
+            indexes = tcga_init_plan["new_table_indexes"].get(table_name, [])
+            suffix = f" (with index(es): {', '.join(indexes)})" if indexes else ""
+            print(f"would create table: {table_name}{suffix}")
             init_db_changes = True
 
         if not report.skipped and not init_db_changes:
@@ -360,10 +371,29 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
                     f"{mig2['duplicate_content_rows']} duplicate-content row(s) skipped, "
                     f"{mig2['rois_backfilled']} roi(s) with bbox backfilled"
                 )
+            # Migration 3's FK + backfill counts (BUILD-PLAN-DB.md Phase 2's
+            # "done when" report), same shared-computation guarantee as
+            # migration 2's block above (see hescope.migrations.plan_migration_3).
+            if item.startswith("3:"):
+                with ro_engine.connect() as ro_conn:
+                    mig3 = plan_migration_3(ro_conn)
+                fk_note = (
+                    "already present" if mig3["fk_present"]
+                    else "would be added" if mig3["tcga_files_exists"]
+                    else "n/a (tcga_files does not exist yet)"
+                )
+                print(
+                    f"  tcga_files.slide_id foreign key: {fk_note}; "
+                    f"of {mig3['with_local_path']} downloaded file(s), "
+                    f"{mig3['already_linked']} already linked, "
+                    f"would link {mig3['would_link']}, "
+                    f"{mig3['could_not_link']} could not be linked"
+                )
+        total_new_tables = len(init_plan["new_tables"]) + len(tcga_init_plan["new_tables"])
         print(
             f"dry run: would go from version {report.from_version} to "
             f"version {report.to_version} ({len(report.skipped)} pending migration(s), "
-            f"{len(init_plan['new_tables'])} new table(s), "
+            f"{total_new_tables} new table(s), "
             f"{len(init_plan['alter_statements'])} new column(s), "
             f"{len(init_plan['create_index_statements'])} new index(es) from init_db); "
             "nothing was changed"
@@ -423,7 +453,8 @@ def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> 
     try:
         rows = con.execute(
             "SELECT file_id, file_name, file_size, project_id, "
-            "case_submitter_id, sample_type, primary_site, local_path, md5sum "
+            "case_submitter_id, sample_type, primary_site, local_path, md5sum, "
+            "first_seen_at "
             "FROM tcga_slides"
         ).fetchall()
     except sqlite3.Error as exc:
@@ -433,7 +464,7 @@ def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> 
         con.close()
 
     prepared, downloaded = [], []
-    for (fid, fname, fsize, pid, case_id, stype, site, lpath, md5) in rows:
+    for (fid, fname, fsize, pid, case_id, stype, site, lpath, md5, first_seen) in rows:
         bc = parse_barcode(fname)
         prepared.append(
             {
@@ -449,6 +480,12 @@ def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> 
                 "tissue_type": None, "primary_site": site,
                 "project_name": None, "disease_type": None,
                 "program": bc.program, "case_uuid": None,
+                # The flat catalog's OWN discovery time -- carried through so
+                # TcgaCatalog.upsert_rows can use it instead of defaulting to
+                # "now" (R-3: this is the exact defect that reset every
+                # imported row's first_seen_at and lost 25 hours of
+                # provenance across all 50 rows of the real database).
+                "first_seen_at": first_seen,
             }
         )
         if lpath:

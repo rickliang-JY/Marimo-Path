@@ -33,7 +33,7 @@ import sqlalchemy as sa
 
 from .identity import content_key
 
-SCHEMA_VERSION = 2  # bumped by each phase that adds a migration
+SCHEMA_VERSION = 3  # bumped by each phase that adds a migration
 
 
 def _utcnow() -> datetime:
@@ -276,6 +276,248 @@ def _migration_2_apply(conn: sa.Connection) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Migration 3: TCGA download -> storage -> injection (BUILD-PLAN-DB.md Phase 2)
+# ---------------------------------------------------------------------------
+
+#: Column list shared by the table-rebuild's CREATE/INSERT and by every raw
+#: SELECT/UPDATE below -- one definition so the rebuild and the backfill
+#: cannot silently drift onto different column sets.
+_TCGA_FILES_COLUMNS = (
+    "file_id", "file_name", "file_size", "md5sum", "sample_id",
+    "case_submitter_id", "project_id", "local_path", "downloaded_at",
+    "first_seen_at", "slide_id",
+)
+
+
+def _tcga_files_has_slide_fk(conn: sa.Connection) -> bool:
+    """Whether ``tcga_files.slide_id`` already carries a REAL foreign key to
+    ``slides(id)`` at the SQLite level (``PRAGMA foreign_key_list``, not the
+    ORM model -- ``TcgaFile`` deliberately does not declare one; see
+    :func:`_rebuild_tcga_files_with_slide_fk`'s docstring for why). ``False``
+    when the table does not exist at all, so the caller's "would create it
+    WITH the fk" and "would add the fk to what is already there" both read
+    the same signal."""
+    if not sa.inspect(conn).has_table("tcga_files"):
+        return False
+    rows = conn.execute(sa.text('PRAGMA foreign_key_list("tcga_files")')).all()
+    # PRAGMA foreign_key_list columns: (id, seq, table, from, to, on_update,
+    # on_delete, match)
+    return any(r[2] == "slides" and r[3] == "slide_id" for r in rows)
+
+
+def _rebuild_tcga_files_with_slide_fk(conn: sa.Connection) -> None:
+    """Add a REAL ``FOREIGN KEY(slide_id) REFERENCES slides(id)`` to
+    ``tcga_files`` (defect 2.1: it was indexed but unconstrained).
+
+    SQLite has no ``ALTER TABLE ... ADD CONSTRAINT``: adding a table-level
+    constraint after the fact means the documented SQLite technique --
+    create a new table with the constraint, copy every row across, drop the
+    old table, rename the new one into place -- inside THIS migration's own
+    transaction, so a failure partway rolls the whole thing back (the same
+    guarantee ``engine.begin()`` already gives every other migration; see
+    ``hescope.db``'s pragma hook for why DDL here is transactional at all).
+    All columns and all data are preserved exactly; only the constraint (and
+    the indexes SQLite drops along with the table) are re-created -- this is
+    additive in effect, even though the mechanism is a drop (R-4's intent is
+    "old readers keep working, no data lost", both of which hold here: same
+    table name, same columns, same rows, same indexes, once this returns).
+
+    ``TcgaFile.slide_id`` (the ORM model, ``hescope/tcga_schema.py``) does
+    NOT declare this ``ForeignKey`` itself, deliberately: ``TcgaFile`` lives
+    on ``TcgaBase``, a SEPARATE ``DeclarativeBase`` from ``slides``'
+    ``hescope.db.Base`` (by design -- see ``tcga_schema.py``'s module
+    docstring), and a cross-``MetaData`` ``ForeignKey`` makes
+    ``create_all()`` raise ``NoReferencedTableError`` the moment it tries to
+    topologically sort tables to create (measured: any ``TcgaBase.metadata
+    .create_all(engine)`` call, on ANY database, fresh or not, raises this
+    the instant the model gains ``ForeignKey("slides.id")`` -- confirmed
+    against a two-``DeclarativeBase`` reproduction of exactly this shape).
+    So the constraint is added here, in raw SQL, uniformly for every
+    database this migration ever runs against -- a brand-new ``tcga_files``
+    ``init_tcga_schema`` just created (see :func:`migrate`'s docstring: it
+    calls ``init_tcga_schema`` first, the same self-containment
+    ``init_db`` already gets) rebuilds just as an old one with 50 rows does;
+    :func:`_tcga_files_has_slide_fk` makes a second run a no-op either way.
+    """
+    conn.execute(sa.text("DROP TABLE IF EXISTS tcga_files__mig3_rebuild"))
+    conn.execute(
+        sa.text(
+            "CREATE TABLE tcga_files__mig3_rebuild ("
+            "file_id VARCHAR(64) NOT NULL, "
+            "file_name VARCHAR(512), "
+            "file_size INTEGER, "
+            "md5sum VARCHAR(64), "
+            "sample_id VARCHAR(64), "
+            "case_submitter_id VARCHAR(64), "
+            "project_id VARCHAR(64), "
+            "local_path VARCHAR(1024), "
+            "downloaded_at DATETIME, "
+            "first_seen_at DATETIME NOT NULL, "
+            "slide_id INTEGER, "
+            "PRIMARY KEY (file_id), "
+            "FOREIGN KEY(sample_id) REFERENCES tcga_samples (sample_id), "
+            "FOREIGN KEY(slide_id) REFERENCES slides (id) ON DELETE SET NULL"
+            ")"
+        )
+    )
+    cols = ", ".join(_TCGA_FILES_COLUMNS)
+    conn.execute(
+        sa.text(
+            f"INSERT INTO tcga_files__mig3_rebuild ({cols}) "
+            f"SELECT {cols} FROM tcga_files"
+        )
+    )
+    conn.execute(sa.text("DROP TABLE tcga_files"))
+    conn.execute(
+        sa.text("ALTER TABLE tcga_files__mig3_rebuild RENAME TO tcga_files")
+    )
+    for col in ("case_submitter_id", "slide_id", "sample_id", "project_id"):
+        conn.execute(
+            sa.text(f'CREATE INDEX ix_tcga_files_{col} ON tcga_files ({col})')
+        )
+
+
+@dataclass(frozen=True)
+class _TcgaLinkCandidate:
+    """One ``tcga_files`` row with a recorded ``local_path``: what migration
+    3's backfill would do (:func:`plan_migration_3`) or does
+    (:func:`_migration_3_apply`) with it -- one computation shared by both,
+    for the same reason ``_SlideBackfill`` is shared by migration 2's plan
+    and apply (see that dataclass's docstring)."""
+
+    file_id: str
+    local_path: str
+    already_linked_slide_id: int | None
+    matched_slide_id: int | None
+
+
+def _find_slide_for_local_path(conn: sa.Connection, local_path: str) -> int | None:
+    """Look up (never create) the ``slides`` row a downloaded TCGA file
+    belongs to. Tried in order:
+
+    1. Content identity -- the same ``('sha256', content_key(path))`` Phase 1
+       backfills onto every resolving slide (:func:`_compute_slide_backfills`
+       above), so a file downloaded once and opened once already carries a
+       matching row most of the time.
+    2. An exact ``path`` match -- covers a slide row whose identity is NULL
+       (a duplicate-content group migration 2 deliberately leaves unlinked,
+       or a row from before Phase 1 ran at all) but whose ``path`` happens
+       to already equal this local_path, which is exactly the shape the real
+       database's one downloaded file is in: registered by the ordinary open
+       path before this migration exists.
+
+    Returns ``None`` -- never inserts a row -- when the path does not
+    resolve to a readable file, or resolves but matches nothing already
+    known. A brand-new ``slides`` row needs real ``width``/``height``, which
+    only opening the file can provide; inventing one with placeholder
+    dimensions here would be exactly defect 2.4's shape (a metadata-free row
+    standing in for a real one) transplanted from ``mark_downloaded`` into
+    this migration, just because a migration COULD write a row that
+    satisfies the new foreign key. A file downloaded but never opened is
+    correctly reported as "could not link", not silently half-registered.
+    """
+    ck = content_key(local_path)
+    if ck is not None:
+        key, _size = ck
+        found = conn.execute(
+            sa.text(
+                "SELECT id FROM slides WHERE identity_scheme='sha256' "
+                "AND identity_key=:key"
+            ),
+            {"key": key},
+        ).scalar()
+        if found is not None:
+            return int(found)
+    # Local import: this module must not depend on hescope.db at module
+    # level (see migrate()'s docstring on the import cycle that avoids).
+    from .db import normalize_slide_path
+
+    norm = normalize_slide_path(local_path)
+    found = conn.execute(
+        sa.text("SELECT id FROM slides WHERE path=:p"), {"p": norm}
+    ).scalar()
+    return int(found) if found is not None else None
+
+
+def _compute_tcga_link_candidates(conn: sa.Connection) -> list[_TcgaLinkCandidate]:
+    if not sa.inspect(conn).has_table("tcga_files"):
+        return []
+    rows = conn.execute(
+        sa.text(
+            "SELECT file_id, local_path, slide_id FROM tcga_files "
+            "WHERE local_path IS NOT NULL"
+        )
+    ).all()
+    out: list[_TcgaLinkCandidate] = []
+    for file_id, local_path, slide_id in rows:
+        if slide_id is not None:
+            out.append(_TcgaLinkCandidate(file_id, local_path, slide_id, slide_id))
+            continue
+        matched = _find_slide_for_local_path(conn, local_path)
+        out.append(_TcgaLinkCandidate(file_id, local_path, None, matched))
+    return out
+
+
+def plan_migration_3(conn: sa.Connection) -> dict:
+    """What migration 3 WOULD do, computed read-only. Powers ``hescope
+    migrate --dry-run``'s report, the same self-non-drifting contract as
+    :func:`plan_migration_2` (this and :func:`_migration_3_apply` both call
+    :func:`_compute_tcga_link_candidates` / :func:`_tcga_files_has_slide_fk`,
+    so the preview cannot say something different from what running for
+    real would do).
+
+    Returns ``{"tcga_files_exists": bool, "fk_present": bool,
+    "with_local_path": N, "already_linked": N, "would_link": N,
+    "could_not_link": N}``. ``fk_present`` is meaningless (``False``) when
+    ``tcga_files_exists`` is ``False`` -- there is no table to have a
+    constraint on yet.
+    """
+    exists = sa.inspect(conn).has_table("tcga_files")
+    candidates = _compute_tcga_link_candidates(conn)
+    already_linked = sum(1 for c in candidates if c.already_linked_slide_id is not None)
+    would_link = sum(
+        1 for c in candidates
+        if c.already_linked_slide_id is None and c.matched_slide_id is not None
+    )
+    could_not_link = sum(
+        1 for c in candidates
+        if c.already_linked_slide_id is None and c.matched_slide_id is None
+    )
+    return {
+        "tcga_files_exists": exists,
+        "fk_present": _tcga_files_has_slide_fk(conn),
+        "with_local_path": len(candidates),
+        "already_linked": already_linked,
+        "would_link": would_link,
+        "could_not_link": could_not_link,
+    }
+
+
+def _migration_3_apply(conn: sa.Connection) -> None:
+    """TCGA download -> storage -> injection (BUILD-PLAN-DB.md Phase 2).
+
+    ``tcga_files`` itself is created by ``init_tcga_schema`` (called by
+    :func:`migrate` before any migration runs -- see that function's
+    docstring, the same self-containment fix migration 2 already needed for
+    ``slide_files``), so by the time this runs the table always exists,
+    fresh or legacy. This function's job is (1) give ``slide_id`` a real
+    foreign key, via a table rebuild since SQLite cannot ``ALTER TABLE ADD
+    CONSTRAINT`` (see :func:`_rebuild_tcga_files_with_slide_fk`), and (2)
+    backfill ``slide_id`` for every row whose ``local_path`` resolves to an
+    already-registered slide -- never inventing one (see
+    :func:`_find_slide_for_local_path`'s docstring on why not).
+    """
+    if not _tcga_files_has_slide_fk(conn):
+        _rebuild_tcga_files_with_slide_fk(conn)
+    for c in _compute_tcga_link_candidates(conn):
+        if c.already_linked_slide_id is None and c.matched_slide_id is not None:
+            conn.execute(
+                sa.text("UPDATE tcga_files SET slide_id=:sid WHERE file_id=:fid"),
+                {"sid": c.matched_slide_id, "fid": c.file_id},
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -286,6 +528,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=2,
         name="the SVS <-> ROI relationship: slide identity, slide_files, roi bbox columns",
         apply=_migration_2_apply,
+    ),
+    Migration(
+        version=3,
+        name="TCGA download -> storage -> injection: a real FK on tcga_files.slide_id, and the backfill",
+        apply=_migration_3_apply,
     ),
 )
 
@@ -363,19 +610,25 @@ class MigrationReport:
 def migrate(engine: sa.Engine, *, dry_run: bool = False) -> MigrationReport:
     """Apply every pending migration, each in its own transaction.
 
-    Calls ``hescope.db.init_db(engine)`` first (unless ``dry_run``) so this
-    function is self-contained: migration 2's DDL (``slide_files``, the
-    identity columns/index, the bbox columns) is declared on the ORM models
-    and created by ``init_db``'s additive ``create_all`` + ``ALTER TABLE``
-    path, not by this module (see ``_migration_2_apply``'s docstring) --
-    calling ``migrate()`` without an ``init_db`` first used to raise
+    Calls ``hescope.db.init_db(engine)`` AND ``hescope.tcga_schema
+    .init_tcga_schema(engine)`` first (unless ``dry_run``) so this function
+    is self-contained: migration 2's DDL (``slide_files``, the identity
+    columns/index, the bbox columns) is declared on the core ORM models and
+    created by ``init_db``'s additive ``create_all`` + ``ALTER TABLE`` path,
+    not by this module (see ``_migration_2_apply``'s docstring) -- calling
+    ``migrate()`` without an ``init_db`` first used to raise
     ``sqlite3.OperationalError: no such table: slide_files`` and leave the
     version stuck at 1, on any legacy-schema database (measured; see
     ``tests/test_migrations.py::test_migrate_is_self_contained_...``).
-    ``init_db`` is idempotent and additive-only (R-4), so calling it here
-    even when ``hescope.cli`` has already called it once is a no-op, not a
-    double-write. Imported locally (not at module top) to avoid a
-    module-level import cycle with ``hescope.db``.
+    Migration 3 needs the same guarantee for ``tcga_files`` (normally
+    created lazily, only when something instantiates a ``TcgaCatalog`` --
+    ``init_tcga_schema`` here means ``migrate()`` alone, with no TCGA code
+    ever having run against this database, still reaches SCHEMA_VERSION;
+    see ``tests/test_migrations.py::test_migrate_reaches_schema_version_with_no_prior_tcga_tables``).
+    Both are idempotent and additive-only (R-4), so calling them here even
+    when ``hescope.cli`` has already called ``init_db`` once is a no-op, not
+    a double-write. Imported locally (not at module top) to avoid a
+    module-level import cycle with ``hescope.db`` / ``hescope.tcga_schema``.
 
     A migration that raises rolls back ONLY that migration's transaction
     (``schema_migrations`` included, since the table is created inside the
@@ -383,20 +636,24 @@ def migrate(engine: sa.Engine, *, dry_run: bool = False) -> MigrationReport:
     migrations already committed before it stay committed, and the ones
     after it are reported in ``skipped``, never attempted.
 
-    ``dry_run=True`` never calls ``init_db``, never opens a write
-    transaction, never calls any migration's ``apply``, and never touches
-    ``schema_migrations`` — it only reads the current version and computes
-    what running for real would do. Safe to call against a database this
-    process must never write to (R-1): point it at a copy. (The CLI's
-    ``--dry-run`` path additionally previews what ``init_db`` itself would
-    do, via ``hescope.db.plan_init_db`` against a read-only engine — see
-    ``hescope.cli._cmd_migrate`` — since this function's own dry run does
-    not touch ``init_db`` at all.)
+    ``dry_run=True`` never calls ``init_db`` or ``init_tcga_schema``, never
+    opens a write transaction, never calls any migration's ``apply``, and
+    never touches ``schema_migrations`` — it only reads the current version
+    and computes what running for real would do. Safe to call against a
+    database this process must never write to (R-1): point it at a copy.
+    (The CLI's ``--dry-run`` path additionally previews what ``init_db``
+    itself would do, via ``hescope.db.plan_init_db`` against a read-only
+    engine — see ``hescope.cli._cmd_migrate`` — since this function's own
+    dry run does not touch ``init_db`` at all; migration 3's own preview,
+    :func:`plan_migration_3`, reports ``tcga_files_exists`` for the
+    equivalent gap on the TCGA side.)
     """
     if not dry_run:
         from .db import init_db
+        from .tcga_schema import init_tcga_schema
 
         init_db(engine)
+        init_tcga_schema(engine)
 
     from_version = current_version(engine)
     todo = pending(engine)

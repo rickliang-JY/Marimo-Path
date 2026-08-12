@@ -652,6 +652,7 @@ class SlideRepo:
         mpp: float | None = None,
         extra: dict | None = None,
         identity: tuple[str, str] | None = None,
+        md5sum: str | None = None,
         report: bool = False,
     ) -> int | RegisterResult:
         """Register a slide. Idempotent on identity, not on ``path``.
@@ -672,6 +673,14 @@ class SlideRepo:
         ``extra`` is only written when given: omitting the argument is not a
         request to clear the column, and both production callers omit it on
         every slide open.
+
+        ``md5sum`` (BUILD-PLAN-DB.md Phase 2): the GDC-supplied checksum for
+        a TCGA download, stored on ``slides.md5sum`` -- distinct from
+        ``identity_key``, which is this project's own head/tail content hash
+        (:func:`hescope.identity.content_key`), not the GDC md5. Same
+        "omitting is not clearing" contract as ``extra``: a plain local open
+        (no md5 available) must not blank out a value a download already
+        recorded.
 
         ``report=True`` returns a :class:`RegisterResult` (``id``,
         ``inserted``) instead of a bare ``id`` -- pass it when the caller
@@ -735,6 +744,7 @@ class SlideRepo:
             identity_scheme=scheme,
             identity_key=key,
             file_size=file_size,
+            md5sum=md5sum,
         )
 
         def _upsert_by_identity(s: Session) -> tuple[int, bool]:
@@ -755,6 +765,8 @@ class SlideRepo:
             }
             if extra is not None:
                 set_["extra_json"] = ins.excluded.extra_json
+            if md5sum is not None:
+                set_["md5sum"] = ins.excluded.md5sum
             stmt = ins.on_conflict_do_update(
                 index_elements=[Slide.identity_scheme, Slide.identity_key],
                 index_where=Slide.identity_scheme.is_not(None),
@@ -786,6 +798,8 @@ class SlideRepo:
                 set_["identity_key"] = ins.excluded.identity_key
             if extra is not None:
                 set_["extra_json"] = ins.excluded.extra_json
+            if md5sum is not None:
+                set_["md5sum"] = ins.excluded.md5sum
             stmt = ins.on_conflict_do_update(
                 index_elements=[Slide.path], set_=set_
             )

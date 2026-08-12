@@ -52,7 +52,14 @@ def merge_download_state(
 def records_to_rows(records: Iterable[SlideRecord]) -> list[dict]:
     """Rows for mo.ui.table: file_name, project_id, case_submitter_id,
     sample_type, file_size (human-readable MB), downloaded (yes/no).
-    file_id is included so a selected row can be mapped back to a record."""
+    file_id is included so a selected row can be mapped back to a record.
+
+    ``md5sum`` is carried too so a selected row's ``_sel[0].get("md5sum")``
+    in app.py can actually resolve the GDC checksum -- before this, the key
+    was absent entirely, so that lookup's first branch was permanently dead
+    and every download fell through to an O(n) scan of the local catalog
+    (BUILD-PLAN-DB.md Phase 2, defect 2.3).
+    """
     return [
         {
             "file_id": r.file_id,
@@ -62,6 +69,7 @@ def records_to_rows(records: Iterable[SlideRecord]) -> list[dict]:
             "sample_type": r.sample_type or "",
             "file_size": human_size(r.file_size),
             "downloaded": "yes" if r.local_path else "no",
+            "md5sum": r.md5sum,
         }
         for r in records
     ]
