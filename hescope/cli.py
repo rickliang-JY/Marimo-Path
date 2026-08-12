@@ -285,7 +285,7 @@ def _cmd_dedupe_slides(engine, dry_run: bool = False) -> int:
 def _cmd_migrate(engine, dry_run: bool) -> int:
     """Apply pending schema migrations, or (``--dry-run``) report what would
     run without opening a write transaction or touching the database."""
-    from .migrations import migrate
+    from .migrations import migrate, plan_migration_2
 
     if dry_run:
         # A plain get_engine(url) flips journal_mode to WAL (a persistent
@@ -325,6 +325,21 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
             return 0
         for item in report.skipped:
             print(f"would apply migration {item}")
+            # Migration 2's backfill counts (BUILD-PLAN-DB.md Phase 1's
+            # "done when" report) -- migrate(dry_run=True) never calls a
+            # migration's apply(), so this preview is computed the same way
+            # plan_init_db previews init_db: a read-only pass over the SAME
+            # rows/files apply() would touch, sharing its computation (see
+            # hescope.migrations.plan_migration_2) so the two cannot drift.
+            if item.startswith("2:"):
+                with ro_engine.connect() as ro_conn:
+                    mig2 = plan_migration_2(ro_conn)
+                print(
+                    f"  would write {mig2['slide_files']} slide_files row(s) "
+                    f"({mig2['missing']} marked missing), "
+                    f"{mig2['distinct_identities']} distinct identity(ies), "
+                    f"{mig2['rois_backfilled']} roi(s) with bbox backfilled"
+                )
         print(
             f"dry run: would go from version {report.from_version} to "
             f"version {report.to_version} ({len(report.skipped)} pending migration(s), "

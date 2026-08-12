@@ -96,11 +96,17 @@ def test_ingest_missing_path_errors(db_url, capsys):
 
 
 def test_ingest_single_file_and_recursive(db_url, tmp_path, capsys):
-    arr = np.zeros((32, 32, 3), dtype=np.uint8)
-    Image.fromarray(arr, "RGB").save(tmp_path / "one.png")
+    # distinct pixel content for each file: registration now dedups on
+    # CONTENT (hescope.identity), not path, so two byte-identical files
+    # would otherwise collapse into one slide and defeat this test's point.
+    Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8), "RGB").save(
+        tmp_path / "one.png"
+    )
     sub = tmp_path / "sub"
     sub.mkdir()
-    Image.fromarray(arr, "RGB").save(sub / "two.png")
+    Image.fromarray(np.full((32, 32, 3), 255, dtype=np.uint8), "RGB").save(
+        sub / "two.png"
+    )
 
     main(["--db", db_url, "init"])
     # single file ingest
@@ -455,6 +461,30 @@ def test_migrate_dry_run_names_every_object_init_db_would_create(tmp_path, capsy
             f"column {name!r} was added by the real `migrate` run but never "
             "named in `migrate --dry-run`'s output"
         )
+
+
+def test_migrate_dry_run_reports_migration_2_backfill_counts(tmp_path, capsys):
+    """`migrate --dry-run`'s report for migration 2 (Phase 1: the SVS <-> ROI
+    relationship) must name the counts it would write -- not just that
+    migration 2 is pending -- so a reviewer can see the blast radius before
+    running it against the real database (the same reasoning as
+    `plan_duplicate_slide_merge`, R07-19)."""
+    narrow_db = tmp_path / "narrow.db"
+    _build_narrow_db(narrow_db)  # 1 slide (path 's.svs', does not resolve), 1 roi
+
+    assert main(["--db", f"sqlite:///{narrow_db}", "migrate", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+
+    assert "would apply migration 2" in out
+    assert "would write 1 slide_files row(s) (1 marked missing)" in out
+    assert "0 distinct identity(ies)" in out
+    assert "1 roi(s) with bbox backfilled" in out
+
+    # and the dry run really did not write anything
+    con = sa.create_engine(f"sqlite:///{narrow_db}")
+    with con.connect() as c:
+        assert "slide_files" not in sa.inspect(c).get_table_names()
+    con.dispose()
 
 
 def test_migrate_dry_run_does_not_mutate_a_non_wal_database(tmp_path, capsys):

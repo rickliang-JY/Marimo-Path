@@ -34,6 +34,7 @@ import time
 
 import marimo as mo
 import pytest
+from PIL import Image
 
 from hescope.demo import generate_demo_slide
 
@@ -57,11 +58,28 @@ def _cell(marker: str):
 
 
 @pytest.fixture(scope="module")
-def notebook_defs():
+def notebook_defs(tmp_path_factory):
     import app as appmod
 
     _outputs, defs = appmod.app.run()
-    defs["open_slide_path"](str(generate_demo_slide("assets/demo_he.png")))
+    # A PRIVATE copy, not assets/demo_he.png itself: slide identity is now
+    # content, not path (BUILD-PLAN-DB.md Phase 1), so reusing the shared
+    # demo verbatim would fold this module's "Run heatmap" clicks into the
+    # SAME database row the canonical demo slide uses over the suite's
+    # shared session database -- which tests/test_interaction_trace.py
+    # asserts an exact interaction count against. One pixel is perturbed
+    # after generation so the content identity differs; every statistic a
+    # heatmap sweep measures is smoothed over thousands of pixels and
+    # unaffected by it.
+    demo_path = tmp_path_factory.mktemp("hm_job") / "demo_he.png"
+    generate_demo_slide(demo_path)
+    with Image.open(demo_path) as img:
+        img = img.convert("RGB")
+        px = img.load()
+        r, g, b = px[0, 0]
+        px[0, 0] = ((r + 1) % 256, g, b)
+        img.save(demo_path)
+    defs["open_slide_path"](str(demo_path))
     return defs
 
 

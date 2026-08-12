@@ -62,6 +62,34 @@ def notebook_defs():
     return defs
 
 
+def _private_demo_slide(path) -> str:
+    """Write a demo-shaped slide at ``path`` that is content-DISTINCT from
+    the shared ``assets/demo_he.png`` (BUILD-PLAN-DB.md Phase 1: slide
+    identity is now content, not path -- reusing ``generate_demo_slide``'s
+    deterministic output verbatim would silently fold this file's "Run
+    heatmap" sweeps into the SAME database row the canonical demo slide
+    uses, over the suite's shared session database, which
+    ``tests/test_interaction_trace.py`` asserts an exact interaction count
+    against). One pixel is perturbed after generation so the bytes -- and so
+    the content identity -- differ, while every statistic a heatmap sweep
+    measures (smoothed over thousands of pixels) is unaffected."""
+    generate_demo_slide(path)
+    with Image.open(path) as img:
+        img = img.convert("RGB")
+        px = img.load()
+        r, g, b = px[0, 0]
+        px[0, 0] = ((r + 1) % 256, g, b)
+        img.save(path)
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def demo_path(tmp_path_factory):
+    """One private, content-distinct copy of the demo slide for this whole
+    module -- see :func:`_private_demo_slide`."""
+    return _private_demo_slide(tmp_path_factory.mktemp("hm_provenance") / "demo_he.png")
+
+
 @pytest.fixture(scope="module")
 def slide_b(tmp_path_factory):
     """A second slide, deliberately far smaller than the demo one."""
@@ -100,9 +128,9 @@ def _run_ticker(defs):
     return published
 
 
-def _sweep_slide_a_then_open(defs, next_slide):
+def _sweep_slide_a_then_open(defs, next_slide, demo_path):
     """Run a real sweep on the demo slide, then open ``next_slide`` first."""
-    defs["open_slide_path"](str(generate_demo_slide("assets/demo_he.png")))
+    defs["open_slide_path"](demo_path)
     slide_a = defs["get_source"]()
     defs["hm_metric_dropdown"]._update(["tissue_fraction"])
     defs["hm_run_button"]._update(object())  # the real click
@@ -116,10 +144,10 @@ def _sweep_slide_a_then_open(defs, next_slide):
 
 
 def test_a_sweep_that_outlives_its_slide_is_not_published_onto_the_next_one(
-    notebook_defs, slide_b
+    notebook_defs, slide_b, demo_path
 ):
     defs = notebook_defs
-    slide_a = _sweep_slide_a_then_open(defs, slide_b)
+    slide_a = _sweep_slide_a_then_open(defs, slide_b, demo_path)
     assert defs["get_source"]() is not slide_a
 
     published = _run_ticker(defs)
@@ -140,10 +168,10 @@ def test_a_sweep_that_outlives_its_slide_is_not_published_onto_the_next_one(
     assert defs["hm_job"]["msg"] is None
 
 
-def test_a_sweep_of_the_open_slide_is_still_published(notebook_defs):
+def test_a_sweep_of_the_open_slide_is_still_published(notebook_defs, demo_path):
     """Guard against the fix overreaching: the normal path must be untouched."""
     defs = notebook_defs
-    defs["open_slide_path"](str(generate_demo_slide("assets/demo_he.png")))
+    defs["open_slide_path"](demo_path)
     defs["hm_metric_dropdown"]._update(["tissue_fraction"])
     defs["hm_run_button"]._update(object())
     worker = defs["hm_job"]["thread"]
@@ -155,7 +183,7 @@ def test_a_sweep_of_the_open_slide_is_still_published(notebook_defs):
     assert published["msg"][0] == "success"
 
 
-def test_reopening_the_same_file_is_a_different_slide(notebook_defs):
+def test_reopening_the_same_file_is_a_different_slide(notebook_defs, demo_path):
     """The token is the SlideSource, not the path.
 
     Re-opening the same file builds a new SlideSource, and everything derived
@@ -165,8 +193,7 @@ def test_reopening_the_same_file_is_a_different_slide(notebook_defs):
     comparison and quietly reintroduce a weaker rule.
     """
     defs = notebook_defs
-    demo = str(generate_demo_slide("assets/demo_he.png"))
-    _sweep_slide_a_then_open(defs, demo)
+    _sweep_slide_a_then_open(defs, demo_path, demo_path)
 
     published = _run_ticker(defs)
 
@@ -175,7 +202,7 @@ def test_reopening_the_same_file_is_a_different_slide(notebook_defs):
 
 
 def test_a_finished_but_undrained_sweep_is_not_discarded_by_the_next_click(
-    notebook_defs,
+    notebook_defs, demo_path,
 ):
     """R07-17: the click resets the same three unsynchronised slots the worker
     just wrote, so a sweep that finished within the last second vanished.
@@ -185,7 +212,7 @@ def test_a_finished_but_undrained_sweep_is_not_discarded_by_the_next_click(
     supersedes it on the very next line.
     """
     defs = notebook_defs
-    defs["open_slide_path"](str(generate_demo_slide("assets/demo_he.png")))
+    defs["open_slide_path"](demo_path)
     defs["hm_metric_dropdown"]._update(["tissue_fraction"])
     defs["hm_run_button"]._update(object())
     defs["hm_job"]["thread"].join(timeout=300)

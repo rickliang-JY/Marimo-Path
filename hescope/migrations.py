@@ -24,13 +24,16 @@ no rename, no type change).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
 import sqlalchemy as sa
 
-SCHEMA_VERSION = 1  # bumped by each phase that adds a migration
+from .identity import content_key
+
+SCHEMA_VERSION = 2  # bumped by each phase that adds a migration
 
 
 def _utcnow() -> datetime:
@@ -38,6 +41,16 @@ def _utcnow() -> datetime:
     naive-but-UTC, since an aware datetime is silently stripped of its offset
     by SQLAlchemy's SQLite ``DATETIME`` binding)."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _db_datetime(dt: datetime) -> str:
+    """Render ``dt`` the same way SQLAlchemy's sqlite ``DATETIME`` type does
+    (``YYYY-MM-DD HH:MM:SS.ffffff``), by hand rather than by importing
+    ``hescope.db``'s ORM types -- this module must stay readable, and this
+    exact statement runnable, after the ORM models have moved on (see the
+    module docstring). Migrations write raw SQL, so nothing here relies on
+    SQLAlchemy's type-driven bind processing to get the format right."""
+    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 @dataclass(frozen=True)
@@ -66,11 +79,173 @@ def _migration_1_baseline(conn: sa.Connection) -> None:
     return None
 
 
+@dataclass(frozen=True)
+class _SlideBackfill:
+    """One row's worth of what migration 2 will write, computed once and
+    shared by :func:`_migration_2_apply` (which writes it) and
+    :func:`plan_migration_2` (which only counts it) -- so the dry-run report
+    can never drift from what the real run does (the same reason
+    ``hescope.db.plan_init_db`` and ``init_db`` share one computation)."""
+
+    slide_id: int
+    path: str
+    source_kind: str
+    created_at: object  # opaque: the exact raw value read from `slides`
+    identity_key: str | None
+    file_size: int | None
+    missing: bool
+
+
+def _compute_slide_backfills(conn: sa.Connection) -> list[_SlideBackfill]:
+    if not sa.inspect(conn).has_table("slides"):
+        # A dry run may preview an EMPTY database (no `init_db` call has run
+        # yet, for real or otherwise) -- `apply()` never hits this, since the
+        # real `migrate` command always runs `init_db(engine)` first, but the
+        # read-only preview must not crash just because nothing has created
+        # the table it wants to read from yet.
+        return []
+    rows = conn.execute(
+        sa.text("SELECT id, path, source_kind, created_at FROM slides")
+    ).all()
+    out: list[_SlideBackfill] = []
+    for slide_id, path, source_kind, created_at in rows:
+        ck = content_key(path) if path else None
+        if ck is None:
+            out.append(
+                _SlideBackfill(slide_id, path, source_kind, created_at, None, None, True)
+            )
+        else:
+            key, size = ck
+            out.append(
+                _SlideBackfill(slide_id, path, source_kind, created_at, key, size, False)
+            )
+    return out
+
+
+def _compute_roi_bbox_backfills(
+    conn: sa.Connection,
+) -> list[tuple[int, float, float, float, float]]:
+    if not sa.inspect(conn).has_table("rois"):
+        return []
+    out: list[tuple[int, float, float, float, float]] = []
+    for roi_id, bbox_json in conn.execute(
+        sa.text("SELECT id, bbox_json FROM rois")
+    ).all():
+        try:
+            x0, y0, x1, y1 = json.loads(bbox_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        out.append((roi_id, float(x0), float(y0), float(x1), float(y1)))
+    return out
+
+
+def plan_migration_2(conn: sa.Connection) -> dict:
+    """What migration 2's backfill WOULD write, computed read-only.
+
+    Returns ``{"slide_files": N, "missing": N, "distinct_identities": N,
+    "rois_backfilled": N}``. Powers ``hescope migrate --dry-run``'s report
+    (R-8: measured, not invented) -- see :func:`_compute_slide_backfills` /
+    :func:`_compute_roi_bbox_backfills`, which this and the real migration
+    both call, so the preview cannot say something different from what
+    running for real would do.
+    """
+    backfills = _compute_slide_backfills(conn)
+    identities = {b.identity_key for b in backfills if not b.missing}
+    return {
+        "slide_files": len(backfills),
+        "missing": sum(1 for b in backfills if b.missing),
+        "distinct_identities": len(identities),
+        "rois_backfilled": len(_compute_roi_bbox_backfills(conn)),
+    }
+
+
+def _migration_2_apply(conn: sa.Connection) -> None:
+    """The SVS <-> ROI relationship (BUILD-PLAN-DB.md Phase 1).
+
+    The schema itself -- ``slides.identity_scheme`` / ``identity_key`` /
+    ``file_size`` / ``md5sum``, the partial unique index on identity, the
+    ``slide_files`` table, and ``rois.bbox_x0..bbox_y1`` -- is declared on
+    the current ORM models (``hescope.db.Slide``, ``SlideFile``, ``ROI``)
+    and so is already created by ``init_db``'s additive ``create_all`` +
+    ``ALTER TABLE`` path BEFORE this function runs (``hescope.cli``'s
+    ``migrate`` command calls ``init_db(engine)`` then ``migrate(engine)``;
+    see this module's docstring for why that order is load-bearing and why
+    a migration does not re-derive DDL the ORM models already describe).
+    This function's job is the DATA that schema exists to hold: a
+    ``slide_files`` row for every existing slide, a computed identity for
+    every path that still resolves, and the four bbox columns for every
+    existing ROI.
+
+    Does NOT merge duplicate slides even when two rows resolve to the same
+    identity (the partial unique index would then reject the second
+    identity UPDATE) -- detecting duplicates is this migration's job, moving
+    ROIs between rows is a separate, reviewable, consented step
+    (``hescope dedupe-slides``, extended to identity is future work). A
+    slide whose identity UPDATE would collide is simply left with
+    ``identity_scheme``/``identity_key`` NULL, exactly like a slide whose
+    path does not resolve; both cases are diagnosable afterward by asking
+    which content hash existing rows disagree about, without this migration
+    having already destroyed the evidence.
+    """
+    now = _utcnow()
+    now_str = _db_datetime(now)
+    backfills = _compute_slide_backfills(conn)  # one pass; apply() and the
+    # dry-run preview both call this, but within one apply() we must not
+    # hash every file twice just to find duplicates before writing.
+    conflicting_identities: set[str] = set()
+    seen_identities: set[str] = set()
+    for b in backfills:
+        if not b.missing:
+            if b.identity_key in seen_identities:
+                conflicting_identities.add(b.identity_key)
+            seen_identities.add(b.identity_key)
+    for b in backfills:
+        first_seen = _db_datetime(b.created_at) if isinstance(b.created_at, datetime) else b.created_at
+        conn.execute(
+            sa.text(
+                "INSERT INTO slide_files "
+                "(slide_id, path, source_kind, first_seen_at, last_seen_at, missing_since) "
+                "VALUES (:slide_id, :path, :source_kind, :first_seen_at, :last_seen_at, "
+                ":missing_since) "
+                "ON CONFLICT(path) DO NOTHING"
+            ),
+            {
+                "slide_id": b.slide_id,
+                "path": b.path,
+                "source_kind": b.source_kind,
+                "first_seen_at": first_seen,
+                "last_seen_at": first_seen,
+                "missing_since": None if not b.missing else now_str,
+            },
+        )
+        if not b.missing and b.identity_key not in conflicting_identities:
+            conn.execute(
+                sa.text(
+                    "UPDATE slides SET identity_scheme='sha256', identity_key=:key, "
+                    "file_size=:size WHERE id=:id"
+                ),
+                {"key": b.identity_key, "size": b.file_size, "id": b.slide_id},
+            )
+    for roi_id, x0, y0, x1, y1 in _compute_roi_bbox_backfills(conn):
+        conn.execute(
+            sa.text(
+                "UPDATE rois SET bbox_x0=:x0, bbox_y0=:y0, bbox_x1=:x1, bbox_y1=:y1 "
+                "WHERE id=:id"
+            ),
+            {"x0": x0, "y0": y0, "x1": x1, "y1": y1, "id": roi_id},
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
         name="baseline schema (stamp only, no schema change)",
         apply=_migration_1_baseline,
+    ),
+    Migration(
+        version=2,
+        name="the SVS <-> ROI relationship: slide identity, slide_files, roi bbox columns",
+        apply=_migration_2_apply,
     ),
 )
 

@@ -14,16 +14,18 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Literal
 
 import sqlalchemy as sa
-from sqlalchemy import ForeignKey, String, Text, event, select
+from sqlalchemy import ForeignKey, Index, String, Text, event, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
 if TYPE_CHECKING:  # avoid a hard runtime dependency cycle with hescope.rois
     from .rois import ROI as ROIGeometry
 
+from .identity import slide_identity
 from .paths import resolve_runtime_dir
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -200,11 +202,33 @@ def normalize_slide_path(path: str | Path) -> str:
     Falls back to the input string if the path cannot be resolved (an
     unreachable network share, a name the OS rejects): a slightly worse key
     beats refusing to register the slide.
+
+    Defect 1.3: on Windows, a POSIX-absolute path that has no drive of its
+    own (``/mnt/nfs/slides/A1.svs`` -- the spelling a Linux-mounted network
+    share, or a path recorded by a workstation of a different OS, would use)
+    is not actually "absolute" to ``pathlib.PureWindowsPath`` (it has a root
+    but no drive), so ``.resolve()`` silently attaches THIS PROCESS's
+    current drive: measured, ``Path('/mnt/nfs/slides/A1.svs').resolve()`` on
+    this machine returns ``E:\\mnt\\nfs\\slides\\A1.svs``. Two workstations
+    on the same shared store then normalize the SAME file to two different
+    keys, splitting the store one slide per workstation -- silently, since
+    both keys are individually well-formed. Detected below and kept as the
+    original string: unresolved-but-self-consistent beats "resolved" but
+    reachable from nowhere else.
     """
+    raw = str(path)
     try:
-        return str(Path(path).expanduser().resolve())
+        resolved = str(Path(path).expanduser().resolve())
     except (OSError, ValueError, RuntimeError):
-        return str(path)
+        return raw
+    if os.name == "nt":
+        raw_win = PureWindowsPath(raw)
+        resolved_win = PureWindowsPath(resolved)
+        if not raw_win.drive and raw_win.root and resolved_win.drive:
+            # a rooted-but-driveless spelling that resolve() turned into a
+            # drive-qualified one -- exactly the foreign-path case above.
+            return raw
+    return resolved
 
 
 def plan_init_db(engine: sa.Engine, conn: sa.Connection | None = None) -> dict:
@@ -339,6 +363,22 @@ class Base(DeclarativeBase):
 
 class Slide(Base):
     __tablename__ = "slides"
+    __table_args__ = (
+        # Partial: many rows may carry identity_scheme IS NULL (a legacy row
+        # never enriched, or a path that never resolved during migration 2's
+        # backfill) and those must NOT collide with each other -- only rows
+        # that both carry a real scheme are compared for uniqueness. SQLite
+        # (and Postgres) support a partial unique index directly; this is
+        # the one construct in this schema that is sqlite-specific pending
+        # Phase 3's backend-portability audit.
+        Index(
+            "ux_slides_identity",
+            "identity_scheme",
+            "identity_key",
+            unique=True,
+            sqlite_where=sa.text("identity_scheme IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_kind: Mapped[str] = mapped_column(String(32), index=True)
@@ -349,14 +389,53 @@ class Slide(Base):
     mpp: Mapped[float | None] = mapped_column(nullable=True)
     extra_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    # Identity that does not assume a local file (see hescope.identity).
+    # ``path`` above stays and stays UNIQUE (R-4); it is now a cache of the
+    # most-recently-seen location, and ``slide_files`` is the durable record
+    # of every location this slide has been seen at.
+    identity_scheme: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    identity_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(nullable=True)
+    md5sum: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     rois: Mapped[list[ROI]] = relationship(
         back_populates="slide", cascade="all, delete-orphan", passive_deletes=True
     )
+    files: Mapped[list["SlideFile"]] = relationship(
+        back_populates="slide", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class SlideFile(Base):
+    """One location a slide has been seen at. Many rows, one ``slide_id`` --
+    the same content opened from a mapped drive, a UNC path and a symlink is
+    ONE slide with three of these, not three slides (defect 1.1)."""
+
+    __tablename__ = "slide_files"
+    __table_args__ = (Index("ix_slide_files_slide", "slide_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slide_id: Mapped[int] = mapped_column(
+        ForeignKey("slides.id", ondelete="CASCADE")
+    )
+    path: Mapped[str] = mapped_column(String(1024), unique=True)
+    source_kind: Mapped[str] = mapped_column(String(32))
+    first_seen_at: Mapped[datetime] = mapped_column()
+    last_seen_at: Mapped[datetime] = mapped_column()
+    missing_since: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    slide: Mapped[Slide] = relationship(back_populates="files")
 
 
 class ROI(Base):
     __tablename__ = "rois"
+    __table_args__ = (
+        # Powers ROIRepo.in_viewport: without this, "ROIs on screen" cannot
+        # be expressed in SQL at all while bbox lived only in bbox_json TEXT
+        # (defect 1.4) -- for_slide had to return every row and filter in
+        # Python, 138ms + 170KB at 5000 ROIs on every overlay re-render.
+        Index("ix_rois_slide_bbox", "slide_id", "bbox_x0", "bbox_x1"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     slide_id: Mapped[int] = mapped_column(
@@ -371,6 +450,14 @@ class ROI(Base):
     stats_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     magnification: Mapped[float | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    # A bbox the database can filter on -- bbox_json stays (R-4) as the
+    # exact-shape source; these four are a derived, queryable cache of it,
+    # written by the one place that writes bbox_json (ROIRepo.add / the
+    # migration-2 backfill), never independently.
+    bbox_x0: Mapped[float | None] = mapped_column(nullable=True)
+    bbox_y0: Mapped[float | None] = mapped_column(nullable=True)
+    bbox_x1: Mapped[float | None] = mapped_column(nullable=True)
+    bbox_y1: Mapped[float | None] = mapped_column(nullable=True)
 
     slide: Mapped[Slide] = relationship(back_populates="rois")
     agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="roi")
@@ -437,6 +524,22 @@ def _slide_dict(slide: Slide) -> dict:
         "mpp": slide.mpp,
         "extra_json": slide.extra_json,
         "created_at": _iso(slide.created_at),
+        "identity_scheme": slide.identity_scheme,
+        "identity_key": slide.identity_key,
+        "file_size": slide.file_size,
+        "md5sum": slide.md5sum,
+    }
+
+
+def _slide_file_dict(f: SlideFile) -> dict:
+    return {
+        "id": f.id,
+        "slide_id": f.slide_id,
+        "path": f.path,
+        "source_kind": f.source_kind,
+        "first_seen_at": _iso(f.first_seen_at),
+        "last_seen_at": _iso(f.last_seen_at),
+        "missing_since": _iso(f.missing_since),
     }
 
 
@@ -448,6 +551,10 @@ def _roi_dict(roi: ROI) -> dict:
         "points_json": roi.points_json,
         "bbox_json": roi.bbox_json,
         "bbox": [int(v) for v in json.loads(roi.bbox_json)],
+        "bbox_x0": roi.bbox_x0,
+        "bbox_y0": roi.bbox_y0,
+        "bbox_x1": roi.bbox_x1,
+        "bbox_y1": roi.bbox_y1,
         "label": roi.label,
         "notes": roi.notes,
         "patch_path": roi.patch_path,
@@ -498,33 +605,179 @@ class SlideRepo:
         height: int,
         mpp: float | None = None,
         extra: dict | None = None,
+        identity: tuple[str, str] | None = None,
     ) -> int:
-        """Register a slide. Idempotent on the unique ``path``: re-registering
-        the same FILE returns the existing id and refreshes mutable fields.
+        """Register a slide. Idempotent on identity, not on ``path``.
 
-        ``path`` is canonicalized (see ``normalize_slide_path``) so that two
-        spellings of one file cannot become two slide rows.
+        ``path`` is canonicalized (see ``normalize_slide_path``). Identity
+        resolves in this order: the ``identity`` argument, if given (pass
+        this for a slide with no readable local path yet, e.g. one opened
+        from a DICOMweb endpoint -- see ``hescope.identity.slide_identity``);
+        otherwise a content hash of ``path`` if it is readable
+        (``('sha256', ...)``); otherwise ``('path', path)`` as a last resort.
+        Re-registering the SAME identity from a NEW path updates the
+        existing row (``path`` becomes a cache of the most-recently-seen
+        location) rather than creating a second one -- this is what fixes
+        defect 1.1 (one file at three paths was three slide rows). It also
+        upserts the corresponding ``slide_files`` row (see
+        :meth:`_touch_slide_file`).
 
         ``extra`` is only written when given: omitting the argument is not a
         request to clear the column, and both production callers omit it on
-        every slide open."""
+        every slide open.
+
+        Race fix (defect 1.2): this used to be SELECT-by-path, then
+        INSERT-or-UPDATE in Python -- two concurrent callers could both see
+        "no row" from the SELECT and both attempt the INSERT; the loser
+        raised ``IntegrityError`` instead of folding into an UPDATE.
+        Measured against a bare (deferred) ``BEGIN`` -- the transaction
+        semantics this project used before ``hescope.db.get_engine``'s
+        ``BEGIN IMMEDIATE`` hook -- 8 concurrent registrations of ONE slide
+        raised ``IntegrityError`` between 2 and 7 times across repeated
+        runs (``tests/test_register_race.py`` reproduces this as a control).
+        Fixed here with a single ``INSERT ... ON CONFLICT DO UPDATE`` keyed
+        on the identity index, re-selected by identity afterward; a second
+        attempt keyed on ``path`` handles the legacy case of an
+        identity-less row already sitting at this exact path (there is
+        nothing for the identity-keyed upsert to conflict with in that
+        case, since a NULL ``identity_scheme`` never participates in the
+        partial unique index, so it would otherwise collide on ``path``
+        instead and raise).
+        """
         path = normalize_slide_path(path)
-        with Session(self.engine) as s:
-            slide = s.execute(
-                select(Slide).where(Slide.path == path)
-            ).scalar_one_or_none()
-            if slide is None:
-                slide = Slide(path=path)
-                s.add(slide)
-            slide.source_kind = source_kind
-            slide.name = name
-            slide.width = int(width)
-            slide.height = int(height)
-            slide.mpp = mpp
+        scheme, key = identity or slide_identity(source_kind, path=path) or ("path", path)
+        file_size: int | None = None
+        if scheme == "sha256":
+            try:
+                file_size = Path(path).stat().st_size
+            except OSError:
+                file_size = None
+        now = _utcnow()
+        values = dict(
+            source_kind=source_kind,
+            name=name,
+            path=path,
+            width=int(width),
+            height=int(height),
+            mpp=mpp,
+            extra_json=json.dumps(extra) if extra is not None else "{}",
+            created_at=now,
+            identity_scheme=scheme,
+            identity_key=key,
+            file_size=file_size,
+        )
+
+        def _upsert_by_identity(s: Session) -> int:
+            ins = sqlite_insert(Slide).values(**values)
+            set_ = {
+                "source_kind": ins.excluded.source_kind,
+                "name": ins.excluded.name,
+                "path": ins.excluded.path,
+                "width": ins.excluded.width,
+                "height": ins.excluded.height,
+                "mpp": ins.excluded.mpp,
+                "file_size": ins.excluded.file_size,
+            }
             if extra is not None:
-                slide.extra_json = json.dumps(extra)
-            s.commit()
-            return slide.id  # type: ignore[return-value]
+                set_["extra_json"] = ins.excluded.extra_json
+            stmt = ins.on_conflict_do_update(
+                index_elements=[Slide.identity_scheme, Slide.identity_key],
+                index_where=Slide.identity_scheme.is_not(None),
+                set_=set_,
+            )
+            s.execute(stmt)
+            return s.execute(
+                select(Slide.id).where(
+                    Slide.identity_scheme == scheme, Slide.identity_key == key
+                )
+            ).scalar_one()
+
+        def _upsert_by_path(s: Session) -> int:
+            ins = sqlite_insert(Slide).values(**values)
+            set_ = {
+                "source_kind": ins.excluded.source_kind,
+                "name": ins.excluded.name,
+                "width": ins.excluded.width,
+                "height": ins.excluded.height,
+                "mpp": ins.excluded.mpp,
+                "identity_scheme": ins.excluded.identity_scheme,
+                "identity_key": ins.excluded.identity_key,
+                "file_size": ins.excluded.file_size,
+            }
+            if extra is not None:
+                set_["extra_json"] = ins.excluded.extra_json
+            stmt = ins.on_conflict_do_update(
+                index_elements=[Slide.path], set_=set_
+            )
+            s.execute(stmt)
+            return s.execute(
+                select(Slide.id).where(Slide.path == path)
+            ).scalar_one()
+
+        try:
+            with Session(self.engine) as s:
+                slide_id = _upsert_by_identity(s)
+                self._touch_slide_file(s, slide_id, path, source_kind, now)
+                s.commit()
+                return slide_id
+        except sa.exc.IntegrityError:
+            # The identity-keyed upsert found nothing to conflict with (this
+            # exact identity is new) but the plain INSERT it fell back to
+            # then collided on the `path` UNIQUE constraint -- a legacy row
+            # with identity_scheme IS NULL already sits at this path. Fold
+            # into THAT row instead of raising.
+            with Session(self.engine) as s:
+                slide_id = _upsert_by_path(s)
+                self._touch_slide_file(s, slide_id, path, source_kind, now)
+                s.commit()
+                return slide_id
+
+    def _touch_slide_file(
+        self, s: Session, slide_id: int, path: str, source_kind: str, now: datetime
+    ) -> None:
+        """Upsert the ``slide_files`` row for ``(slide_id, path)``.
+
+        ``first_seen_at`` is set only by the INSERT branch and never touched
+        again by the UPDATE branch -- re-registering a slide must not erase
+        how long it has actually been known (R-3 is exactly about this class
+        of bug: ``migrate-tcga-catalog`` once reset ``first_seen_at`` on
+        every row it touched and five count-asserting tests missed it).
+        ``last_seen_at`` always refreshes, and ``missing_since`` clears when
+        the path resolves again.
+        """
+        try:
+            exists = Path(path).is_file()
+        except OSError:
+            exists = False
+        missing_since = None if exists else now
+        ins = sqlite_insert(SlideFile).values(
+            slide_id=slide_id,
+            path=path,
+            source_kind=source_kind,
+            first_seen_at=now,
+            last_seen_at=now,
+            missing_since=missing_since,
+        )
+        stmt = ins.on_conflict_do_update(
+            index_elements=[SlideFile.path],
+            set_={
+                "slide_id": ins.excluded.slide_id,
+                "source_kind": ins.excluded.source_kind,
+                "last_seen_at": ins.excluded.last_seen_at,
+                "missing_since": ins.excluded.missing_since,
+            },
+        )
+        s.execute(stmt)
+
+    def files_for(self, slide_id: int) -> list[dict]:
+        """Every location this slide has been seen at, oldest first."""
+        with Session(self.engine) as s:
+            stmt = (
+                select(SlideFile)
+                .where(SlideFile.slide_id == slide_id)
+                .order_by(SlideFile.id)
+            )
+            return [_slide_file_dict(f) for f in s.execute(stmt).scalars()]
 
     def get(self, slide_id: int) -> dict | None:
         with Session(self.engine) as s:
@@ -638,6 +891,19 @@ def merge_duplicate_slide_paths(engine: sa.Engine) -> list[tuple[int, int]]:
     return merged
 
 
+def _bbox_columns(roi: "ROIGeometry") -> tuple[float, float, float, float]:
+    """Derive the four queryable ``bbox_*`` columns from a geometry ROI.
+
+    The single writer: both ``ROIRepo.add`` and (independently, since a
+    migration cannot import evolving ORM/geometry code -- see
+    ``hescope.migrations``' module docstring) migration 2's backfill compute
+    this from the SAME ``roi.bbox()`` / ``bbox_json`` values so the derived
+    columns can never disagree with the JSON they are a queryable cache of.
+    """
+    x0, y0, x1, y1 = roi.bbox()
+    return float(x0), float(y0), float(x1), float(y1)
+
+
 class ROIRepo:
     """Repository for the rois table."""
 
@@ -658,12 +924,17 @@ class ROIRepo:
         """Persist a geometry ROI (hescope.rois.ROI) for a slide."""
         points = [[float(x), float(y)] for x, y in roi.points]
         bbox = [int(v) for v in roi.bbox()]
+        bbox_x0, bbox_y0, bbox_x1, bbox_y1 = _bbox_columns(roi)
         with Session(self.engine) as s:
             rec = ROI(
                 slide_id=slide_id,
                 kind=roi.kind,
                 points_json=json.dumps(points),
                 bbox_json=json.dumps(bbox),
+                bbox_x0=bbox_x0,
+                bbox_y0=bbox_y0,
+                bbox_x1=bbox_x1,
+                bbox_y1=bbox_y1,
                 label=label,
                 notes=notes,
                 patch_path=patch_path,
@@ -720,10 +991,65 @@ class ROIRepo:
             s.commit()
             return True
 
-    def for_slide(self, slide_id: int) -> list[dict]:
-        """All ROIs for a slide; each dict includes parsed ``bbox`` (ints)."""
+    def for_slide(
+        self,
+        slide_id: int,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> list[dict]:
+        """ROIs for a slide, ordered by id; each dict includes parsed
+        ``bbox`` (ints). ``limit``/``offset`` default to ``None`` (no
+        caller breaks); pass ``limit`` to page through a slide with more
+        ROIs than should ever be pulled into memory at once -- see
+        :meth:`in_viewport` for a viewport-filtered (and always bounded)
+        alternative."""
         with Session(self.engine) as s:
             stmt = select(ROI).where(ROI.slide_id == slide_id).order_by(ROI.id)
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            if offset is not None:
+                stmt = stmt.offset(offset)
+            return [_roi_dict(r) for r in s.execute(stmt).scalars()]
+
+    def in_viewport(
+        self,
+        slide_id: int,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        *,
+        limit: int = 2000,
+    ) -> list[dict]:
+        """ROIs on ``slide_id`` whose bbox intersects the level-0 rectangle
+        ``[x0, y0, x1, y1]``, filtered in SQL via the ``bbox_*`` columns and
+        ``ix_rois_slide_bbox`` (defect 1.4: ``bbox_json`` is TEXT, so this
+        predicate could not be expressed in SQL at all before -- ``for_slide``
+        was the only option, returning every ROI on the slide regardless of
+        what was on screen: measured 138 ms + 170 KB at 5 000 ROIs, on every
+        overlay re-render).
+
+        Standard axis-aligned-bounding-box intersection test: a ROI is
+        included when its bbox and the query rectangle overlap on both axes.
+        A ROI whose ``bbox_*`` columns are still NULL (never backfilled, or
+        inserted by something other than ``ROIRepo.add``) is excluded rather
+        than raising -- SQL's NULL comparisons are neither true nor false, so
+        it simply cannot match a predicate, the same way it cannot match a
+        WHERE clause on any other column.
+        """
+        with Session(self.engine) as s:
+            stmt = (
+                select(ROI)
+                .where(
+                    ROI.slide_id == slide_id,
+                    ROI.bbox_x0 <= x1,
+                    ROI.bbox_x1 >= x0,
+                    ROI.bbox_y0 <= y1,
+                    ROI.bbox_y1 >= y0,
+                )
+                .order_by(ROI.id)
+                .limit(limit)
+            )
             return [_roi_dict(r) for r in s.execute(stmt).scalars()]
 
     def search(
