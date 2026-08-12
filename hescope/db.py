@@ -16,7 +16,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Iterator, Literal
+from typing import TYPE_CHECKING, Any, Iterator, Literal, NamedTuple
 
 import sqlalchemy as sa
 from sqlalchemy import ForeignKey, Index, String, Text, event, select
@@ -617,6 +617,24 @@ def _agent_run_dict(run: AgentRun) -> dict:
     }
 
 
+class RegisterResult(NamedTuple):
+    """What :meth:`SlideRepo.register` did, when called with ``report=True``.
+
+    ``inserted`` is ``True`` for a brand-new slide row and ``False`` when
+    this call folded into an existing row instead -- the same identity seen
+    from a new path, or a legacy row already sitting at ``path``. Added for
+    ``hescope ingest``, which used to count every call as a fresh
+    registration: two byte-identical files in one directory printed "2
+    registered" while only 1 row existed afterward, and the survivor's
+    name/path silently became whichever file was seen last (BUILD-PLAN-DB.md
+    Phase 1 debugger round 2, "hescope ingest reports 2 registrations for 1
+    row").
+    """
+
+    id: int
+    inserted: bool
+
+
 class SlideRepo:
     """Repository for the slides table."""
 
@@ -634,7 +652,8 @@ class SlideRepo:
         mpp: float | None = None,
         extra: dict | None = None,
         identity: tuple[str, str] | None = None,
-    ) -> int:
+        report: bool = False,
+    ) -> int | RegisterResult:
         """Register a slide. Idempotent on identity, not on ``path``.
 
         ``path`` is canonicalized (see ``normalize_slide_path``). Identity
@@ -654,6 +673,13 @@ class SlideRepo:
         request to clear the column, and both production callers omit it on
         every slide open.
 
+        ``report=True`` returns a :class:`RegisterResult` (``id``,
+        ``inserted``) instead of a bare ``id`` -- pass it when the caller
+        needs to know whether this call created a new row or folded into an
+        existing one (``hescope ingest`` does, to report "N registered, M
+        already known"). Every existing caller omits it and keeps getting a
+        bare ``int``, unchanged.
+
         Race fix (defect 1.2): this used to be SELECT-by-path, then
         INSERT-or-UPDATE in Python -- two concurrent callers could both see
         "no row" from the SELECT and both attempt the INSERT; the loser
@@ -671,6 +697,22 @@ class SlideRepo:
         case, since a NULL ``identity_scheme`` never participates in the
         partial unique index, so it would otherwise collide on ``path``
         instead and raise).
+
+        Duplicate content, no merge (defect: "register() raises
+        IntegrityError on duplicate-content slides"): the path-keyed
+        fallback above used to assign the incoming identity to the legacy
+        row unconditionally. When that identity already belongs to a
+        DIFFERENT row -- two byte-identical files registered from two
+        paths before either had a computed identity, which is exactly the
+        state migration 2 leaves a duplicate-content group in, since it
+        deliberately does not merge them -- that UPDATE collides with
+        ``ux_slides_identity`` too, and the ``IntegrityError`` used to
+        propagate out of ``register`` uncaught (measured on the real
+        database: 3 of 5 rows in its two duplicate-content groups). Fixed
+        by checking, inside the same locked transaction, whether the
+        identity is already owned by a different row; if so this row's
+        identity is left NULL instead -- the same non-merging policy
+        migration 2 already uses -- and registration still succeeds.
         """
         path = normalize_slide_path(path)
         scheme, key = identity or slide_identity(source_kind, path=path) or ("path", path)
@@ -695,7 +737,12 @@ class SlideRepo:
             file_size=file_size,
         )
 
-        def _upsert_by_identity(s: Session) -> int:
+        def _upsert_by_identity(s: Session) -> tuple[int, bool]:
+            existing = s.execute(
+                select(Slide.id).where(
+                    Slide.identity_scheme == scheme, Slide.identity_key == key
+                )
+            ).scalar_one_or_none()
             ins = sqlite_insert(Slide).values(**values)
             set_ = {
                 "source_kind": ins.excluded.source_kind,
@@ -714,13 +761,17 @@ class SlideRepo:
                 set_=set_,
             )
             s.execute(stmt)
-            return s.execute(
+            slide_id = s.execute(
                 select(Slide.id).where(
                     Slide.identity_scheme == scheme, Slide.identity_key == key
                 )
             ).scalar_one()
+            return slide_id, existing is None
 
-        def _upsert_by_path(s: Session) -> int:
+        def _upsert_by_path(s: Session, *, assign_identity: bool) -> tuple[int, bool]:
+            existing = s.execute(
+                select(Slide.id).where(Slide.path == path)
+            ).scalar_one_or_none()
             ins = sqlite_insert(Slide).values(**values)
             set_ = {
                 "source_kind": ins.excluded.source_kind,
@@ -728,37 +779,57 @@ class SlideRepo:
                 "width": ins.excluded.width,
                 "height": ins.excluded.height,
                 "mpp": ins.excluded.mpp,
-                "identity_scheme": ins.excluded.identity_scheme,
-                "identity_key": ins.excluded.identity_key,
                 "file_size": ins.excluded.file_size,
             }
+            if assign_identity:
+                set_["identity_scheme"] = ins.excluded.identity_scheme
+                set_["identity_key"] = ins.excluded.identity_key
             if extra is not None:
                 set_["extra_json"] = ins.excluded.extra_json
             stmt = ins.on_conflict_do_update(
                 index_elements=[Slide.path], set_=set_
             )
             s.execute(stmt)
-            return s.execute(
+            slide_id = s.execute(
                 select(Slide.id).where(Slide.path == path)
             ).scalar_one()
+            return slide_id, existing is None
 
         try:
             with write_session(self.engine) as s:
-                slide_id = _upsert_by_identity(s)
+                slide_id, inserted = _upsert_by_identity(s)
                 self._touch_slide_file(s, slide_id, path, source_kind, now)
                 s.commit()
-                return slide_id
+                return RegisterResult(slide_id, inserted) if report else slide_id
         except sa.exc.IntegrityError:
             # The identity-keyed upsert found nothing to conflict with (this
             # exact identity is new) but the plain INSERT it fell back to
             # then collided on the `path` UNIQUE constraint -- a legacy row
             # with identity_scheme IS NULL already sits at this path. Fold
-            # into THAT row instead of raising.
-            with Session(self.engine) as s:
-                slide_id = _upsert_by_path(s)
+            # into THAT row instead of raising -- unless this identity is
+            # already owned by a DIFFERENT row (duplicate content), in which
+            # case assigning it here would raise the exact same error a
+            # second time; leave this row's identity NULL instead. The
+            # ownership check has to happen inside this transaction (not
+            # before it, and not via a bare `Session`) or a second concurrent
+            # caller could interleave between the check and the write, so
+            # this branch uses `write_session` too (its docstring is exactly
+            # this shape: a read that decides a write, needing the lock
+            # up front rather than a mid-transaction upgrade).
+            with write_session(self.engine) as s:
+                owner_id = s.execute(
+                    select(Slide.id).where(
+                        Slide.identity_scheme == scheme, Slide.identity_key == key
+                    )
+                ).scalar_one_or_none()
+                path_row_id = s.execute(
+                    select(Slide.id).where(Slide.path == path)
+                ).scalar_one_or_none()
+                assign_identity = owner_id is None or owner_id == path_row_id
+                slide_id, inserted = _upsert_by_path(s, assign_identity=assign_identity)
                 self._touch_slide_file(s, slide_id, path, source_kind, now)
                 s.commit()
-                return slide_id
+                return RegisterResult(slide_id, inserted) if report else slide_id
 
     def _touch_slide_file(
         self, s: Session, slide_id: int, path: str, source_kind: str, now: datetime
