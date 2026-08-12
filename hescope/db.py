@@ -73,6 +73,19 @@ def get_engine(url: str | None = None) -> sa.Engine:
 
         @event.listens_for(engine, "connect")
         def _sqlite_pragmas(dbapi_conn: Any, _record: Any) -> None:
+            # pysqlite's default (legacy) isolation-level handling silently
+            # COMMITs any open transaction before a DDL statement (CREATE /
+            # ALTER / DROP) and never wraps DDL in one to begin with, so
+            # "each migration runs in its own transaction; a failure rolls
+            # it back" (hescope/migrations.py) was false for any migration
+            # that touches the schema -- measured: a CREATE TABLE issued
+            # inside `engine.begin()` survived a subsequent exception and
+            # rollback. Setting isolation_level=None hands transaction
+            # control entirely to SQLAlchemy (paired with the "begin" hook
+            # below, which then issues the actual BEGIN), which is SQLite's
+            # documented way to make DDL participate in transactions like
+            # everything else.
+            dbapi_conn.isolation_level = None
             cursor = dbapi_conn.cursor()
             try:
                 # Enforce foreign keys (ON DELETE CASCADE / SET NULL).
@@ -105,6 +118,14 @@ def get_engine(url: str | None = None) -> sa.Engine:
                         )
             finally:
                 cursor.close()
+
+        @event.listens_for(engine, "begin")
+        def _sqlite_begin(conn: sa.Connection) -> None:
+            # The counterpart to isolation_level=None above: with pysqlite's
+            # own transaction management disabled, nothing starts a
+            # transaction unless we do -- this is what makes DDL rollback on
+            # exception instead of auto-committing.
+            conn.exec_driver_sql("BEGIN")
 
     return engine
 
@@ -159,7 +180,8 @@ def normalize_slide_path(path: str | Path) -> str:
 
 
 def init_db(engine: sa.Engine) -> None:
-    """Create all tables, then add any columns an older database is missing.
+    """Create all tables, then add any columns OR indexes an older database
+    is missing.
 
     ``create_all`` adds missing TABLES but never missing COLUMNS, so a database
     written by a build with a narrower schema (branch switching, a user
@@ -171,10 +193,28 @@ def init_db(engine: sa.Engine) -> None:
     change. A failure propagates to ``bootstrap_db``, which degrades to DB-free
     mode: an honest "database disabled" beats a live-looking panel whose every
     save answers "Submit failed".
+
+    ``create_all`` also only emits ``CREATE INDEX`` for a table it just
+    created — a table that already existed (same branch-switch / upgrade
+    scenario) keeps whatever indexes it started with, silently. Measured: a
+    ``rois`` table built through this function's own narrow-schema upgrade
+    path ends with 0 indexes where a fresh ``create_all`` gives it 2
+    (``ix_rois_slide_id``, ``ix_rois_label``) — both report ``version 0``,
+    but the upgraded one lacks indexes ``ROIRepo.for_slide`` and
+    ``ROIRepo.search`` depend on for anything beyond a table scan. Fixed the
+    same way as the column gap: compare declared indexes to what actually
+    exists and create only what is missing.
     """
     Base.metadata.create_all(engine)
-    inspector = sa.inspect(engine)
     with engine.begin() as conn:
+        # Inspect the SAME connection the ALTER/CREATE INDEX statements run
+        # on, not a second one opened fresh off `engine` -- an engine-bound
+        # inspector opens its own connection per call, and for a
+        # ``:memory:`` database (SingletonThreadPool: one physical
+        # connection shared engine-wide) that collided with the transaction
+        # this block already holds open ("cannot start a transaction within
+        # a transaction") once DDL here became genuinely transactional.
+        inspector = sa.inspect(conn)
         for table in Base.metadata.sorted_tables:
             existing = {c["name"] for c in inspector.get_columns(table.name)}
             for column in table.columns:
@@ -190,6 +230,13 @@ def init_db(engine: sa.Engine) -> None:
                         f'ADD COLUMN "{column.name}" {type_sql}'
                     )
                 )
+            existing_indexes = {
+                ix["name"] for ix in inspector.get_indexes(table.name)
+            }
+            for index in table.indexes:
+                if index.name in existing_indexes:
+                    continue
+                index.create(bind=conn, checkfirst=True)
 
 
 class Base(DeclarativeBase):

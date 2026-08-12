@@ -10,6 +10,8 @@ Commands:
   ingest PATH [--kind K] [--recursive]   register image files as slides
   list [--kind K]               list registered slides
   dedupe-slides [--dry-run]     merge slide rows that name the same file
+  migrate [--dry-run]           apply pending schema migrations (versioned,
+                                additive-only; see hescope.migrations)
   migrate-tcga-catalog [--dry-run]  import the flat TCGA catalog into the
                                 TCGA-shaped tables (never moves files)
 """
@@ -146,6 +148,16 @@ def build_parser() -> argparse.ArgumentParser:
         "made, and change nothing",
     )
 
+    p_migrate_schema = sub.add_parser(
+        "migrate",
+        help="apply pending schema migrations (versioned, additive-only)",
+    )
+    p_migrate_schema.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what WOULD be applied and change nothing",
+    )
+
     p_migrate = sub.add_parser(
         "migrate-tcga-catalog",
         help="import the flat data/tcga/catalog.db into the TCGA-shaped "
@@ -269,6 +281,50 @@ def _cmd_dedupe_slides(engine, dry_run: bool = False) -> int:
     return 0
 
 
+def _cmd_migrate(engine, dry_run: bool) -> int:
+    """Apply pending schema migrations, or (``--dry-run``) report what would
+    run without opening a write transaction or touching the database."""
+    from .migrations import migrate
+
+    if dry_run:
+        report = migrate(engine, dry_run=True)
+        if not report.skipped:
+            print(f"dry run: already at version {report.from_version}; nothing to do")
+            return 0
+        for item in report.skipped:
+            print(f"would apply migration {item}")
+        print(
+            f"dry run: would go from version {report.from_version} to "
+            f"version {report.to_version} ({len(report.skipped)} pending); "
+            "nothing was changed"
+        )
+        return 0
+
+    # An empty database needs its tables before version 1 can be stamped;
+    # a database that already has them (every shipped data/hescope.db) is
+    # untouched by this call -- see hescope.migrations' module docstring.
+    init_db(engine)
+    report = migrate(engine)
+    for item in report.applied:
+        print(f"applied migration {item}")
+    if report.error is not None:
+        print(f"error applying migration: {report.error}", file=sys.stderr)
+        print(
+            f"migration stopped: version {report.from_version} -> "
+            f"{report.to_version} ({len(report.applied)} applied)",
+            file=sys.stderr,
+        )
+        return 1
+    if not report.applied:
+        print(f"already at version {report.to_version}; nothing to do")
+    else:
+        print(
+            f"migrated: version {report.from_version} -> {report.to_version} "
+            f"({len(report.applied)} applied)"
+        )
+    return 0
+
+
 def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> int:
     """Carry the flat ``tcga_slides`` catalog into the TCGA-shaped tables.
 
@@ -373,6 +429,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list(engine, args.kind)
     if args.command == "dedupe-slides":
         return _cmd_dedupe_slides(engine, getattr(args, "dry_run", False))
+    if args.command == "migrate":
+        return _cmd_migrate(engine, getattr(args, "dry_run", False))
     if args.command == "migrate-tcga-catalog":
         return _cmd_migrate_tcga_catalog(
             engine,
