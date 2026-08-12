@@ -389,6 +389,18 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
                     f"would link {mig3['would_link']}, "
                     f"{mig3['could_not_link']} could not be linked"
                 )
+                # round 3 finding 2: a slide_id that already names no row in
+                # `slides` (e.g. dedupe-slides deleted it) would abort the FK
+                # rebuild outright; migration 3 now clears and re-resolves it
+                # instead (folded into would_link/could_not_link above), but
+                # a reviewer still needs to see that this database has one.
+                if mig3["dangling_slide_ids"]:
+                    print(
+                        f"  {mig3['dangling_slide_ids']} tcga_files row(s) "
+                        "have a slide_id pointing at a slide that no longer "
+                        "exists -- would be cleared and re-linked from "
+                        "local_path"
+                    )
         total_new_tables = len(init_plan["new_tables"]) + len(tcga_init_plan["new_tables"])
         print(
             f"dry run: would go from version {report.from_version} to "
@@ -454,7 +466,7 @@ def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> 
         rows = con.execute(
             "SELECT file_id, file_name, file_size, project_id, "
             "case_submitter_id, sample_type, primary_site, local_path, md5sum, "
-            "first_seen_at "
+            "first_seen_at, downloaded_at "
             "FROM tcga_slides"
         ).fetchall()
     except sqlite3.Error as exc:
@@ -464,7 +476,8 @@ def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> 
         con.close()
 
     prepared, downloaded = [], []
-    for (fid, fname, fsize, pid, case_id, stype, site, lpath, md5, first_seen) in rows:
+    for (fid, fname, fsize, pid, case_id, stype, site, lpath, md5, first_seen,
+         downloaded_at) in rows:
         bc = parse_barcode(fname)
         prepared.append(
             {
@@ -489,7 +502,11 @@ def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> 
             }
         )
         if lpath:
-            downloaded.append((fid, lpath))
+            # downloaded_at travels with (fid, lpath): the identical R-3
+            # provenance fix as first_seen_at above, one column over (round
+            # 3 finding 4) -- mark_downloaded below uses it instead of
+            # defaulting to "now".
+            downloaded.append((fid, lpath, downloaded_at))
 
     if dry_run:
         print(f"would import {len(prepared)} file row(s) from {src}")
@@ -497,7 +514,7 @@ def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> 
         print(f"  projects: {len({r['project_id'] for r in prepared if r['project_id']})}"
               f"  cases: {len({r['case_submitter_id'] for r in prepared if r['case_submitter_id']})}"
               f"  samples: {len({r['sample_id'] for r in prepared if r['sample_id']})}")
-        missing = [p for _f, p in downloaded if not _Path(p).is_file()]
+        missing = [p for _f, p, _d in downloaded if not _Path(p).is_file()]
         if missing:
             print(f"  {len(missing)} recorded path(s) no longer exist and will "
                   "import without download state")
@@ -508,13 +525,25 @@ def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> 
     catalog = TcgaCatalog(engine)
     inserted = catalog.upsert_rows(prepared)
     kept = 0
-    for fid, lpath in downloaded:
+    unmatched = 0
+    for fid, lpath, downloaded_at in downloaded:
         if _Path(lpath).is_file():
-            catalog.mark_downloaded(fid, lpath)
-            kept += 1
+            # round 3 finding 5: mark_downloaded returns False (and writes
+            # nothing) for a file_id upsert_rows refused to create a row for
+            # (e.g. an empty file_id) -- act on that instead of counting it
+            # as preserved regardless.
+            if catalog.mark_downloaded(fid, lpath, downloaded_at=downloaded_at):
+                kept += 1
+            else:
+                unmatched += 1
     stats = catalog.stats()
     print(f"imported {inserted} new file row(s) from {src}")
     print(f"preserved {kept} download(s) (files were not moved)")
+    if unmatched:
+        print(
+            f"{unmatched} recorded download(s) named no catalog row and "
+            "were skipped"
+        )
     print(
         f"catalog now: {stats['projects']} project(s), {stats['cases']} case(s), "
         f"{stats['samples']} sample(s), {stats['files']} file(s), "

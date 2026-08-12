@@ -346,6 +346,54 @@ def test_merge_duplicate_slide_paths_reunites_a_split_slide(engine, tmp_path):
     )
 
 
+def test_merge_duplicate_slide_paths_repoints_a_linked_tcga_file(engine, tmp_path):
+    """BUILD-PLAN-DB round 3 finding 2: merging a duplicate slide row deleted
+    it without ever looking at ``tcga_files.slide_id`` -- a row pointing at
+    the deleted (dup) slide was left DANGLING, which then aborted migration
+    3's FK rebuild permanently (see tests/test_migrations.py::
+    test_migration_3_recovers_a_dangling_slide_id_instead_of_aborting for the
+    end-to-end repro). This is the unit-level fix: the same re-pointing
+    ``merge_duplicate_slide_paths`` already does for ROIs and Interactions,
+    extended to ``tcga_files``.
+
+    Seen to fail before the fix: ``tcga_files.slide_id`` stayed equal to the
+    now-deleted dup id after the merge.
+    """
+    from hescope.db import Slide, merge_duplicate_slide_paths
+    from hescope.tcga_schema import TcgaCatalog
+
+    real = tmp_path / "split.svs"
+    real.write_bytes(b"pretend slide bytes for the repoint repro")
+    canonical = str(real.resolve())
+
+    with sa.orm.Session(engine) as s:  # bypass register(): pre-fix rows
+        for path in (canonical, str(real).replace("\\", "/")):
+            s.add(Slide(
+                source_kind="local", name="split.svs", path=path,
+                width=8, height=8, extra_json="{}",
+            ))
+        s.commit()
+    sids = [row["id"] for row in SlideRepo(engine).list()]
+    keeper_id, dup_id = sids[0], sids[1]
+
+    cat = TcgaCatalog(engine)
+    cat.upsert_rows([{"file_id": "fid-repoint", "file_name": "split.svs", "file_size": 1}])
+    assert cat.mark_downloaded("fid-repoint", canonical, slide_id=dup_id) is True
+
+    merged = merge_duplicate_slide_paths(engine)
+
+    assert merged == [(dup_id, keeper_id)]
+    with engine.connect() as conn:
+        linked = conn.execute(
+            sa.text("SELECT slide_id FROM tcga_files WHERE file_id='fid-repoint'")
+        ).scalar_one()
+    assert linked == keeper_id, (
+        f"tcga_files.slide_id must follow the merge to the keeper "
+        f"({keeper_id}), not stay pointed at the deleted dup ({dup_id}); "
+        f"got {linked!r}"
+    )
+
+
 def test_merge_duplicate_slide_paths_is_a_noop_on_a_clean_database(engine, slide_id):
     from hescope.db import merge_duplicate_slide_paths
 

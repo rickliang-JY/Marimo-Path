@@ -975,10 +975,22 @@ def merge_duplicate_slide_paths(engine: sa.Engine) -> list[tuple[int, int]]:
     cascade-deletes, so the other order would destroy exactly the annotations
     this is meant to rescue.
 
+    ``tcga_files.slide_id`` is re-pointed the same way, when the table
+    exists: without this, a dup row that a completed TCGA download had
+    linked (BUILD-PLAN-DB.md Phase 2) is deleted out from under that link,
+    leaving it DANGLING (pointing at an id no `slides` row has anymore) --
+    which used to abort migration 3's FK rebuild permanently the next time
+    it ran (BUILD-PLAN-DB round 3 finding 2), and, once that FK's
+    ``ON DELETE SET NULL`` is in place, would otherwise let the delete
+    silently NULL the very link Phase 2 exists to create. Re-pointing BEFORE
+    the delete means neither happens: the link simply follows its slide to
+    the keeper, same as an ROI does.
+
     Returns the ``(deleted_id, kept_id)`` pairs, oldest first.
     """
     merged: list[tuple[int, int]] = []
     with Session(engine) as s:
+        has_tcga_files = sa.inspect(s.connection()).has_table("tcga_files")
         groups: dict[str, list[Slide]] = {}
         for slide in s.execute(select(Slide).order_by(Slide.id)).scalars():
             groups.setdefault(normalize_slide_path(slide.path), []).append(slide)
@@ -995,6 +1007,14 @@ def merge_duplicate_slide_paths(engine: sa.Engine) -> list[tuple[int, int]]:
                     .where(Interaction.slide_id == dup.id)
                     .values(slide_id=keeper.id)
                 )
+                if has_tcga_files:
+                    s.execute(
+                        sa.text(
+                            "UPDATE tcga_files SET slide_id=:keeper "
+                            "WHERE slide_id=:dup"
+                        ),
+                        {"keeper": keeper.id, "dup": dup.id},
+                    )
                 s.delete(dup)
                 merged.append((dup.id, keeper.id))
             # only after the duplicates are gone: slides.path is UNIQUE

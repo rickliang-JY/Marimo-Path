@@ -2584,6 +2584,7 @@ def _(
     tcga_client,
     tcga_db,
     tcga_dl,
+    tcga_hits_to_rows,
     tcga_panel,
     tcga_storage_relpath,
 ):
@@ -2629,11 +2630,17 @@ def _(
         if not _md5:
             _cat_rec = tcga_catalog.get(_fid)
             _md5 = _cat_rec.md5sum if _cat_rec is not None else None
-        # Only `progress` is reset. Clearing `msg` and `open_path` here threw
-        # away a hand-off the ticker had not drained yet -- and open_path is a
-        # finished, md5-verified, possibly gigabyte download, which would then
-        # sit on disk never opened and never mentioned (R07-17).
+        # Only `progress` (and the link-failure flag below) is reset. Clearing
+        # `msg` and `open_path` here threw away a hand-off the ticker had not
+        # drained yet -- and open_path is a finished, md5-verified, possibly
+        # gigabyte download, which would then sit on disk never opened and
+        # never mentioned (R07-17).
         tcga_dl["progress"] = (0, None)
+        # Reset for THIS attempt -- otherwise a stale True from an earlier
+        # download would incorrectly re-surface on a click that never
+        # touches the catalog link at all (e.g. the "already on disk" path
+        # above, which returns before this point).
+        tcga_dl["catalog_link_failed"] = False
 
         # Where this download belongs: <project>/<case>/ under the TCGA root,
         # so the directory tree mirrors the hierarchy instead of being a wall
@@ -2690,9 +2697,32 @@ def _(
                             _close = getattr(_src_reg, "close", None)
                             if callable(_close):
                                 _close()
-                        tcga_db.mark_downloaded(_fid, str(_path), slide_id=_sid)
+                        _linked = tcga_db.mark_downloaded(_fid, str(_path), slide_id=_sid)
+                        if not _linked:
+                            # mark_downloaded returns False when file_id names
+                            # no row this catalog already knows (defect 2.4) --
+                            # the search-time upsert that would normally have
+                            # created it is itself best-effort (see
+                            # _on_search_gdc above) and can have been skipped
+                            # entirely, e.g. this row only ever came from
+                            # "Browse local catalog". One retry: seed it from
+                            # the client's last search hits, then try again.
+                            try:
+                                tcga_db.upsert_rows(
+                                    tcga_hits_to_rows(
+                                        getattr(tcga_client, "last_hits", [])
+                                    )
+                                )
+                            except Exception:
+                                pass
+                            _linked = tcga_db.mark_downloaded(
+                                _fid, str(_path), slide_id=_sid
+                            )
+                        tcga_dl["catalog_link_failed"] = not _linked
                     except Exception:
-                        pass
+                        # the write itself raised (not just "returned False")
+                        # -- the link is not written either way.
+                        tcga_dl["catalog_link_failed"] = True
                 # consumed on the main thread by the status cell (ticker).
                 # Report only what this thread actually did: opening happens
                 # later on the main thread and can still fail, so the final
@@ -2805,6 +2835,20 @@ def _(
                     else f"{_name} is already on disk, but opening it "
                     f"failed: {_exc}"
                 ),
+            )
+        # A real download that could not be linked into the TCGA hierarchy
+        # (BUILD-PLAN-DB round 3 finding 6): the worker recorded that
+        # mark_downloaded returned False (or raised) even after retrying, so
+        # say so here instead of letting a success/warn message imply the
+        # slide is now connected to its case/sample when it is not. Only
+        # meaningful when THIS session fetched the file -- the "already on
+        # disk" click never attempts a link at all.
+        if _fetched and tcga_dl.get("catalog_link_failed", False):
+            _kind, _text = tcga_dl["msg"]
+            tcga_dl["msg"] = (
+                "warn",
+                f"{_text} The TCGA catalog link could not be written, so "
+                "this slide is not yet connected to its case/sample.",
             )
         try:
             set_tcga_records(

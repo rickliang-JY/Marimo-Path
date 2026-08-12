@@ -938,6 +938,7 @@ def test_plan_migration_3_on_an_empty_database_is_all_zero(tmp_path):
     assert preview == {
         "tcga_files_exists": False, "fk_present": False,
         "with_local_path": 0, "already_linked": 0,
+        "dangling_slide_ids": 0,
         "would_link": 0, "could_not_link": 0,
     }
 
@@ -957,3 +958,258 @@ def test_migrate_reaches_schema_version_with_no_prior_tcga_tables(tmp_path):
         assert "tcga_files" in sa.inspect(conn).get_table_names()
         fk_rows = conn.execute(sa.text('PRAGMA foreign_key_list("tcga_files")')).all()
     assert any(r[2] == "slides" for r in fk_rows)
+
+
+# =============================================================================
+# BUILD-PLAN-DB.md Phase 2 debugger, round 3
+# =============================================================================
+#
+# finding 1: `migrate --dry-run` crashed on exactly the legacy databases
+# migration 3 exists for -- a version-0 database (no schema_migrations table,
+# `slides` carries no identity_scheme/identity_key columns yet) with a
+# tcga_files row whose local_path resolves. `plan_migration_3` -> its
+# `_find_slide_for_local_path` helper -> unconditionally queried
+# `slides.identity_scheme`, a column migration 2 (not yet applied, and never
+# applied by a dry run -- R-1) adds. The real (non-dry-run) migrate() never
+# hit this because it calls init_db() first.
+
+
+def test_plan_migration_3_does_not_crash_when_slides_predates_the_identity_columns(
+    tmp_path,
+):
+    """Seen to fail before the fix:
+
+        sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such
+        column: identity_scheme
+        [SQL: SELECT id FROM slides WHERE identity_scheme='sha256' AND
+        identity_key=?]
+
+    on a hand-built version-0 database (no identity columns on `slides`,
+    exactly the pre-Phase-1 shape) carrying one tcga_files row whose
+    local_path resolves to a real file on disk -- the exact input shape
+    migration 3's own backfill exists to preview.
+    """
+    from hescope.migrations import plan_migration_3
+
+    db_path = tmp_path / "pre_migration_2.db"
+    con = sqlite3.connect(db_path)
+    con.executescript(
+        """
+        CREATE TABLE slides (
+            id INTEGER PRIMARY KEY, source_kind VARCHAR(32), name VARCHAR(512),
+            path VARCHAR(1024) UNIQUE, width INTEGER, height INTEGER,
+            mpp FLOAT, extra_json TEXT, created_at DATETIME
+        );
+        CREATE TABLE tcga_files (
+            file_id VARCHAR(64) PRIMARY KEY, file_name VARCHAR(512),
+            file_size INTEGER, md5sum VARCHAR(64), sample_id VARCHAR(64),
+            case_submitter_id VARCHAR(64), project_id VARCHAR(64),
+            local_path VARCHAR(1024), downloaded_at DATETIME,
+            first_seen_at DATETIME NOT NULL, slide_id INTEGER
+        );
+        """
+    )
+    con.commit()
+    con.close()
+
+    real_file = tmp_path / "downloaded-before-migration-2.svs"
+    real_file.write_bytes(b"a tcga download recorded before migration 2 ever ran")
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "INSERT INTO tcga_files (file_id, local_path, first_seen_at) "
+        "VALUES ('fid-pre-mig2', ?, '2024-01-01 00:00:00')",
+        (str(real_file.resolve()),),
+    )
+    con.commit()
+    con.close()
+
+    engine = get_engine(f"sqlite:///{db_path}", read_only=True)
+    with engine.connect() as conn:
+        preview = plan_migration_3(conn)  # must not raise
+
+    assert preview["with_local_path"] == 1
+    assert preview["could_not_link"] == 1, (
+        "no slide has ever been registered for this path, so this row "
+        "cannot be linked yet -- the point is that computing this must not "
+        "crash, not that it finds a match"
+    )
+
+    # and the SAME database migrates cleanly for real (migrate() calls
+    # init_db() first) -- the preview must not be the thing that cannot
+    # handle what the real run handles fine.
+    real_report = migrate(get_engine(f"sqlite:///{db_path}"))
+    assert real_report.error is None
+
+
+# finding 2: a tcga_files.slide_id that already names no row in `slides`
+# (possible today because the column carries no real constraint until this
+# migration adds one -- e.g. merge_duplicate_slide_paths deleting the row it
+# pointed at) aborted the FK rebuild's FK-checked INSERT ... SELECT
+# permanently, and the dry run reported it as "already linked" with no hint
+# of the abort.
+
+
+def test_migration_3_recovers_a_dangling_slide_id_instead_of_aborting(tmp_path):
+    """Seen to fail before the fix -- a tcga_files.slide_id pointing at a
+    slide row that no longer exists aborted every subsequent migrate() call
+    identically:
+
+        (sqlite3.IntegrityError) FOREIGN KEY constraint failed
+        [SQL: INSERT INTO tcga_files__mig3_rebuild ...]
+
+    with the database stuck at version 2 and no recovery path. The fix nulls
+    the dangling reference before the FK-checked rebuild and then re-resolves
+    it through the same content-key/path matching every other unlinked row
+    goes through -- recovering the link (the file's local_path still points
+    at another registered slide with identical content) instead of leaving
+    it lost.
+
+    ``SlideRepo.delete`` is used to CREATE the dangling reference here: it
+    removes a slide (cascading its ROIs) but -- like
+    ``merge_duplicate_slide_paths`` before its own round 3 fix (see
+    tests/test_db.py::test_merge_duplicate_slide_paths_repoints_a_linked_tcga_file)
+    -- never touches ``tcga_files``, since the two tables live on separate
+    ``DeclarativeBase``s with no ORM relationship between them. A real,
+    shipped deletion path, not a synthetic one.
+    """
+    from hescope.migrations import plan_migration_3
+    from hescope.db import Slide, SlideRepo
+    from hescope.tcga_schema import TcgaCatalog
+
+    engine = get_engine(f"sqlite:///{tmp_path}/mig3_dangling.db")
+    init_db(engine)
+    real_file = tmp_path / "s.svs"
+    real_file.write_bytes(b"content for the dangling-fk repro")
+
+    with sa.orm.Session(engine) as s:
+        keeper = Slide(
+            source_kind="local", name="s", path=str(real_file.resolve()),
+            width=10, height=10, extra_json="{}", created_at=datetime(2024, 1, 1),
+        )
+        s.add(keeper)
+        s.commit()
+        keeper_id = keeper.id
+        # a second row with the SAME content, standing in for whatever
+        # slide a tcga_files row was once linked to before it was deleted.
+        dup = Slide(
+            source_kind="local", name="s-copy", path=str(tmp_path / "s-copy.svs"),
+            width=10, height=10, extra_json="{}", created_at=datetime(2024, 1, 1),
+        )
+        s.add(dup)
+        s.commit()
+        dup_id = dup.id
+
+    cat = TcgaCatalog(engine)
+    cat.upsert_rows([{"file_id": "fid-dangling", "file_name": "s.svs", "file_size": 7}])
+    assert cat.mark_downloaded("fid-dangling", str(real_file.resolve()), slide_id=dup_id) is True
+
+    SlideRepo(engine).delete(dup_id)  # the real, shipped deletion path
+
+    with engine.connect() as conn:
+        slide_ids = set(conn.execute(sa.text("SELECT id FROM slides")).scalars().all())
+        linked_before = conn.execute(
+            sa.text("SELECT slide_id FROM tcga_files WHERE file_id='fid-dangling'")
+        ).scalar_one()
+    assert linked_before == dup_id
+    assert dup_id not in slide_ids, "sanity: the dup row must actually be gone"
+
+    with engine.connect() as conn:
+        preview = plan_migration_3(conn)
+    assert preview["dangling_slide_ids"] == 1
+
+    report = migrate(engine)
+
+    assert report.error is None, f"migration 3 must not abort on a dangling slide_id: {report.error}"
+    assert current_version(engine) == SCHEMA_VERSION
+    with engine.connect() as conn:
+        linked_after = conn.execute(
+            sa.text("SELECT slide_id FROM tcga_files WHERE file_id='fid-dangling'")
+        ).scalar_one()
+    assert linked_after == keeper_id, (
+        "the dangling reference must be recovered by re-matching the row's "
+        f"local_path, landing on the keeper slide ({keeper_id}); got {linked_after!r}"
+    )
+
+    # and a second migrate() call (the exact retry the un-fixed code could
+    # never complete) is a true no-op
+    second = migrate(engine)
+    assert second.error is None
+    assert second.applied == []
+
+
+def test_plan_migration_3_reports_dangling_slide_ids_separately_from_already_linked(
+    tmp_path,
+):
+    from hescope.migrations import plan_migration_3
+    from hescope.db import Slide
+    from hescope.tcga_schema import TcgaCatalog
+
+    engine = get_engine(f"sqlite:///{tmp_path}/mig3_dangling_preview.db")
+    init_db(engine)
+    real_file = tmp_path / "s.svs"
+    real_file.write_bytes(b"dangling preview content")
+    with sa.orm.Session(engine) as s:
+        slide = Slide(
+            source_kind="local", name="s", path=str(real_file.resolve()),
+            width=1, height=1, extra_json="{}", created_at=datetime(2024, 1, 1),
+        )
+        s.add(slide)
+        s.commit()
+        real_slide_id = slide.id
+
+    cat = TcgaCatalog(engine)
+    cat.upsert_rows([{"file_id": "fid-x", "file_name": "s.svs", "file_size": 1}])
+    cat.mark_downloaded("fid-x", str(real_file.resolve()), slide_id=999999)  # names no row
+
+    with engine.connect() as conn:
+        preview = plan_migration_3(conn)
+
+    assert preview["dangling_slide_ids"] == 1
+    assert preview["already_linked"] == 0, (
+        "a slide_id that names no row in `slides` must not be counted as a "
+        "valid existing link"
+    )
+    assert preview["would_link"] == 1, (
+        f"the dangling row's local_path resolves to a real, registered "
+        f"slide ({real_slide_id}) and should be recoverable"
+    )
+
+
+# finding 3: the FK rebuild hardcoded the column list, so any tcga_files
+# column outside it (an ALTER TABLE ADD COLUMN from code ahead of this
+# migration, or any future column) was silently dropped -- a DROP disguised
+# as "additive" (R-4).
+
+
+def test_migration_3_preserves_a_column_outside_the_original_hardcoded_list(tmp_path):
+    """Seen to fail before the fix: migrate(e3) reported no error, and the
+    extra column and its data were simply gone afterward --
+    ``sqlite3.OperationalError: no such column: future_note``."""
+    from hescope.tcga_schema import TcgaCatalog
+
+    engine = get_engine(f"sqlite:///{tmp_path}/mig3_extracol.db")
+    init_db(engine)
+    TcgaCatalog(engine)  # creates tcga_files
+
+    with engine.connect() as conn:
+        conn.execute(sa.text("ALTER TABLE tcga_files ADD COLUMN future_note TEXT"))
+        conn.commit()
+        conn.execute(
+            sa.text(
+                "INSERT INTO tcga_files (file_id, first_seen_at, future_note) "
+                "VALUES ('f-extra', :now, 'do not lose me')"
+            ),
+            {"now": datetime(2020, 1, 1)},
+        )
+        conn.commit()
+
+    report = migrate(engine)
+    assert report.error is None
+
+    with engine.connect() as conn:
+        cols = {c["name"] for c in sa.inspect(conn).get_columns("tcga_files")}
+        assert "future_note" in cols
+        value = conn.execute(
+            sa.text("SELECT future_note FROM tcga_files WHERE file_id='f-extra'")
+        ).scalar_one()
+    assert value == "do not lose me"

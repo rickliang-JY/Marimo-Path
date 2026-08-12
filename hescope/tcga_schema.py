@@ -59,12 +59,17 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _coerce_first_seen_at(value: object) -> datetime | None:
-    """Normalize a caller-supplied ``first_seen_at`` into the naive-UTC form
-    every ``DATETIME`` column in this project is stored as (see
-    ``hescope.db``'s naive-UTC convention: an aware datetime handed straight
-    to SQLAlchemy's sqlite ``DATETIME`` binding has its offset silently
-    discarded, not converted).
+def _coerce_utc_datetime(value: object) -> datetime | None:
+    """Normalize a caller-supplied timestamp into the naive-UTC form every
+    ``DATETIME`` column in this project is stored as (see ``hescope.db``'s
+    naive-UTC convention: an aware datetime handed straight to SQLAlchemy's
+    sqlite ``DATETIME`` binding has its offset silently discarded, not
+    converted).
+
+    Used for both ``first_seen_at`` and ``downloaded_at`` -- the same
+    provenance-timestamp shape, and the same fix (BUILD-PLAN-DB round 3
+    finding 4: ``downloaded_at`` had the identical defect ``first_seen_at``
+    was already fixed for, one column over, in the same import path).
 
     Accepts a ``datetime`` (aware or naive) or an ISO8601 string -- the flat
     ``SlideCatalog`` writes ``datetime.now(timezone.utc).isoformat()``, e.g.
@@ -368,7 +373,7 @@ class TcgaCatalog:
         already on disk.
 
         ``row["first_seen_at"]``, when present, is used verbatim (via
-        :func:`_coerce_first_seen_at`) as the NEW row's ``first_seen_at``
+        :func:`_coerce_utc_datetime`) as the NEW row's ``first_seen_at``
         instead of the ORM default (``_utcnow``, i.e. "the moment this
         import ran"). This is what ``migrate-tcga-catalog`` needs: without
         it, every file carried over from the flat catalog lost its real
@@ -428,7 +433,7 @@ class TcgaCatalog:
                         case_submitter_id=cid,
                         project_id=pid,
                     )
-                    first_seen = _coerce_first_seen_at(row.get("first_seen_at"))
+                    first_seen = _coerce_utc_datetime(row.get("first_seen_at"))
                     if first_seen is not None:
                         kwargs["first_seen_at"] = first_seen
                     s.add(TcgaFile(**kwargs))
@@ -442,7 +447,12 @@ class TcgaCatalog:
         return n
 
     def mark_downloaded(
-        self, file_id: str, local_path: str | Path, slide_id: int | None = None
+        self,
+        file_id: str,
+        local_path: str | Path,
+        slide_id: int | None = None,
+        *,
+        downloaded_at: datetime | str | None = None,
     ) -> bool:
         """Record where the file landed, and optionally the ``slides`` row it
         was registered as -- that link is what lets an annotation be traced
@@ -463,7 +473,15 @@ class TcgaCatalog:
         ``downloaded_at`` only advances when ``local_path`` actually changes
         (or was unset) -- calling this again with the SAME path (the shape
         ``migrate-tcga-catalog`` re-runs in) is then a true no-op on that
-        column too, not a provenance-erasing timestamp bump every time.
+        column too, not a provenance-erasing timestamp bump every time. When
+        it DOES advance, a caller-supplied ``downloaded_at`` (normalized via
+        :func:`_coerce_utc_datetime`, same as ``upsert_rows``' ``first_seen_at``)
+        is used instead of ``_utcnow()`` -- round 3 finding 4: without this,
+        ``migrate-tcga-catalog`` carrying a flat catalog's already-recorded
+        download over always replaced it with the moment the IMPORT ran, the
+        identical provenance loss ``first_seen_at`` was already fixed for,
+        one column over. A caller that omits it (an ordinary download
+        completing right now) still gets ``_utcnow()``, unchanged.
         """
         with Session(self.engine) as s:
             rec = s.get(TcgaFile, file_id)
@@ -472,7 +490,12 @@ class TcgaCatalog:
             new_path = str(local_path)
             if rec.local_path != new_path:
                 rec.local_path = new_path
-                rec.downloaded_at = _utcnow()
+                coerced = (
+                    _coerce_utc_datetime(downloaded_at)
+                    if downloaded_at is not None
+                    else None
+                )
+                rec.downloaded_at = coerced if coerced is not None else _utcnow()
             if slide_id is not None:
                 rec.slide_id = slide_id
             s.commit()

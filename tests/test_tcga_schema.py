@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 import sqlalchemy as sa
@@ -345,6 +345,106 @@ def test_migrate_tcga_catalog_preserves_first_seen_at_from_the_source(
     )
 
 
+def test_migrate_tcga_catalog_preserves_downloaded_at_from_the_source(
+    tmp_path, rows, capsys
+):
+    """BUILD-PLAN-DB round 3 finding 4: the identical R-3 provenance defect
+    fixed for first_seen_at above, one column over -- migrate-tcga-catalog's
+    SELECT still omitted downloaded_at, so mark_downloaded's `_utcnow()`
+    fallback replaced the source catalog's own downloaded_at with the
+    moment the IMPORT ran. Source vs destination (R-3), not a count."""
+    from hescope.cli import main
+    from hescope.db import get_engine
+
+    cat = _flat_catalog(tmp_path, rows)
+    fid = rows[0]["file_id"]
+    slide = tmp_path / "already-downloaded.svs"
+    slide.write_bytes(b"x" * 16)
+    cat.mark_downloaded(fid, str(slide))
+
+    backdated = "2020-06-15T09:30:00+00:00"
+    con = sqlite3.connect(str(tmp_path / "catalog.db"))
+    con.execute(
+        "UPDATE tcga_slides SET downloaded_at = ? WHERE file_id = ?",
+        (backdated, fid),
+    )
+    con.commit()
+    con.close()
+
+    db_url = f"sqlite:///{tmp_path / 'main.db'}"
+    main(["--db", db_url, "init"])
+    capsys.readouterr()
+    assert main([
+        "--db", db_url, "migrate-tcga-catalog",
+        "--catalog-db", str(tmp_path / "catalog.db"),
+    ]) == 0
+
+    engine = get_engine(db_url)
+    with engine.connect() as conn:
+        dest = conn.execute(
+            sa.text("SELECT downloaded_at FROM tcga_files WHERE file_id=:f"),
+            {"f": fid},
+        ).scalar_one()
+    assert str(dest) == "2020-06-15 09:30:00.000000", (
+        "tcga_files.downloaded_at must equal the SOURCE catalog's value "
+        f"exactly; got {dest!r} (source was {backdated!r})"
+    )
+
+
+def test_migrate_tcga_catalog_does_not_count_an_unwritten_link_as_preserved(
+    tmp_path, capsys
+):
+    """BUILD-PLAN-DB round 3 finding 5: `preserved N download(s)` was
+    incremented unconditionally, discarding mark_downloaded's bool -- a row
+    upsert_rows refuses to create (empty file_id, so no TcgaFile row ever
+    exists for it) still counted as 'preserved' even though nothing was
+    written. Seen to fail before the fix: 'preserved 1 download(s)' printed
+    while tcga_files held 0 rows."""
+    from hescope.cli import main
+    from hescope.db import get_engine
+
+    catalog_path = tmp_path / "catalog.db"
+    con = sqlite3.connect(str(catalog_path))
+    con.execute(
+        """
+        CREATE TABLE tcga_slides (
+            file_id TEXT PRIMARY KEY, file_name TEXT, file_size INTEGER,
+            project_id TEXT, case_submitter_id TEXT, sample_type TEXT,
+            primary_site TEXT, local_path TEXT, downloaded_at TEXT,
+            first_seen_at TEXT, md5sum TEXT
+        )
+        """
+    )
+    local_file = tmp_path / "s.svs"
+    local_file.write_bytes(b"bytes")
+    con.execute(
+        "INSERT INTO tcga_slides (file_id, local_path, first_seen_at) "
+        "VALUES ('', ?, ?)",
+        (str(local_file), "2020-01-01T00:00:00+00:00"),
+    )
+    con.commit()
+    con.close()
+
+    db_url = f"sqlite:///{tmp_path / 'main.db'}"
+    main(["--db", db_url, "init"])
+    capsys.readouterr()
+
+    assert main([
+        "--db", db_url, "migrate-tcga-catalog", "--catalog-db", str(catalog_path),
+    ]) == 0
+    out = capsys.readouterr().out
+
+    assert "imported 0 new file row(s)" in out
+    assert "preserved 0 download(s)" in out, (
+        f"a download whose row was never created must not be counted as "
+        f"preserved: {out!r}"
+    )
+    engine = get_engine(db_url)
+    with engine.connect() as conn:
+        n = conn.execute(sa.text("SELECT COUNT(*) FROM tcga_files")).scalar_one()
+    assert n == 0
+
+
 def test_upsert_rows_preserves_a_given_first_seen_at(catalog):
     """Unit-level companion to the CLI-integration test above: TcgaCatalog
     .upsert_rows must use a caller-supplied first_seen_at for a NEW row
@@ -360,6 +460,42 @@ def test_upsert_rows_preserves_a_given_first_seen_at(catalog):
     with sa.orm.Session(catalog.engine) as s:
         rec = s.get(TcgaFile, "f1")
         assert rec.first_seen_at == given
+
+
+def test_mark_downloaded_preserves_a_given_downloaded_at(catalog, tmp_path):
+    """BUILD-PLAN-DB round 3 finding 4: mark_downloaded always stamped
+    ``downloaded_at`` with ``_utcnow()`` -- the moment IT ran, not the moment
+    the file actually landed. Unit-level companion to
+    test_migrate_tcga_catalog_preserves_downloaded_at_from_the_source below,
+    the exact same fix ``first_seen_at`` already got in
+    test_upsert_rows_preserves_a_given_first_seen_at."""
+    catalog.upsert_rows([{"file_id": "f-dl", "file_name": "f.svs", "file_size": 1}])
+    slide = tmp_path / "s.svs"
+    slide.write_bytes(b"x")
+    given = datetime(2020, 6, 15, 9, 30, 0)
+
+    assert catalog.mark_downloaded("f-dl", slide, downloaded_at=given) is True
+
+    with sa.orm.Session(catalog.engine) as s:
+        rec = s.get(TcgaFile, "f-dl")
+        assert rec.downloaded_at == given
+
+
+def test_mark_downloaded_without_downloaded_at_still_defaults_to_now(catalog, tmp_path):
+    """Guard against the fix overreaching: an ordinary download completing
+    right now (no caller-supplied downloaded_at) must still be stamped
+    'now', not left NULL."""
+    catalog.upsert_rows([{"file_id": "f-now", "file_name": "f.svs", "file_size": 1}])
+    slide = tmp_path / "s2.svs"
+    slide.write_bytes(b"x")
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    assert catalog.mark_downloaded("f-now", slide) is True
+
+    with sa.orm.Session(catalog.engine) as s:
+        rec = s.get(TcgaFile, "f-now")
+        assert rec.downloaded_at is not None
+        assert rec.downloaded_at >= before
 
 
 def test_mark_downloaded_on_unknown_id_returns_false_and_writes_nothing(catalog, tmp_path):

@@ -280,16 +280,6 @@ def _migration_2_apply(conn: sa.Connection) -> None:
 # Migration 3: TCGA download -> storage -> injection (BUILD-PLAN-DB.md Phase 2)
 # ---------------------------------------------------------------------------
 
-#: Column list shared by the table-rebuild's CREATE/INSERT and by every raw
-#: SELECT/UPDATE below -- one definition so the rebuild and the backfill
-#: cannot silently drift onto different column sets.
-_TCGA_FILES_COLUMNS = (
-    "file_id", "file_name", "file_size", "md5sum", "sample_id",
-    "case_submitter_id", "project_id", "local_path", "downloaded_at",
-    "first_seen_at", "slide_id",
-)
-
-
 def _tcga_files_has_slide_fk(conn: sa.Connection) -> bool:
     """Whether ``tcga_files.slide_id`` already carries a REAL foreign key to
     ``slides(id)`` at the SQLite level (``PRAGMA foreign_key_list``, not the
@@ -339,29 +329,48 @@ def _rebuild_tcga_files_with_slide_fk(conn: sa.Connection) -> None:
     calls ``init_tcga_schema`` first, the same self-containment
     ``init_db`` already gets) rebuilds just as an old one with 50 rows does;
     :func:`_tcga_files_has_slide_fk` makes a second run a no-op either way.
+
+    The new table's column list is read from ``PRAGMA table_info`` on the
+    LIVE table, not from a hardcoded constant -- a hardcoded list silently
+    DROPS any column the live table has beyond it (defect: an
+    ``ALTER TABLE tcga_files ADD COLUMN`` issued by code ahead of this
+    migration, or any future column, was gone with no error after this
+    rebuild). Reading the actual columns means the CREATE/INSERT can never
+    drift from what the table really holds, by construction, rather than by
+    a comment asking two independent lists to stay in sync.
     """
+    info_rows = conn.execute(sa.text('PRAGMA table_info("tcga_files")')).all()
+    # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk)
+    col_names = [r[1] for r in info_rows]
+    pk_cols = [r[1] for r in info_rows if r[5]]
+    col_defs = []
+    for _cid, name, coltype, notnull, dflt_value, _pk in info_rows:
+        parts = [f'"{name}"']
+        if coltype:
+            parts.append(coltype)
+        if notnull:
+            parts.append("NOT NULL")
+        if dflt_value is not None:
+            parts.append(f"DEFAULT {dflt_value}")
+        col_defs.append(" ".join(parts))
+    constraints = [f'PRIMARY KEY ({", ".join(pk_cols)})']
+    if "sample_id" in col_names:
+        constraints.append(
+            "FOREIGN KEY(sample_id) REFERENCES tcga_samples (sample_id)"
+        )
+    constraints.append(
+        "FOREIGN KEY(slide_id) REFERENCES slides (id) ON DELETE SET NULL"
+    )
+
     conn.execute(sa.text("DROP TABLE IF EXISTS tcga_files__mig3_rebuild"))
     conn.execute(
         sa.text(
             "CREATE TABLE tcga_files__mig3_rebuild ("
-            "file_id VARCHAR(64) NOT NULL, "
-            "file_name VARCHAR(512), "
-            "file_size INTEGER, "
-            "md5sum VARCHAR(64), "
-            "sample_id VARCHAR(64), "
-            "case_submitter_id VARCHAR(64), "
-            "project_id VARCHAR(64), "
-            "local_path VARCHAR(1024), "
-            "downloaded_at DATETIME, "
-            "first_seen_at DATETIME NOT NULL, "
-            "slide_id INTEGER, "
-            "PRIMARY KEY (file_id), "
-            "FOREIGN KEY(sample_id) REFERENCES tcga_samples (sample_id), "
-            "FOREIGN KEY(slide_id) REFERENCES slides (id) ON DELETE SET NULL"
-            ")"
+            + ", ".join(col_defs + constraints)
+            + ")"
         )
     )
-    cols = ", ".join(_TCGA_FILES_COLUMNS)
+    cols = ", ".join(f'"{c}"' for c in col_names)
     conn.execute(
         sa.text(
             f"INSERT INTO tcga_files__mig3_rebuild ({cols}) "
@@ -373,9 +382,10 @@ def _rebuild_tcga_files_with_slide_fk(conn: sa.Connection) -> None:
         sa.text("ALTER TABLE tcga_files__mig3_rebuild RENAME TO tcga_files")
     )
     for col in ("case_submitter_id", "slide_id", "sample_id", "project_id"):
-        conn.execute(
-            sa.text(f'CREATE INDEX ix_tcga_files_{col} ON tcga_files ({col})')
-        )
+        if col in col_names:
+            conn.execute(
+                sa.text(f'CREATE INDEX ix_tcga_files_{col} ON tcga_files ({col})')
+            )
 
 
 @dataclass(frozen=True)
@@ -384,22 +394,60 @@ class _TcgaLinkCandidate:
     3's backfill would do (:func:`plan_migration_3`) or does
     (:func:`_migration_3_apply`) with it -- one computation shared by both,
     for the same reason ``_SlideBackfill`` is shared by migration 2's plan
-    and apply (see that dataclass's docstring)."""
+    and apply (see that dataclass's docstring).
+
+    ``dangling`` marks a row whose CURRENT ``slide_id`` names no row in
+    ``slides`` (round 3 finding 2: possible today because the column carries
+    no real constraint until this migration adds one -- e.g.
+    ``merge_duplicate_slide_paths`` deleting the row it pointed at). Such a
+    row is treated exactly like an unlinked one: ``already_linked_slide_id``
+    is ``None`` and ``matched_slide_id`` goes through the same
+    content-key/path matching as any other row, so the link is recovered
+    rather than the FK rebuild's FK-checked copy aborting on it.
+    """
 
     file_id: str
     local_path: str
     already_linked_slide_id: int | None
     matched_slide_id: int | None
+    dangling: bool = False
 
 
-def _find_slide_for_local_path(conn: sa.Connection, local_path: str) -> int | None:
+def _slides_identity_columns_exist(conn: sa.Connection) -> bool:
+    """Whether ``slides`` already carries migration 2's identity columns
+    (``identity_scheme`` / ``identity_key``).
+
+    ``False`` on a database migration 2 has never touched -- exactly the
+    database ``migrate --dry-run`` must be able to preview (R-1: it must
+    never call ``init_db`` -- see :func:`migrate`'s docstring), and exactly
+    the shape a real (non-dry-run) ``migrate()`` call always sees for a
+    moment too, since migration 2 runs before migration 3 in the same call.
+    Round 3 finding 1: :func:`_find_slide_for_local_path` used to query
+    ``identity_scheme`` unconditionally, so the read-only preview crashed
+    (``OperationalError: no such column: identity_scheme``) on precisely the
+    pre-Phase-1 databases migration 3 exists for, while the real run never
+    hit it because ``init_db`` (called first) had already added the column.
+    """
+    if not sa.inspect(conn).has_table("slides"):
+        return False
+    cols = {c["name"] for c in sa.inspect(conn).get_columns("slides")}
+    return "identity_scheme" in cols
+
+
+def _find_slide_for_local_path(
+    conn: sa.Connection, local_path: str, *, identity_ready: bool = True
+) -> int | None:
     """Look up (never create) the ``slides`` row a downloaded TCGA file
     belongs to. Tried in order:
 
     1. Content identity -- the same ``('sha256', content_key(path))`` Phase 1
        backfills onto every resolving slide (:func:`_compute_slide_backfills`
        above), so a file downloaded once and opened once already carries a
-       matching row most of the time.
+       matching row most of the time. Skipped entirely when
+       ``identity_ready`` is ``False`` (``slides.identity_scheme`` does not
+       exist yet on this database -- see
+       :func:`_slides_identity_columns_exist`), since the column the query
+       needs simply is not there.
     2. An exact ``path`` match -- covers a slide row whose identity is NULL
        (a duplicate-content group migration 2 deliberately leaves unlinked,
        or a row from before Phase 1 ran at all) but whose ``path`` happens
@@ -417,18 +465,19 @@ def _find_slide_for_local_path(conn: sa.Connection, local_path: str) -> int | No
     satisfies the new foreign key. A file downloaded but never opened is
     correctly reported as "could not link", not silently half-registered.
     """
-    ck = content_key(local_path)
-    if ck is not None:
-        key, _size = ck
-        found = conn.execute(
-            sa.text(
-                "SELECT id FROM slides WHERE identity_scheme='sha256' "
-                "AND identity_key=:key"
-            ),
-            {"key": key},
-        ).scalar()
-        if found is not None:
-            return int(found)
+    if identity_ready:
+        ck = content_key(local_path)
+        if ck is not None:
+            key, _size = ck
+            found = conn.execute(
+                sa.text(
+                    "SELECT id FROM slides WHERE identity_scheme='sha256' "
+                    "AND identity_key=:key"
+                ),
+                {"key": key},
+            ).scalar()
+            if found is not None:
+                return int(found)
     # Local import: this module must not depend on hescope.db at module
     # level (see migrate()'s docstring on the import cycle that avoids).
     from .db import normalize_slide_path
@@ -443,6 +492,12 @@ def _find_slide_for_local_path(conn: sa.Connection, local_path: str) -> int | No
 def _compute_tcga_link_candidates(conn: sa.Connection) -> list[_TcgaLinkCandidate]:
     if not sa.inspect(conn).has_table("tcga_files"):
         return []
+    identity_ready = _slides_identity_columns_exist(conn)
+    valid_slide_ids: set[int] = (
+        set(conn.execute(sa.text("SELECT id FROM slides")).scalars().all())
+        if sa.inspect(conn).has_table("slides")
+        else set()
+    )
     rows = conn.execute(
         sa.text(
             "SELECT file_id, local_path, slide_id FROM tcga_files "
@@ -451,11 +506,14 @@ def _compute_tcga_link_candidates(conn: sa.Connection) -> list[_TcgaLinkCandidat
     ).all()
     out: list[_TcgaLinkCandidate] = []
     for file_id, local_path, slide_id in rows:
-        if slide_id is not None:
+        if slide_id is not None and slide_id in valid_slide_ids:
             out.append(_TcgaLinkCandidate(file_id, local_path, slide_id, slide_id))
             continue
-        matched = _find_slide_for_local_path(conn, local_path)
-        out.append(_TcgaLinkCandidate(file_id, local_path, None, matched))
+        dangling = slide_id is not None  # non-null but names no row in slides
+        matched = _find_slide_for_local_path(
+            conn, local_path, identity_ready=identity_ready
+        )
+        out.append(_TcgaLinkCandidate(file_id, local_path, None, matched, dangling))
     return out
 
 
@@ -468,14 +526,19 @@ def plan_migration_3(conn: sa.Connection) -> dict:
     real would do).
 
     Returns ``{"tcga_files_exists": bool, "fk_present": bool,
-    "with_local_path": N, "already_linked": N, "would_link": N,
-    "could_not_link": N}``. ``fk_present`` is meaningless (``False``) when
-    ``tcga_files_exists`` is ``False`` -- there is no table to have a
-    constraint on yet.
+    "with_local_path": N, "already_linked": N, "dangling_slide_ids": N,
+    "would_link": N, "could_not_link": N}``. ``fk_present`` is meaningless
+    (``False``) when ``tcga_files_exists`` is ``False`` -- there is no table
+    to have a constraint on yet. ``dangling_slide_ids`` (round 3 finding 2)
+    counts rows whose CURRENT ``slide_id`` names no row in ``slides`` --
+    these are excluded from ``already_linked`` (a dangling reference is not
+    a valid link) and folded into ``would_link``/``could_not_link`` instead,
+    since the migration re-resolves them rather than aborting on them.
     """
     exists = sa.inspect(conn).has_table("tcga_files")
     candidates = _compute_tcga_link_candidates(conn)
     already_linked = sum(1 for c in candidates if c.already_linked_slide_id is not None)
+    dangling = sum(1 for c in candidates if c.dangling)
     would_link = sum(
         1 for c in candidates
         if c.already_linked_slide_id is None and c.matched_slide_id is not None
@@ -489,6 +552,7 @@ def plan_migration_3(conn: sa.Connection) -> dict:
         "fk_present": _tcga_files_has_slide_fk(conn),
         "with_local_path": len(candidates),
         "already_linked": already_linked,
+        "dangling_slide_ids": dangling,
         "would_link": would_link,
         "could_not_link": could_not_link,
     }
@@ -501,13 +565,39 @@ def _migration_3_apply(conn: sa.Connection) -> None:
     :func:`migrate` before any migration runs -- see that function's
     docstring, the same self-containment fix migration 2 already needed for
     ``slide_files``), so by the time this runs the table always exists,
-    fresh or legacy. This function's job is (1) give ``slide_id`` a real
-    foreign key, via a table rebuild since SQLite cannot ``ALTER TABLE ADD
-    CONSTRAINT`` (see :func:`_rebuild_tcga_files_with_slide_fk`), and (2)
-    backfill ``slide_id`` for every row whose ``local_path`` resolves to an
-    already-registered slide -- never inventing one (see
+    fresh or legacy. This function's job is (1) clear any dangling
+    ``slide_id`` (round 3 finding 2 -- see below), (2) give ``slide_id`` a
+    real foreign key, via a table rebuild since SQLite cannot ``ALTER TABLE
+    ADD CONSTRAINT`` (see :func:`_rebuild_tcga_files_with_slide_fk`), and
+    (3) backfill ``slide_id`` for every row whose ``local_path`` resolves to
+    an already-registered slide -- never inventing one (see
     :func:`_find_slide_for_local_path`'s docstring on why not).
     """
+    # A slide_id that already names no row in `slides` -- possible today
+    # because the column carries no real constraint until the rebuild below
+    # adds one. Real, shipped ways to reach this state: SlideRepo.delete()
+    # (removes a slide but never touches tcga_files -- the two tables have
+    # no ORM relationship, living on separate DeclarativeBases), and, on a
+    # database from before round 3's OTHER fix, merge_duplicate_slide_paths
+    # deleting the row it pointed at (that path is now closed -- see
+    # hescope.db.merge_duplicate_slide_paths -- but a database this
+    # migration reaches after upgrading from an older version can already
+    # carry the dangling reference from before the fix existed). Must be
+    # cleared BEFORE the rebuild's INSERT ... SELECT, which is
+    # FK-checked immediately (see _rebuild_tcga_files_with_slide_fk's
+    # docstring) and would otherwise abort the WHOLE migration, permanently:
+    # every subsequent migrate() call hits the identical row and fails the
+    # identical way, with the version stuck and no recovery path in the
+    # codebase. Clearing it here and then letting the matching loop below
+    # (which runs on every row with slide_id NULL, including the one just
+    # cleared) re-resolve it from local_path is what recovers the link
+    # instead of merely avoiding the crash.
+    conn.execute(
+        sa.text(
+            "UPDATE tcga_files SET slide_id=NULL WHERE slide_id IS NOT NULL "
+            "AND slide_id NOT IN (SELECT id FROM slides)"
+        )
+    )
     if not _tcga_files_has_slide_fk(conn):
         _rebuild_tcga_files_with_slide_fk(conn)
     for c in _compute_tcga_link_candidates(conn):

@@ -534,6 +534,60 @@ def test_migrate_dry_run_reports_migration_2_backfill_counts(tmp_path, capsys):
     con.dispose()
 
 
+def test_migrate_dry_run_does_not_crash_on_a_pre_migration_2_database_with_a_tcga_download(
+    tmp_path, capsys
+):
+    """BUILD-PLAN-DB round 3 finding 1: `migrate --dry-run` must not crash on
+    exactly the databases migration 3 exists for -- a legacy (schema version
+    0) database, before migration 2 has ever added `slides.identity_scheme`,
+    that already has a tcga_files row with a `local_path` (the shape app.py
+    writes at download time, or `migrate-tcga-catalog` writes on import).
+
+    Measured against the un-fixed CLI:
+
+        sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such
+        column: identity_scheme
+        [SQL: SELECT id FROM slides WHERE identity_scheme='sha256' AND
+        identity_key=?]
+        exit=1
+
+    printed after the migration-2 report line -- a half-printed report and a
+    stack trace instead of the preview the operator was told to check first.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "narrow_with_download.db"
+    _build_narrow_db(db_path)
+    con = sqlite3.connect(db_path)
+    con.execute(
+        """
+        CREATE TABLE tcga_files (
+            file_id VARCHAR(64) PRIMARY KEY, file_name VARCHAR(512),
+            file_size INTEGER, md5sum VARCHAR(64), sample_id VARCHAR(64),
+            case_submitter_id VARCHAR(64), project_id VARCHAR(64),
+            local_path VARCHAR(1024), downloaded_at DATETIME,
+            first_seen_at DATETIME NOT NULL, slide_id INTEGER
+        )
+        """
+    )
+    real_file = tmp_path / "downloaded.svs"
+    real_file.write_bytes(b"downloaded before migration 2 ever ran")
+    con.execute(
+        "INSERT INTO tcga_files (file_id, local_path, first_seen_at) "
+        "VALUES ('fid-narrow', ?, '2024-01-01 00:00:00')",
+        (str(real_file.resolve()),),
+    )
+    con.commit()
+    con.close()
+
+    rc = main(["--db", f"sqlite:///{db_path}", "migrate", "--dry-run"])
+    out = capsys.readouterr()
+
+    assert rc == 0, f"dry run crashed:\n{out.err}"
+    assert "would apply migration 3" in out.out
+    assert "could not be linked" in out.out
+
+
 def test_migrate_dry_run_does_not_mutate_a_non_wal_database(tmp_path, capsys):
     """`migrate --dry-run` must not write to the file it promises not to
     touch (R-1's whole premise for a dry run). Before the fix, the version

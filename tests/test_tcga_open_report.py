@@ -163,6 +163,7 @@ def _results_cell(catalog, tcga_dl, rows, tmp_path, client):
             AssertionError("open_slide must not run on the click path")
         ),
         "tcga_db": None,
+        "tcga_hits_to_rows": lambda hits: [],
         "tcga_storage_relpath": lambda fid, name=None, proj=None, case=None: (
             pathlib.Path(proj or "unknown-project")
             / (case or "unknown-case")
@@ -467,3 +468,103 @@ def test_the_already_on_disk_branch_is_unchanged_by_the_md5_wording(
     assert kind == "success"
     assert text.startswith("Opened ") and "already downloaded" in text
     assert "Downloaded and" not in text and "md5" not in text
+
+
+# --- BUILD-PLAN-DB round 3 finding 6 ----------------------------------------
+
+
+def test_a_failed_catalog_link_after_a_real_download_surfaces_a_warning(tmp_path):
+    """app.py discarded ``TcgaCatalog.mark_downloaded``'s bool return value
+    inside a bare ``except Exception: pass``, so a download could complete,
+    register a slide, and STILL leave ``tcga_files.slide_id`` unlinked with
+    nothing on screen to say so -- exactly when the search-time upsert never
+    ran for this file (e.g. it was only ever seen through 'Browse local
+    catalog', never a GDC search this session).
+
+    Runs app.py's REAL ``_on_download_open`` cell (the same ast-sliced/exec'd
+    technique the rest of this file uses), with the download actually
+    'completing' (the fake client writes a real file) and ``db.enabled =
+    True`` so a real slide gets registered -- but ``tcga_db`` (a real
+    ``TcgaCatalog``) was never told about this ``file_id`` via
+    ``upsert_rows``, so ``mark_downloaded`` returns ``False`` both on the
+    first try and on the retry (the fake client's ``last_hits`` is empty, so
+    there is nothing to seed from).
+    """
+    from hescope.db import SlideRepo, get_engine, init_db
+    from hescope.tcga_schema import TcgaCatalog, hits_to_rows
+
+    engine = get_engine(f"sqlite:///{tmp_path}/link_warn.db")
+    init_db(engine)
+
+    class _DbEnabled:
+        enabled = True
+        slide_repo = SlideRepo(engine)
+
+    tcga_db = TcgaCatalog(engine)  # "fid-unknown" was never upsert_rows'd
+
+    class _FakeSlideSource:
+        dimensions = (10, 10)
+        mpp = None
+        name = "downloaded.svs"
+
+        def close(self):
+            pass
+
+    class _Client:
+        last_hits: list = []  # nothing for the retry to seed from
+
+        def download_slide(self, file_id, dest_dir, progress_cb=None, expected_md5=None):
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            p = dest_dir / "downloaded.svs"
+            p.write_bytes(b"pretend slide bytes")
+            return p
+
+    catalog = SlideCatalog(tmp_path / "flat_catalog.db")
+    catalog.upsert([_record(file_id="fid-unknown", name="downloaded.svs")])
+    rows = catalog.search(limit=100000)
+    tcga_dl = _new_dl()
+
+    published: dict = {}
+    panel = _PanelSpy()
+    momod = _MO()
+    cell, params = _cell("def _on_download_open(_):")
+    deps = {
+        "TCGA_DATA_DIR": tmp_path,
+        "get_tcga_records": lambda: rows,
+        "mo": momod,
+        "set_tcga_msg": lambda v: published.__setitem__("msg", v),
+        "tcga_catalog": catalog,
+        "tcga_client": _Client(),
+        "tcga_dl": tcga_dl,
+        "tcga_panel": panel,
+        "db": _DbEnabled(),
+        "open_slide": lambda p: _FakeSlideSource(),
+        "tcga_db": tcga_db,
+        "tcga_hits_to_rows": hits_to_rows,
+        "tcga_storage_relpath": lambda fid, name=None, proj=None, case=None: (
+            pathlib.Path(proj or "unknown-project")
+            / (case or "unknown-case")
+            / (name or f"{fid}.svs")
+        ),
+    }
+    missing = [p for p in params if p not in deps]
+    assert not missing, f"the TCGA results cell grew new dependencies: {missing}"
+    cell(**{p: deps[p] for p in params})
+    panel.table._update([0])
+    momod.buttons["Open slide (downloads if needed)"]._update(object())
+
+    if tcga_dl["thread"] is not None:
+        tcga_dl["thread"].join(timeout=30)
+
+    assert tcga_dl.get("catalog_link_failed") is True, (
+        "mark_downloaded returned False (and the retry found nothing to "
+        "seed from), so the worker must record that the link failed instead "
+        "of silently discarding it"
+    )
+
+    published2, _opened = _run_status_cell(tcga_dl, catalog)
+    kind, text = published2["msg"]
+    assert "catalog link" in text.lower(), (
+        "a download that completed but could not be linked into the TCGA "
+        f"hierarchy must say so on screen: {text!r}"
+    )
