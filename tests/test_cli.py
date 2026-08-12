@@ -95,6 +95,53 @@ def test_ingest_missing_path_errors(db_url, capsys):
     assert "no such file" in capsys.readouterr().err
 
 
+def test_ingest_reports_merged_duplicate_content_instead_of_double_counting(
+    db_url, tmp_path, capsys
+):
+    """Ingesting a directory with two byte-identical images: registration
+    correctly merges them into ONE slide (identity is content, not path --
+    that is Phase 1's whole point, and is not itself a bug). What WAS wrong
+    is the COUNT the CLI printed: it reported "2 registered" -- one per
+    ``register()`` call -- while only 1 slide row ever existed, silently
+    dropping the fact that one of the two files landed on an existing row.
+
+    BUILD-PLAN-DB.md Phase 1 debugger round 2, finding 3. The pre-fix
+    ``tests/test_cli.py::test_ingest_single_file_and_recursive`` was edited
+    (commit f9bc290) to use DIFFERENT pixel content for its two files
+    specifically to dodge this collapse rather than pin what happens when it
+    occurs -- this test uses IDENTICAL content on purpose, to check the
+    report instead of avoiding it.
+
+    Measured against the pre-fix CLI with this exact seed:
+
+        registered slide id=1 a.png (32x32)
+        registered slide id=1 b.png (32x32)
+        ingest complete: 2 registered, 0 skipped
+        actual slide rows in the database: 1
+    """
+    d = tmp_path / "images"
+    d.mkdir()
+    payload = np.zeros((32, 32, 3), dtype=np.uint8)
+    Image.fromarray(payload, "RGB").save(d / "a.png")
+    Image.fromarray(payload, "RGB").save(d / "b.png")  # byte-identical to a.png
+
+    main(["--db", db_url, "init"])
+    capsys.readouterr()
+    assert main(["--db", db_url, "ingest", str(d)]) == 0
+    out = capsys.readouterr().out
+
+    engine = get_engine(db_url)
+    slides = SlideRepo(engine).list()
+    engine.dispose()
+    assert len(slides) == 1, "byte-identical content must merge into one slide row"
+
+    # the report must say ONE new slide and ONE file merged into it -- not
+    # "2 registered", which claims a second slide row that was never created
+    assert "1 registered" in out
+    assert "1 merged" in out
+    assert "2 file(s) seen" in out
+
+
 def test_ingest_single_file_and_recursive(db_url, tmp_path, capsys):
     # distinct pixel content for each file: registration now dedups on
     # CONTENT (hescope.identity), not path, so two byte-identical files

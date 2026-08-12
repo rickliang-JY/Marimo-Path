@@ -139,22 +139,66 @@ def _compute_roi_bbox_backfills(
     return out
 
 
+def _conflicting_identities(backfills: list[_SlideBackfill]) -> set[str]:
+    """Identity keys shared by two or more resolving (non-missing) rows.
+
+    Shared by :func:`plan_migration_2` and :func:`_migration_2_apply` (the
+    apply loop below inlined this same two-pass seen/conflicting logic
+    before it was pulled out here) so the preview's "how many rows get a
+    real identity" and "how many are duplicate-content and get skipped"
+    counts are computed by the exact same rule ``_migration_2_apply`` uses
+    to decide which rows to leave ``identity_key`` NULL for -- see that
+    function's docstring for why it must not merge them.
+    """
+    seen: set[str] = set()
+    conflicting: set[str] = set()
+    for b in backfills:
+        if not b.missing:
+            if b.identity_key in seen:
+                conflicting.add(b.identity_key)
+            seen.add(b.identity_key)
+    return conflicting
+
+
 def plan_migration_2(conn: sa.Connection) -> dict:
     """What migration 2's backfill WOULD write, computed read-only.
 
     Returns ``{"slide_files": N, "missing": N, "distinct_identities": N,
-    "rois_backfilled": N}``. Powers ``hescope migrate --dry-run``'s report
-    (R-8: measured, not invented) -- see :func:`_compute_slide_backfills` /
-    :func:`_compute_roi_bbox_backfills`, which this and the real migration
-    both call, so the preview cannot say something different from what
-    running for real would do.
+    "duplicate_content_rows": N, "rois_backfilled": N}``. Powers ``hescope
+    migrate --dry-run``'s report (R-8: measured, not invented) -- see
+    :func:`_compute_slide_backfills` / :func:`_compute_roi_bbox_backfills`,
+    which this and the real migration both call, so the preview cannot say
+    something different from what running for real would do.
+
+    ``distinct_identities`` counts only rows migration 2 will actually WRITE
+    an identity for -- it excludes duplicate-content rows via
+    :func:`_conflicting_identities`, the same guard ``_migration_2_apply``
+    uses to leave those rows ``identity_key`` NULL rather than colliding on
+    the partial unique index. Before this fix ``distinct_identities`` was
+    ``len({b.identity_key for b in backfills if not b.missing})`` -- a naive
+    set of ALL resolving identities, duplicates included, with no knowledge
+    of the apply-side guard -- so a duplicate-content pair (two rows, one
+    shared identity_key) was counted as "1 distinct identity" here while the
+    real migration wrote 0 identities for that pair (both left NULL, see
+    ``_migration_2_apply``). ``duplicate_content_rows`` reports separately
+    how many resolving rows fall into a conflicting group and get skipped,
+    so a reviewer sees the blast radius the writable count alone hides.
     """
     backfills = _compute_slide_backfills(conn)
-    identities = {b.identity_key for b in backfills if not b.missing}
+    conflicting = _conflicting_identities(backfills)
+    identities = {
+        b.identity_key
+        for b in backfills
+        if not b.missing and b.identity_key not in conflicting
+    }
+    duplicate_content_rows = sum(
+        1 for b in backfills if not b.missing and b.identity_key in conflicting
+    )
     return {
         "slide_files": len(backfills),
         "missing": sum(1 for b in backfills if b.missing),
         "distinct_identities": len(identities),
+        "duplicate_content_rows": duplicate_content_rows,
         "rois_backfilled": len(_compute_roi_bbox_backfills(conn)),
     }
 
@@ -192,13 +236,9 @@ def _migration_2_apply(conn: sa.Connection) -> None:
     backfills = _compute_slide_backfills(conn)  # one pass; apply() and the
     # dry-run preview both call this, but within one apply() we must not
     # hash every file twice just to find duplicates before writing.
-    conflicting_identities: set[str] = set()
-    seen_identities: set[str] = set()
-    for b in backfills:
-        if not b.missing:
-            if b.identity_key in seen_identities:
-                conflicting_identities.add(b.identity_key)
-            seen_identities.add(b.identity_key)
+    conflicting_identities = _conflicting_identities(backfills)  # shared with
+    # plan_migration_2 (see its docstring) so the preview's counts cannot
+    # drift from what this loop below actually decides to write.
     for b in backfills:
         first_seen = _db_datetime(b.created_at) if isinstance(b.created_at, datetime) else b.created_at
         conn.execute(
@@ -323,18 +363,41 @@ class MigrationReport:
 def migrate(engine: sa.Engine, *, dry_run: bool = False) -> MigrationReport:
     """Apply every pending migration, each in its own transaction.
 
+    Calls ``hescope.db.init_db(engine)`` first (unless ``dry_run``) so this
+    function is self-contained: migration 2's DDL (``slide_files``, the
+    identity columns/index, the bbox columns) is declared on the ORM models
+    and created by ``init_db``'s additive ``create_all`` + ``ALTER TABLE``
+    path, not by this module (see ``_migration_2_apply``'s docstring) --
+    calling ``migrate()`` without an ``init_db`` first used to raise
+    ``sqlite3.OperationalError: no such table: slide_files`` and leave the
+    version stuck at 1, on any legacy-schema database (measured; see
+    ``tests/test_migrations.py::test_migrate_is_self_contained_...``).
+    ``init_db`` is idempotent and additive-only (R-4), so calling it here
+    even when ``hescope.cli`` has already called it once is a no-op, not a
+    double-write. Imported locally (not at module top) to avoid a
+    module-level import cycle with ``hescope.db``.
+
     A migration that raises rolls back ONLY that migration's transaction
     (``schema_migrations`` included, since the table is created inside the
     same transaction the first time it is needed) and stops the run —
     migrations already committed before it stay committed, and the ones
     after it are reported in ``skipped``, never attempted.
 
-    ``dry_run=True`` never opens a write transaction, never calls any
-    migration's ``apply``, and never touches ``schema_migrations`` — it only
-    reads the current version and computes what running for real would do.
-    Safe to call against a database this process must never write to
-    (R-1): point it at a copy.
+    ``dry_run=True`` never calls ``init_db``, never opens a write
+    transaction, never calls any migration's ``apply``, and never touches
+    ``schema_migrations`` — it only reads the current version and computes
+    what running for real would do. Safe to call against a database this
+    process must never write to (R-1): point it at a copy. (The CLI's
+    ``--dry-run`` path additionally previews what ``init_db`` itself would
+    do, via ``hescope.db.plan_init_db`` against a read-only engine — see
+    ``hescope.cli._cmd_migrate`` — since this function's own dry run does
+    not touch ``init_db`` at all.)
     """
+    if not dry_run:
+        from .db import init_db
+
+        init_db(engine)
+
     from_version = current_version(engine)
     todo = pending(engine)
 

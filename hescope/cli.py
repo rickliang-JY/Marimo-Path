@@ -211,7 +211,14 @@ def _cmd_ingest(engine, path: str, kind: str, recursive: bool) -> int:
     init_db(engine)
     repo = SlideRepo(engine)
     files = _iter_image_files(root, recursive)
-    registered = 0
+    registered = 0  # files that produced a brand-new slide row
+    merged = 0  # files whose content already matched a known slide (a
+    # second location for that slide, not a second slide -- see
+    # BUILD-PLAN-DB.md Phase 1 debugger round 2, finding 3: this used to
+    # count every registration call as "registered" even when the content
+    # matched an existing row, so ingesting a directory with two
+    # byte-identical images printed "2 registered" while only 1 slide row
+    # ever existed)
     skipped = 0
     for f in files:
         try:
@@ -220,18 +227,30 @@ def _cmd_ingest(engine, path: str, kind: str, recursive: bool) -> int:
             print(f"warning: skipping unreadable file {f}: {exc}", file=sys.stderr)
             skipped += 1
             continue
-        slide_id = repo.register(
+        result = repo.register(
             source_kind=kind,
             name=source.name,
             path=str(f.resolve()),
             width=source.dimensions[0],
             height=source.dimensions[1],
             mpp=source.mpp,
+            report=True,
         )
-        registered += 1
-        print(f"registered slide id={slide_id} {source.name} "
-              f"({source.dimensions[0]}x{source.dimensions[1]})")
-    print(f"ingest complete: {registered} registered, {skipped} skipped")
+        dims = f"({source.dimensions[0]}x{source.dimensions[1]})"
+        if result.inserted:
+            registered += 1
+            print(f"registered slide id={result.id} {source.name} {dims}")
+        else:
+            merged += 1
+            print(
+                f"{f} matches existing slide id={result.id} {source.name} {dims} "
+                "-- location recorded, no new slide"
+            )
+    print(
+        f"ingest complete: {len(files)} file(s) seen, {registered} registered, "
+        f"{merged} merged into an existing slide (additional location recorded), "
+        f"{skipped} skipped"
+    )
     return 0
 
 
@@ -338,6 +357,7 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
                     f"  would write {mig2['slide_files']} slide_files row(s) "
                     f"({mig2['missing']} marked missing), "
                     f"{mig2['distinct_identities']} distinct identity(ies), "
+                    f"{mig2['duplicate_content_rows']} duplicate-content row(s) skipped, "
                     f"{mig2['rois_backfilled']} roi(s) with bbox backfilled"
                 )
         print(

@@ -524,8 +524,25 @@ def test_migration_2_does_not_merge_duplicate_content_or_crash(tmp_path):
 def test_plan_migration_2_matches_what_migration_2_actually_writes(tmp_path):
     """The dry-run preview and the real migration share one computation
     (see hescope.migrations._compute_slide_backfills /
-    _compute_roi_bbox_backfills) so they cannot silently drift -- assert
-    that invariant directly rather than trusting the shared-code comment."""
+    _compute_roi_bbox_backfills / _conflicting_identities) so they cannot
+    silently drift -- assert that invariant directly rather than trusting
+    the shared-code comment.
+
+    Includes a duplicate-content pair (sid3/sid4: byte-identical files) on
+    top of the original resolving+missing pair, so this test cannot pass by
+    construction the way a duplicate-free seed would (see BUILD-PLAN-DB.md
+    Phase 1 debugger round 2, finding 1). Before the fix,
+    ``plan_migration_2``'s ``distinct_identities`` was
+    ``len({b.identity_key for b in backfills if not b.missing})`` -- every
+    RESOLVING identity, duplicates included, with no knowledge of
+    ``_migration_2_apply``'s ``conflicting_identities`` guard that leaves
+    every row in a duplicate-content group identity-NULL. Measured against
+    that pre-fix code with exactly this seed:
+
+        preview["distinct_identities"] == 2  (1 from sid1, 1 from the dup pair)
+        actual identities written      == 1  (only sid1; the dup pair wrote 0)
+        AssertionError: assert 2 == 1
+    """
     engine = get_engine(f"sqlite:///{tmp_path}/mig2.db")
     init_db(engine)
     real_file = tmp_path / "s.svs"
@@ -535,6 +552,18 @@ def test_plan_migration_2_matches_what_migration_2_actually_writes(tmp_path):
     sid2 = _legacy_slide(engine, path=missing_path, created_at=datetime(2024, 1, 1), name="gone")
     _legacy_roi(engine, sid1, (0, 0, 10, 10))
     _legacy_roi(engine, sid2, (5, 5, 15, 15))
+
+    dup_payload = b"byte-identical duplicate-content pair for finding 1"
+    dup_a = tmp_path / "dup_a.svs"
+    dup_b = tmp_path / "dup_b.svs"
+    dup_a.write_bytes(dup_payload)
+    dup_b.write_bytes(dup_payload)
+    sid3 = _legacy_slide(
+        engine, path=str(dup_a.resolve()), created_at=datetime(2024, 1, 1), name="dup_a"
+    )
+    sid4 = _legacy_slide(
+        engine, path=str(dup_b.resolve()), created_at=datetime(2024, 1, 1), name="dup_b"
+    )
 
     with engine.connect() as conn:
         preview = plan_migration_2(conn)
@@ -554,12 +583,28 @@ def test_plan_migration_2_matches_what_migration_2_actually_writes(tmp_path):
                 "SELECT COUNT(DISTINCT identity_key) FROM slides WHERE identity_scheme IS NOT NULL"
             )
         ).scalar_one()
+        dup_rows = conn.execute(
+            sa.text(
+                "SELECT identity_scheme, identity_key FROM slides WHERE id IN (:a, :b)"
+            ),
+            {"a": sid3, "b": sid4},
+        ).all()
 
-    assert preview["slide_files"] == actual_files == 2
+    assert preview["slide_files"] == actual_files == 4
     assert preview["missing"] == actual_missing == 1
     assert preview["rois_backfilled"] == actual_rois == 2
-    assert preview["distinct_identities"] == 1  # sid1 resolves, sid2 doesn't
-    assert actual_identities == 1
+    # the whole point: the preview's writable-identity count must equal what
+    # migration 2 actually wrote, EVEN WITH a duplicate-content pair present
+    # (sid1 gets a real identity; sid2 is missing; sid3/sid4 collide and
+    # both stay NULL, so only 1 identity is written in total)
+    assert preview["distinct_identities"] == actual_identities == 1
+    assert preview["duplicate_content_rows"] == 2, (
+        "the 2 duplicate-content rows must be reported separately, not "
+        "folded silently into (or dropped from) distinct_identities"
+    )
+    assert all(scheme is None and key is None for scheme, key in dup_rows), (
+        "duplicate-content rows must stay identity-NULL, not silently claim one"
+    )
 
 
 def test_plan_migration_2_on_an_empty_database_is_all_zero(tmp_path):
@@ -569,7 +614,8 @@ def test_plan_migration_2_on_an_empty_database_is_all_zero(tmp_path):
     with engine.connect() as conn:
         preview = plan_migration_2(conn)
     assert preview == {
-        "slide_files": 0, "missing": 0, "distinct_identities": 0, "rois_backfilled": 0,
+        "slide_files": 0, "missing": 0, "distinct_identities": 0,
+        "duplicate_content_rows": 0, "rois_backfilled": 0,
     }
 
 
@@ -587,3 +633,108 @@ def test_migration_2_is_a_noop_on_an_already_up_to_date_empty_database(tmp_path)
     assert current_version(engine) == 2
     with engine.connect() as conn:
         assert conn.execute(sa.text("SELECT COUNT(*) FROM slide_files")).scalar_one() == 0
+
+
+# =============================================================================
+# migrate() must be self-contained (BUILD-PLAN-DB.md Phase 1 debugger round 2,
+# finding 2): the CLI happens to call init_db(engine) before migrate(engine),
+# which is the only reason `hescope migrate` works. Calling migrate() by
+# itself, the way a library caller or a script (not hescope.cli) would, must
+# not depend on that ordering.
+# =============================================================================
+
+
+def test_migrate_reaches_schema_version_on_a_legacy_database_with_no_init_db_call(
+    tmp_path,
+):
+    """``migrate(engine)`` alone -- NOT ``init_db(engine)`` then
+    ``migrate(engine)`` -- on a hand-built legacy-schema database (``slides``
+    and ``rois`` only; no ``slide_files`` table, no identity/bbox columns,
+    exactly the narrow schema migration 2's own DDL is declared against on
+    the ORM models, not in this module -- see ``_migration_2_apply``'s
+    docstring) must still reach ``SCHEMA_VERSION``.
+
+    Before the fix this raised and left the version stuck at 1. Measured
+    against the pre-fix ``migrate()`` with this exact seed (one legacy slide
+    row, so migration 2's backfill loop has something to write and isn't
+    silently a no-op the way an all-empty database is):
+
+        sqlite3.OperationalError: no such table: slide_files
+        [SQL: INSERT INTO slide_files (slide_id, path, source_kind,
+        first_seen_at, last_seen_at, missing_since) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(path) DO NOTHING]
+        report.to_version == 1
+        report.error is not None
+    """
+    import sqlite3
+
+    db_path = tmp_path / "legacy_no_init.db"
+    con = sqlite3.connect(db_path)
+    con.executescript(
+        """
+        CREATE TABLE slides (
+            id INTEGER PRIMARY KEY, source_kind VARCHAR(32), name VARCHAR(512),
+            path VARCHAR(1024) UNIQUE, width INTEGER, height INTEGER,
+            mpp FLOAT, extra_json TEXT, created_at DATETIME
+        );
+        CREATE TABLE rois (
+            id INTEGER PRIMARY KEY, slide_id INTEGER, kind VARCHAR(32),
+            points_json TEXT, bbox_json TEXT, label VARCHAR(512), notes TEXT,
+            patch_path VARCHAR(1024), stats_json TEXT, magnification FLOAT,
+            created_at DATETIME
+        );
+        INSERT INTO slides (source_kind, name, path, width, height, extra_json, created_at)
+        VALUES ('local', 's1', 'C:/nope/s1.svs', 10, 10, '{}', '2024-01-01 00:00:00');
+        """
+    )
+    con.commit()
+    con.close()
+
+    engine = get_engine(f"sqlite:///{db_path}")
+
+    report = migrate(engine)  # NOTE: no init_db(engine) call before this
+
+    assert report.error is None, f"migrate() must be self-contained: {report.error}"
+    assert report.to_version == SCHEMA_VERSION
+    assert current_version(engine) == SCHEMA_VERSION
+    with engine.connect() as conn:
+        assert "slide_files" in sa.inspect(conn).get_table_names()
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM slide_files")).scalar_one() == 1
+
+
+def test_migrate_dry_run_still_touches_nothing_and_does_not_call_init_db(tmp_path):
+    """The self-containment fix must not leak into the dry-run path: a dry
+    run still must not write anything, including the tables ``init_db``
+    would create (R-1's whole premise -- a dry run against a copy of the
+    live database must be safe even if that copy has an old schema)."""
+    import sqlite3
+
+    db_path = tmp_path / "legacy_dry.db"
+    con = sqlite3.connect(db_path)
+    con.executescript(
+        """
+        CREATE TABLE slides (
+            id INTEGER PRIMARY KEY, source_kind VARCHAR(32), name VARCHAR(512),
+            path VARCHAR(1024) UNIQUE, width INTEGER, height INTEGER,
+            mpp FLOAT, extra_json TEXT, created_at DATETIME
+        );
+        CREATE TABLE rois (
+            id INTEGER PRIMARY KEY, slide_id INTEGER, kind VARCHAR(32),
+            points_json TEXT, bbox_json TEXT, label VARCHAR(512), notes TEXT,
+            patch_path VARCHAR(1024), stats_json TEXT, magnification FLOAT,
+            created_at DATETIME
+        );
+        """
+    )
+    con.commit()
+    con.close()
+    before_tables = {"slides", "rois"}
+
+    engine = get_engine(f"sqlite:///{db_path}", read_only=True)
+    report = migrate(engine, dry_run=True)
+
+    assert report.error is None
+    assert set(sa.inspect(engine).get_table_names()) == before_tables, (
+        "dry_run must not call init_db -- no new tables from it either"
+    )
+    assert current_version(engine) == 0
