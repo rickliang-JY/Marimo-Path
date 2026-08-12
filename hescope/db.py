@@ -13,9 +13,10 @@ import io
 import json
 import logging
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Iterator, Literal
 
 import sqlalchemy as sa
 from sqlalchemy import ForeignKey, Index, String, Text, event, select
@@ -134,28 +135,20 @@ def get_engine(url: str | None = None, *, read_only: bool = False) -> sa.Engine:
 
         @event.listens_for(engine, "begin")
         def _sqlite_begin(conn: sa.Connection) -> None:
-            # The counterpart to isolation_level=None above: with pysqlite's
-            # own transaction management disabled, nothing starts a
-            # transaction unless we do -- this is what makes DDL rollback on
-            # exception instead of auto-committing.
-            #
-            # Must be BEGIN IMMEDIATE, not a bare (deferred) BEGIN. A
-            # deferred BEGIN takes no lock until the first statement, and a
-            # transaction that reads before it writes (SlideRepo.register,
-            # ROIRepo.update_annotation, ROIRepo.delete -- every
-            # read-then-write repo call) pins its read at a WAL snapshot on
-            # that first SELECT. A later write in the SAME transaction then
-            # has to upgrade that snapshot, which fails immediately with
-            # SQLITE_BUSY (surfaced as "database is locked") the moment a
-            # second connection has committed anything since the snapshot
-            # was taken -- and does NOT honour busy_timeout, because that is
-            # a wait-for-lock retry, not a snapshot-upgrade retry. Measured:
-            # 8 threads calling update_annotation on 8 DIFFERENT rois -> 6
-            # of 8 raised "database is locked" with a bare BEGIN, 0 of 8
-            # with BEGIN IMMEDIATE (which takes the write lock up front and
-            # so instead queues, honouring busy_timeout, exactly like the
-            # bare-INSERT case tests/test_db_concurrency.py already covers).
-            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            # DEFERRED by default, IMMEDIATE only when the caller asked for a
+            # write transaction (`write_session`). Making IMMEDIATE global was
+            # measured to be worse than the problem it solved: with one
+            # SQLAlchemy reader holding a transaction, a SECOND READER failed
+            # after 2266 ms with "database is locked", because IMMEDIATE takes
+            # the write lock for every transaction including read-only ones.
+            # Under a deferred BEGIN the same reader succeeds in 2 ms. Two
+            # concurrent readers are this app's normal shape -- the notebook
+            # and an agent over marimo-pair -- so that trade was backwards.
+            if conn.info.get("hescope_write"):
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
+                return
+            conn.exec_driver_sql("BEGIN")
+
 
     return engine
 
@@ -183,6 +176,41 @@ def sqlite_pragma_report(engine: sa.Engine) -> dict[str, Any]:
             }
     except Exception as exc:  # pragma: no cover - diagnostic only
         return {"error": str(exc)}
+
+
+@contextmanager
+def write_session(engine: sa.Engine) -> Iterator[Session]:
+    """A Session whose transaction takes SQLite's write lock UP FRONT.
+
+    Read-then-write methods need this. Under WAL a deferred ``BEGIN`` pins the
+    read at a snapshot on the first SELECT, and the later write in the same
+    transaction has to UPGRADE that snapshot -- which fails immediately with
+    SQLITE_BUSY as soon as another connection has committed since, and does not
+    honour ``busy_timeout``, because a snapshot upgrade is not a wait-for-lock.
+    Measured: 8 threads calling ``update_annotation`` on 8 different ROIs, 6 of
+    8 raised "database is locked" under a deferred BEGIN, 0 of 8 under
+    IMMEDIATE.
+
+    It is a per-call opt-in and must never become the global default: with a
+    reader holding a transaction, a global IMMEDIATE made a SECOND READER fail
+    after 2266 ms, against 2 ms under a deferred BEGIN. Two concurrent readers
+    are this application's normal shape.
+
+    A no-op on non-sqlite backends, where the flag is simply unread.
+    """
+    with engine.connect() as conn:
+        conn.info["hescope_write"] = True
+        try:
+            with Session(bind=conn) as session:
+                yield session
+        finally:
+            # MUST be cleared. `Connection.info` lives on the POOLED dbapi
+            # connection, so without this the flag survives return-to-pool and
+            # the next reader to be handed that connection silently gets
+            # BEGIN IMMEDIATE -- reintroducing the reader-blocks-reader failure
+            # this helper exists to avoid, intermittently and only under pool
+            # reuse, which is the worst way for it to come back.
+            conn.info.pop("hescope_write", None)
 
 
 def normalize_slide_path(path: str | Path) -> str:
@@ -715,7 +743,7 @@ class SlideRepo:
             ).scalar_one()
 
         try:
-            with Session(self.engine) as s:
+            with write_session(self.engine) as s:
                 slide_id = _upsert_by_identity(s)
                 self._touch_slide_file(s, slide_id, path, source_kind, now)
                 s.commit()
@@ -803,7 +831,7 @@ class SlideRepo:
     def delete(self, slide_id: int) -> None:
         """Delete a slide; its ROIs cascade-delete (and their agent_runs
         roi_id values are set to NULL)."""
-        with Session(self.engine) as s:
+        with write_session(self.engine) as s:
             slide = s.get(Slide, slide_id)
             if slide is not None:
                 s.delete(slide)
@@ -960,7 +988,7 @@ class ROIRepo:
         reported "Saved annotation for ROI N." unconditionally, including for
         a row a second session had already deleted (R07-14).
         """
-        with Session(self.engine) as s:
+        with write_session(self.engine) as s:
             rec = s.get(ROI, roi_id)
             if rec is None:
                 return False
@@ -983,7 +1011,7 @@ class ROIRepo:
         Returns whether a row was actually deleted — see
         :meth:`update_annotation` for why the caller needs to know (R07-14).
         """
-        with Session(self.engine) as s:
+        with write_session(self.engine) as s:
             rec = s.get(ROI, roi_id)
             if rec is None:
                 return False

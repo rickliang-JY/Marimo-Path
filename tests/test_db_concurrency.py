@@ -277,3 +277,118 @@ def test_wal_persists_across_engines(db_url):
     a second notebook) inherits it rather than racing to set it."""
     init_db(get_engine(db_url))
     assert sqlite_pragma_report(get_engine(db_url))["journal_mode"] == "wal"
+
+
+# --- the two scenarios that pull against each other ------------------------
+#
+# A global `BEGIN IMMEDIATE` fixes the second of these and breaks the first; a
+# global deferred `BEGIN` does the reverse. Both are asserted here so neither
+# can be "fixed" again by moving the setting back.
+
+
+def test_two_sqlalchemy_readers_do_not_block_each_other(db_url):
+    """The app's normal shape: the notebook holds the database open while an
+    agent reads it over marimo-pair.
+
+    Measured against a global BEGIN IMMEDIATE: the second reader FAILED after
+    2266 ms with "database is locked", because IMMEDIATE takes the write lock
+    for every transaction including read-only ones. This test is what stops
+    that from being reintroduced.
+    """
+    engine = get_engine(db_url)
+    init_db(engine)
+    slide_id = _slide(engine)
+
+    reading = threading.Event()
+    release = threading.Event()
+    failures: list = []
+
+    def _first_reader():
+        try:
+            with get_engine(db_url).connect() as conn:
+                conn.execute(sa.text("SELECT count(*) FROM rois")).scalar()
+                reading.set()
+                release.wait(timeout=20)
+        except Exception as exc:  # pragma: no cover - surfaced by the assert
+            failures.append(exc)
+            reading.set()
+
+    t = threading.Thread(target=_first_reader, daemon=True)
+    t.start()
+    assert reading.wait(timeout=10)
+
+    try:
+        started = time.perf_counter()
+        with get_engine(db_url).connect() as conn:
+            count = conn.execute(sa.text("SELECT count(*) FROM rois")).scalar()
+        elapsed = time.perf_counter() - started
+    finally:
+        release.set()
+        t.join(timeout=10)
+
+    assert not failures, failures
+    assert count == 0
+    assert elapsed < 1.0, (
+        f"a second reader took {elapsed:.2f}s while another reader held a "
+        "transaction — reads are taking the write lock"
+    )
+
+
+def test_concurrent_read_then_write_calls_all_succeed(db_url):
+    """The other side: ``update_annotation`` reads the row and then writes it.
+
+    Under a deferred BEGIN the read pins a WAL snapshot and the write has to
+    upgrade it, which fails instantly with SQLITE_BUSY and does NOT honour
+    busy_timeout. Measured before ``write_session``: 6 of 8 threads raised.
+    """
+    engine = get_engine(db_url)
+    init_db(engine)
+    slide_id = _slide(engine)
+    repo = ROIRepo(engine)
+    roi_ids = [
+        repo.add(slide_id, ROI(kind="rect", points=((float(i), 0.0), (float(i) + 4, 4.0))))
+        for i in range(8)
+    ]
+
+    errors: list = []
+
+    def _label(roi_id, i):
+        try:
+            ROIRepo(get_engine(db_url)).update_annotation(roi_id, label=f"L{i}")
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_label, args=(rid, i))
+        for i, rid in enumerate(roi_ids)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert not errors, f"{len(errors)} of 8 read-then-write calls failed: {errors[:2]}"
+    labels = {r["label"] for r in repo.for_slide(slide_id)}
+    assert labels == {f"L{i}" for i in range(8)}
+
+
+def test_a_write_session_flags_its_connection_and_clears_it_afterwards(db_url):
+    """The mechanism, pinned directly — including the release.
+
+    ``Connection.info`` lives on the POOLED dbapi connection. Without an
+    explicit clear the flag survives return-to-pool, and the next reader handed
+    that connection silently gets BEGIN IMMEDIATE. Observed while writing this
+    test: ``assert True is None`` on the second block, i.e. a read connection
+    still carrying the write flag.
+    """
+    from hescope.db import write_session
+
+    engine = get_engine(db_url)
+    init_db(engine)
+    with write_session(engine) as session:
+        assert session.connection().info.get("hescope_write") is True
+    for _ in range(3):  # exercise pool reuse
+        with engine.connect() as conn:
+            assert conn.info.get("hescope_write") is None, (
+                "the write flag leaked back to a reader through the pool"
+            )
