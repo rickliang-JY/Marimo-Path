@@ -177,6 +177,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="print what WOULD be imported and change nothing",
     )
 
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="check the database: which file, schema version, pragmas, row "
+             "counts, dangling references, integrity, missing slide files",
+    )
+    p_doctor.add_argument("--verbose", action="store_true",
+                          help="also list the slides whose file is missing")
+
+    p_del = sub.add_parser(
+        "delete-roi", help="delete specific ROIs by id (prints them first)")
+    p_del.add_argument("roi_id", type=int, nargs="+")
+    p_del.add_argument("--yes", action="store_true",
+                       help="actually delete; without it this only reports")
+
     p_list = sub.add_parser("list", help="list registered slides")
     p_list.add_argument(
         "--kind",
@@ -252,6 +266,159 @@ def _cmd_ingest(engine, path: str, kind: str, recursive: bool) -> int:
         f"{skipped} skipped"
     )
     return 0
+
+
+def _cmd_doctor(engine, *, verbose: bool = False) -> int:
+    """Answer "is my database real, and is it healthy" without a GUI.
+
+    Every panel in the app reports on ONE slide. Nothing reported on the
+    database itself: which file is in use, whether it exists, what schema
+    version it is at, whether the concurrency pragmas took, whether the
+    references are intact, or how many rows there are. A user asking "is this
+    thing actually storing my work" had no command to run.
+    """
+    import sqlalchemy as _sa
+
+    from .db import sqlite_pragma_report
+    from .migrations import SCHEMA_VERSION, current_version, pending
+
+    url = engine.url
+    print(f"url          {url.render_as_string(hide_password=True)}")
+    print(f"backend      {url.get_backend_name()}")
+
+    problems: list[str] = []
+
+    if url.get_backend_name() == "sqlite" and url.database not in (None, ":memory:"):
+        f = Path(url.database)
+        if f.exists():
+            size = f.stat().st_size
+            print(f"file         {f}  ({size:,} bytes)")
+            for side in ("-wal", "-shm"):
+                sc = f.with_name(f.name + side)
+                if sc.exists():
+                    print(f"             {sc.name}  ({sc.stat().st_size:,} bytes)")
+        else:
+            print(f"file         {f}  *** DOES NOT EXIST ***")
+            problems.append("the database file does not exist")
+
+        pr = sqlite_pragma_report(engine)
+        ok_fk = pr.get("foreign_keys") is True
+        ok_wal = pr.get("journal_mode") == "wal"
+        print(f"pragmas      foreign_keys={pr.get('foreign_keys')} "
+              f"journal_mode={pr.get('journal_mode')} "
+              f"busy_timeout={pr.get('busy_timeout')}")
+        if not ok_fk:
+            problems.append("foreign keys are OFF: deletes will not cascade")
+        if not ok_wal:
+            problems.append(
+                f"journal_mode is {pr.get('journal_mode')!r}, not WAL: a write "
+                "can fail with 'database is locked' while anything is reading"
+            )
+
+    try:
+        at = current_version(engine)
+        todo = pending(engine)
+        print(f"schema       version {at} of {SCHEMA_VERSION}"
+              + (f"  ({len(todo)} pending: "
+                 + ", ".join(str(m.version) for m in todo) + ")" if todo else "  (up to date)"))
+        if todo:
+            problems.append(
+                f"{len(todo)} migration(s) pending - run `hescope migrate --dry-run` first"
+            )
+    except Exception as exc:
+        print(f"schema       could not be read: {exc}")
+        problems.append(f"schema version unreadable: {exc}")
+
+    counts: dict[str, int] = {}
+    with engine.connect() as conn:
+        names = [
+            r[0] for r in conn.execute(_sa.text(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
+        ] if url.get_backend_name() == "sqlite" else []
+        for t in names:
+            try:
+                counts[t] = conn.execute(_sa.text(f"SELECT count(*) FROM {t}")).scalar() or 0
+            except Exception:
+                counts[t] = -1
+        print("rows         " + ", ".join(f"{k}={v}" for k, v in counts.items() if v))
+
+        # The two references that carry no FK, checked by hand.
+        dangling = {}
+        for label, q in (
+            ("interactions.roi_id", "SELECT count(*) FROM interactions i LEFT JOIN rois r "
+                                    "ON r.id=i.roi_id WHERE i.roi_id IS NOT NULL AND r.id IS NULL"),
+            ("rois.slide_id", "SELECT count(*) FROM rois r LEFT JOIN slides s "
+                              "ON s.id=r.slide_id WHERE s.id IS NULL"),
+        ):
+            try:
+                n = conn.execute(_sa.text(q)).scalar() or 0
+            except Exception:
+                continue
+            dangling[label] = n
+            if n:
+                problems.append(f"{n} dangling {label}")
+        print("references   " + ", ".join(f"{k}={v}" for k, v in dangling.items()))
+
+        if url.get_backend_name() == "sqlite":
+            try:
+                fk = list(conn.execute(_sa.text("PRAGMA foreign_key_check")))
+                integ = conn.execute(_sa.text("PRAGMA integrity_check")).scalar()
+                print(f"integrity    integrity_check={integ}, foreign_key_check={len(fk)} violation(s)")
+                if integ != "ok":
+                    problems.append(f"integrity_check says {integ!r}")
+                if fk:
+                    problems.append(f"{len(fk)} foreign key violation(s)")
+            except Exception as exc:
+                print(f"integrity    could not be checked: {exc}")
+
+        # Slides whose file is gone: expected after machines change, but the
+        # user should be told rather than discover it when an ROI will not save.
+        try:
+            rows = list(conn.execute(_sa.text("SELECT id, name, path FROM slides")))
+        except Exception:
+            rows = []
+        missing = [r for r in rows if not Path(r[2]).exists()]
+        if rows:
+            print(f"slide files  {len(rows) - len(missing)} of {len(rows)} resolve"
+                  + (f", {len(missing)} missing" if missing else ""))
+            if verbose and missing:
+                for sid, name, path in missing[:20]:
+                    print(f"             missing  id={sid}  {name}  {path}")
+
+    print()
+    if problems:
+        print(f"{len(problems)} problem(s):")
+        for p_ in problems:
+            print(f"  - {p_}")
+        return 1
+    print("no problems found")
+    return 0
+
+
+def _cmd_delete_roi(engine, roi_ids: list[int], *, yes: bool) -> int:
+    """Delete specific ROIs by id. Prints what each one WAS before deleting it,
+    because an id alone is not enough for a human to confirm they meant it."""
+    from .db import ROIRepo
+
+    init_db(engine)
+    repo = ROIRepo(engine)
+    rows = []
+    for rid in roi_ids:
+        row = repo.get(rid)
+        if row is None:
+            print(f"roi {rid}: not found")
+            continue
+        rows.append(row)
+        print(f"roi {rid}: slide={row['slide_id']} kind={row['kind']} "
+              f"bbox={row.get('bbox')} label={row.get('label')!r}")
+    if not rows:
+        return 1
+    if not yes:
+        print(f"\n{len(rows)} ROI(s) would be deleted. Re-run with --yes to do it.")
+        return 0
+    deleted = sum(1 for row in rows if repo.delete(row["id"]))
+    print(f"\ndeleted {deleted} of {len(rows)} ROI(s)")
+    return 0 if deleted == len(rows) else 1
 
 
 def _cmd_list(engine, kind: str | None) -> int:
@@ -561,6 +728,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_init(engine)
     if args.command == "ingest":
         return _cmd_ingest(engine, args.path, args.kind, args.recursive)
+    if args.command == "doctor":
+        return _cmd_doctor(engine, verbose=args.verbose)
+    if args.command == "delete-roi":
+        return _cmd_delete_roi(engine, args.roi_id, yes=args.yes)
     if args.command == "list":
         return _cmd_list(engine, args.kind)
     if args.command == "dedupe-slides":

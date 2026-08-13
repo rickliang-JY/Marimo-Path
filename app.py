@@ -194,7 +194,6 @@ def _():
         rows_to_csv,
         serve_slide,
         slide_geojson_text,
-        tempfile,
         threading,
         tissue_fraction_proxy,
         train_from_annotations,
