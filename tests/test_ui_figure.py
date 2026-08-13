@@ -22,7 +22,7 @@ import base64
 import numpy as np
 from PIL import Image
 
-from hescope.viewer import make_roi_figure
+from hescope.viewer.viewer import make_roi_figure
 
 
 def _img(width: int = 64, height: int = 48) -> Image.Image:

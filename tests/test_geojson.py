@@ -1,4 +1,4 @@
-"""Tests for hescope.geojson (QuPath GeoJSON export). Offline; tmp sqlite."""
+"""Tests for hescope.interop.geojson (QuPath GeoJSON export). Offline; tmp sqlite."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ import json
 
 import pytest
 
-from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.geojson import (
+from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+from hescope.interop.geojson import (
     export_rois_geojson,
     rois_to_geojson,
     slide_geojson_text,
 )
-from hescope.rois import ROI
+from hescope.core.rois import ROI
 
 
 @pytest.fixture()
@@ -165,7 +165,7 @@ def test_slide_geojson_text_with_no_slide_open_exports_every_roi(engine, slide_i
 
 
 def _ring(kind, points_json, bbox):
-    from hescope.geojson import rois_to_geojson
+    from hescope.interop.geojson import rois_to_geojson
 
     row = {
         "id": 1, "kind": kind, "label": "tumor", "notes": "",
@@ -212,7 +212,7 @@ def test_unusable_geometry_falls_back_to_the_bbox():
 
 
 def test_every_exported_ring_is_closed():
-    from hescope.geojson import rois_to_geojson
+    from hescope.interop.geojson import rois_to_geojson
 
     rows = [
         {"id": 1, "kind": "polygon", "points_json": "[[0,0],[10,0],[5,9]]",

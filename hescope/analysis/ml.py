@@ -2,7 +2,7 @@
 
 Training data comes from the HE-Scope database: ROIs with a non-empty
 ``label`` and an existing ``patch_path`` image. Features are extracted per
-patch via ``hescope.features.extract_features`` (imported lazily so this
+patch via ``hescope.analysis.features.extract_features`` (imported lazily so this
 module stays importable even before that module exists). The model is a
 ``StandardScaler`` + ``LogisticRegression`` pipeline persisted with joblib
 plus a JSON sidecar under ``models_dir/<name>/``.
@@ -19,12 +19,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .db import AgentRunRepo, ROIRepo
+from ..store.db import AgentRunRepo, ROIRepo
 
 MODEL_FILENAME = "model.joblib"
 META_FILENAME = "meta.json"
 
-#: Env var selecting an optional embedding backend from hescope.embeddings
+#: Env var selecting an optional embedding backend from hescope.analysis.embeddings
 #: (e.g. "gpfm"). Unset/empty keeps the default handcrafted-feature path.
 EMBEDDER_ENV_VAR = "HESCOPE_EMBEDDER"
 
@@ -59,7 +59,7 @@ class ModelInfo:
     created_at: str
     # Embedding-backend metadata (schema backwards compatible: older metas
     # lack these keys and are treated as handcrafted-feature models).
-    encoder: str | None = None  # hescope.embeddings registry name, if used
+    encoder: str | None = None  # hescope.analysis.embeddings registry name, if used
     warning: str | None = None  # e.g. embedder load failure -> fallback note
     # Raster the handcrafted features were computed at; None for encoder
     # models (the encoder does its own resize) and for pre-R06-1 metas.
@@ -146,7 +146,7 @@ def _to_feature_raster(img: "Image.Image", raster: int | None) -> "Image.Image":
 def _load_feature_vector(
     patch_path: str, raster: int | None = FEATURE_RASTER
 ) -> "np.ndarray":
-    from hescope import features  # lazy: hescope.features may not exist yet
+    from . import features  # lazy: torch/skimage stay out of import time
 
     with Image.open(patch_path) as im:
         img = _to_feature_raster(im.convert("RGB"), raster)
@@ -165,7 +165,7 @@ def _compute_training_features(
     """Feature vectors for training patches.
 
     Returns ``(features, encoder_name, warning)``. With ``HESCOPE_EMBEDDER``
-    set, patches are embedded in batches via ``hescope.embeddings``; any
+    set, patches are embedded in batches via ``hescope.analysis.embeddings``; any
     load/inference failure falls back to the handcrafted path and returns a
     human-readable warning (recorded in the model meta). Default (env unset)
     is the handcrafted path with no warning — existing behavior is unchanged.
@@ -228,7 +228,7 @@ def train_from_annotations(
     hiccup while recording is swallowed so it never fails training.
 
     Optional embedding backend: when the ``HESCOPE_EMBEDDER`` environment
-    variable names an encoder from ``hescope.embeddings`` (e.g. "gpfm"),
+    variable names an encoder from ``hescope.analysis.embeddings`` (e.g. "gpfm"),
     patch embeddings replace the handcrafted features and the meta records
     the encoder name/dim. If the encoder fails to load, training falls back
     to the handcrafted path and the meta carries a ``warning`` note. With
@@ -413,7 +413,7 @@ def _feature_vector_for_model(meta: dict, img: "Image.Image") -> "np.ndarray":
     """Feature vector matching how the model was trained.
 
     Metas with an ``encoder`` key (trained with ``HESCOPE_EMBEDDER`` set)
-    embed via ``hescope.embeddings``; metas without it (all pre-embedding
+    embed via ``hescope.analysis.embeddings``; metas without it (all pre-embedding
     models) use the handcrafted path, keeping old models fully compatible.
 
     The handcrafted path resamples to the meta's ``feature_raster`` first.
@@ -429,7 +429,7 @@ def _feature_vector_for_model(meta: dict, img: "Image.Image") -> "np.ndarray":
 
         encoder = embeddings.load_encoder(encoder_name)
         return embeddings.embed_tiles(encoder, [img.convert("RGB")])[0]
-    from hescope import features  # lazy: hescope.features may not exist yet
+    from . import features  # lazy: torch/skimage stay out of import time
 
     tile = _to_feature_raster(img.convert("RGB"), meta.get("feature_raster"))
     return np.asarray(features.extract_features(tile), dtype=np.float32)

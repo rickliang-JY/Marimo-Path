@@ -52,9 +52,9 @@ After that, the entry points below are live in the kernel globals.
 | --- | --- |
 | `get_current_selection()` | Zero-click LIVE selection tool: JSON of the box/lasso the user is dragging on the plotly figure right now, mapped to level-0 slide coordinates. No user click required. |
 | `get_latest_selection()` | Last SUBMITTED ROI payload (user clicked "Send to code agent"); persisted to `agent_out/roi_history.jsonl` and to the DB when enabled. |
-| `agent_bridge` | `hescope.agent_bridge.AgentBridge` bound to `agent_out/`; `.history()` / `.latest()` give past submitted payloads. |
+| `agent_bridge` | `hescope.agent.agent_bridge.AgentBridge` bound to `agent_out/`; `.history()` / `.latest()` give past submitted payloads. |
 | `db` | `DBContext` with `slide_repo` / `roi_repo` / `run_repo` when `db.enabled` is True (all None in DB-free mode). |
-| `open_slide` | `hescope.slides.open_slide(path) -> SlideSource`. |
+| `open_slide` | `hescope.wsi.slides.open_slide(path) -> SlideSource`. |
 | `ensure_demo_slide()` | Returns the demo slide path, generating `assets/demo_he.png` in-process if missing. |
 | `get_source()` / `get_vp()` | State accessors: current `SlideSource | None` and `ViewportState` (center, downsample, size). |
 | `roi_plot` | The legacy `mo.ui.plotly` capture surface, and **`None` on the surface the app normally ships**: it is built only when OpenSeadragon is unavailable (`app.py`: `if _src is None or get_tiles() is not None: roi_plot = None`), so with a slide open it is still `None` on a default install. Use `get_current_selection()`, which picks the live surface for you; `roi_plot.value` is the raw plotly selection when the fallback *is* in use. |
@@ -88,7 +88,7 @@ can open):
 
 ```python
 import json
-from hescope.agent_bridge import selection_stats
+from hescope.agent.agent_bridge import selection_stats
 
 raw = get_current_selection()
 if raw != "NO_SELECTION":
@@ -159,7 +159,7 @@ handlers record `roi_submit`, `label_set`, `roi_delete` and `analysis_run`
 with `"actor": "human"` in the payload, so an agent-written label and a
 user-typed one can be told apart. `human_gate` is reserved — no UI writes it
 yet. For QuPath interop,
-`hescope.geojson.export_rois_geojson(db.engine, slide_id, path)` writes a
+`hescope.interop.geojson.export_rois_geojson(db.engine, slide_id, path)` writes a
 FeatureCollection to disk (bbox polygons, `classification` mapped from
 `label`); `slide_geojson_text(db.engine, slide_id)` returns the same document
 as a string, and is what the Annotations panel's GeoJSON download button
@@ -200,7 +200,7 @@ lazily by `hescope.features.extract_embedding`.
 import json
 
 import hescope
-from hescope.rois import ROI, extract_patch, patch_mpp
+from hescope.core.rois import ROI, extract_patch, patch_mpp
 
 # What is available right now (never raises; check the "error" key):
 caps = json.loads(get_analysis_capabilities())

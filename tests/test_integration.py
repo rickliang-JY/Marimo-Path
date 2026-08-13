@@ -1,6 +1,6 @@
 """Phase-3 Part C integration tests (offline, tmp dirs only).
 
-Covers the app wiring helpers in hescope.viewer (DB bootstrap with graceful
+Covers the app wiring helpers in hescope.viewer.viewer (DB bootstrap with graceful
 degradation, display pipeline ordering, jump-to-ROI math, DB row -> ROI
 geometry) and the SPEC-PHASE3 C.2 item 6 end-to-end flow: register slide ->
 add ROI -> AgentBridge(repository=...).submit -> AgentRunRepo recorded ->
@@ -17,11 +17,11 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.agent_bridge import AgentBridge
-from hescope.db import AgentRunRepo, ROIRepo, SlideRepo, export_rois
-from hescope.rois import ROI, ViewportState
-from hescope.slides import open_slide
-from hescope.viewer import (
+from hescope.agent.agent_bridge import AgentBridge
+from hescope.store.db import AgentRunRepo, ROIRepo, SlideRepo, export_rois
+from hescope.core.rois import ROI, ViewportState
+from hescope.wsi.slides import open_slide
+from hescope.viewer.viewer import (
     apply_display_pipeline,
     bootstrap_db,
     jump_viewport_for_bbox,

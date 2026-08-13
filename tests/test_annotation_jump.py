@@ -38,8 +38,8 @@ import textwrap
 import marimo as mo
 import pytest
 
-from hescope.rois import ViewportState
-from hescope.viewer import jump_viewport_for_bbox
+from hescope.core.rois import ViewportState
+from hescope.viewer.viewer import jump_viewport_for_bbox
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app.py"
 SOURCE = APP.read_text(encoding="utf-8")

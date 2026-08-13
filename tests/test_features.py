@@ -1,11 +1,11 @@
-"""Tests for hescope.features (handcrafted vector + optional embedding)."""
+"""Tests for hescope.analysis.features (handcrafted vector + optional embedding)."""
 
 import time
 
 import numpy as np
 from PIL import Image, ImageDraw
 
-from hescope.features import (
+from hescope.analysis.features import (
     FEATURE_DIM,
     FEATURE_NAMES,
     extract_embedding,

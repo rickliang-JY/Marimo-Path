@@ -1,4 +1,4 @@
-"""Tests for hescope.migrations (Phase 0: the migration framework).
+"""Tests for hescope.store.migrations (Phase 0: the migration framework).
 
 Offline; tmp sqlite files. Never touches data/hescope.db (R-1).
 """
@@ -11,9 +11,9 @@ from datetime import datetime
 import pytest
 import sqlalchemy as sa
 
-from hescope.db import ROI, Slide, SlideRepo, get_engine, init_db
-from hescope.identity import content_key
-from hescope.migrations import (
+from hescope.store.db import ROI, Slide, SlideRepo, get_engine, init_db
+from hescope.core.identity import content_key
+from hescope.store.migrations import (
     MIGRATIONS,
     SCHEMA_VERSION,
     Migration,
@@ -166,7 +166,7 @@ def test_a_raising_migration_leaves_version_at_last_success_and_writes_no_partia
     """Migration 2 (injected) raises. Migration 1 must stay committed;
     migration 2 must leave no schema_migrations row and no side effect from
     its partial apply."""
-    import hescope.migrations as mig
+    import hescope.store.migrations as mig
 
     calls: list[str] = []
 
@@ -271,7 +271,7 @@ def test_upgraded_database_has_the_same_rois_indexes_as_a_fresh_one(tmp_path):
 def test_the_real_migrations_tuple_passes_validation():
     """Production ``MIGRATIONS`` is validated by ``_validate_migrations`` at
     module import time (see the call right after its definition in
-    hescope/migrations.py) -- the fact that ``import hescope.migrations``
+    hescope/migrations.py) -- the fact that ``import hescope.store.migrations``
     above succeeded already exercises this. Re-assert it explicitly so a
     future edit that removes the tuple from the source can't make this test
     pass for the wrong reason."""
@@ -518,7 +518,7 @@ def test_migration_2_does_not_merge_duplicate_content_or_crash(tmp_path):
 
 def test_plan_migration_2_matches_what_migration_2_actually_writes(tmp_path):
     """The dry-run preview and the real migration share one computation
-    (see hescope.migrations._compute_slide_backfills /
+    (see hescope.store.migrations._compute_slide_backfills /
     _compute_roi_bbox_backfills / _conflicting_identities) so they cannot
     silently drift -- assert that invariant directly rather than trusting
     the shared-code comment.
@@ -750,7 +750,7 @@ def test_migration_3_gives_tcga_files_slide_id_a_real_foreign_key(tmp_path):
     inserting a slide_id that names no row in `slides` was accepted
     silently. Must be seen to fail today (before migration 3 exists): this
     exact insert raises nothing and the bogus row is readable back."""
-    from hescope.tcga_schema import TcgaCatalog
+    from hescope.gdc.tcga_schema import TcgaCatalog
 
     engine = get_engine(f"sqlite:///{tmp_path}/mig3_fk.db")
     init_db(engine)
@@ -776,7 +776,7 @@ def test_migration_3_preserves_existing_tcga_files_data_across_the_fk_rebuild(tm
     ALTER TABLE ADD CONSTRAINT exists). Every column of every pre-existing
     row must survive it byte-for-byte -- source vs destination (R-3), not a
     count."""
-    from hescope.tcga_schema import TcgaCatalog
+    from hescope.gdc.tcga_schema import TcgaCatalog
 
     engine = get_engine(f"sqlite:///{tmp_path}/mig3_preserve.db")
     init_db(engine)
@@ -816,7 +816,7 @@ def test_migration_3_links_a_downloaded_file_to_its_already_registered_slide(tmp
     database's actual state: exactly one TCGA file is downloaded, and it was
     already registered as a slide (by the normal open path) before
     migration 3 ever runs."""
-    from hescope.tcga_schema import TcgaCatalog
+    from hescope.gdc.tcga_schema import TcgaCatalog
 
     engine = get_engine(f"sqlite:///{tmp_path}/mig3_link.db")
     init_db(engine)
@@ -848,8 +848,8 @@ def test_migration_3_does_not_link_a_file_with_no_matching_slide(tmp_path):
     to point at. Migration 3 must not invent one (that is exactly defect
     2.4's shape) -- it leaves slide_id NULL and counts the row as
     unlinkable."""
-    from hescope.migrations import plan_migration_3
-    from hescope.tcga_schema import TcgaCatalog
+    from hescope.store.migrations import plan_migration_3
+    from hescope.gdc.tcga_schema import TcgaCatalog
 
     engine = get_engine(f"sqlite:///{tmp_path}/mig3_nomatch.db")
     init_db(engine)
@@ -879,7 +879,7 @@ def test_migration_3_does_not_relink_an_already_linked_file(tmp_path):
     """A tcga_files row that already carries a slide_id (written at download
     time by app.py, per BUILD-PLAN-DB.md Phase 2) must be left exactly as
     is, not re-derived from a possibly-stale local_path."""
-    from hescope.tcga_schema import TcgaCatalog
+    from hescope.gdc.tcga_schema import TcgaCatalog
 
     engine = get_engine(f"sqlite:///{tmp_path}/mig3_already.db")
     init_db(engine)
@@ -902,7 +902,7 @@ def test_migration_3_does_not_relink_an_already_linked_file(tmp_path):
 
 
 def test_migration_3_is_idempotent(tmp_path):
-    from hescope.tcga_schema import TcgaCatalog
+    from hescope.gdc.tcga_schema import TcgaCatalog
 
     engine = get_engine(f"sqlite:///{tmp_path}/mig3_idem.db")
     init_db(engine)
@@ -930,7 +930,7 @@ def test_migration_3_is_idempotent(tmp_path):
 
 
 def test_plan_migration_3_on_an_empty_database_is_all_zero(tmp_path):
-    from hescope.migrations import plan_migration_3
+    from hescope.store.migrations import plan_migration_3
 
     engine = get_engine(f"sqlite:///{tmp_path}/empty3.db")
     with engine.connect() as conn:
@@ -989,7 +989,7 @@ def test_plan_migration_3_does_not_crash_when_slides_predates_the_identity_colum
     local_path resolves to a real file on disk -- the exact input shape
     migration 3's own backfill exists to preview.
     """
-    from hescope.migrations import plan_migration_3
+    from hescope.store.migrations import plan_migration_3
 
     db_path = tmp_path / "pre_migration_2.db"
     con = sqlite3.connect(db_path)
@@ -1072,9 +1072,9 @@ def test_migration_3_recovers_a_dangling_slide_id_instead_of_aborting(tmp_path):
     ``DeclarativeBase``s with no ORM relationship between them. A real,
     shipped deletion path, not a synthetic one.
     """
-    from hescope.migrations import plan_migration_3
-    from hescope.db import Slide, SlideRepo
-    from hescope.tcga_schema import TcgaCatalog
+    from hescope.store.migrations import plan_migration_3
+    from hescope.store.db import Slide, SlideRepo
+    from hescope.gdc.tcga_schema import TcgaCatalog
 
     engine = get_engine(f"sqlite:///{tmp_path}/mig3_dangling.db")
     init_db(engine)
@@ -1140,9 +1140,9 @@ def test_migration_3_recovers_a_dangling_slide_id_instead_of_aborting(tmp_path):
 def test_plan_migration_3_reports_dangling_slide_ids_separately_from_already_linked(
     tmp_path,
 ):
-    from hescope.migrations import plan_migration_3
-    from hescope.db import Slide
-    from hescope.tcga_schema import TcgaCatalog
+    from hescope.store.migrations import plan_migration_3
+    from hescope.store.db import Slide
+    from hescope.gdc.tcga_schema import TcgaCatalog
 
     engine = get_engine(f"sqlite:///{tmp_path}/mig3_dangling_preview.db")
     init_db(engine)
@@ -1185,7 +1185,7 @@ def test_migration_3_preserves_a_column_outside_the_original_hardcoded_list(tmp_
     """Seen to fail before the fix: migrate(e3) reported no error, and the
     extra column and its data were simply gone afterward --
     ``sqlite3.OperationalError: no such column: future_note``."""
-    from hescope.tcga_schema import TcgaCatalog
+    from hescope.gdc.tcga_schema import TcgaCatalog
 
     engine = get_engine(f"sqlite:///{tmp_path}/mig3_extracol.db")
     init_db(engine)

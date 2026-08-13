@@ -4,7 +4,7 @@ concurrent registration of the SAME slide.
 
 Measured evidence, gathered BEFORE writing the fix in this file, against a
 BARE (deferred) ``BEGIN`` -- the transaction semantics this project used
-before ``hescope.db.get_engine``'s ``BEGIN IMMEDIATE`` hook (see
+before ``hescope.store.db.get_engine``'s ``BEGIN IMMEDIATE`` hook (see
 ``tests/test_db_concurrency.py``, which fixed the analogous DISTINCT-slides
 race the same way) -- 8 threads registering ONE slide (identical path),
 three separate process runs:
@@ -48,14 +48,14 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import event
 
-from hescope.db import Base, SlideFile, Slide, SlideRepo, get_engine, init_db
+from hescope.store.db import Base, SlideFile, Slide, SlideRepo, get_engine, init_db
 
 
 # --- the control: bare BEGIN really does race for ONE slide -----------------
 
 
 def _bare_begin_engine(db_url: str) -> sa.Engine:
-    """Same pragmas as ``hescope.db.get_engine``, but WITHOUT the
+    """Same pragmas as ``hescope.store.db.get_engine``, but WITHOUT the
     ``isolation_level=None`` + ``BEGIN IMMEDIATE`` "begin" hook -- i.e.
     pysqlite's own legacy (deferred) transaction handling, the mode this
     project used before the prior round's fix. Mirrors

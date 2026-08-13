@@ -1,4 +1,4 @@
-"""Tests for the TCGA download progress bar (hescope.tcga_panel).
+"""Tests for the TCGA download progress bar (hescope.gdc.tcga_panel).
 
 Offline: pure HTML-string assertions, no marimo runtime or network needed.
 """
@@ -9,7 +9,7 @@ def _html(obj) -> str:
     return obj.text
 
 
-from hescope.tcga_panel import (
+from hescope.gdc.tcga_panel import (
     format_bytes_mb,
     progress_percent,
     progress_view,

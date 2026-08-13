@@ -5,15 +5,15 @@ different questions: WHERE is this file on THIS machine, and WHAT slide is
 it. Conflating them is why the same content seen at three paths became three
 separate slide rows (defect 1.1 in ``docs/BUILD-PLAN-DB.md`` Phase 1) and why
 a database on a shared network store split one slide per workstation (defect
-1.3, fixed in ``hescope.db.normalize_slide_path`` -- see that function's
+1.3, fixed in ``hescope.store.db.normalize_slide_path`` -- see that function's
 docstring). ``slide_identity`` answers the second question, independent of
 where the file currently sits: a content hash for a readable local/mounted
 file, or a caller-supplied DICOMweb ``(study_uid, series_uid)`` / OMERO
 ``image_id`` for a slide that has no local path worth hashing at all.
 
-This module has no dependency on ``hescope.db`` -- and never should -- so
-that ``hescope.db`` (and any future migration) can depend on it rather than
-the other way around; ``normalize_slide_path`` stays in ``hescope.db``,
+This module has no dependency on ``hescope.store.db`` -- and never should -- so
+that ``hescope.store.db`` (and any future migration) can depend on it rather than
+the other way around; ``normalize_slide_path`` stays in ``hescope.store.db``,
 which is why the ``'path'`` fallback described below is the CALLER's job
 (``SlideRepo.register``), not this module's.
 """
@@ -77,7 +77,7 @@ def slide_identity(
     * otherwise, ``None``.
 
     ``'path'`` is deliberately never produced HERE -- it is the caller's
-    last resort (``hescope.db.SlideRepo.register`` falls back to
+    last resort (``hescope.store.db.SlideRepo.register`` falls back to
     ``('path', normalize_slide_path(path))`` itself), never this function's,
     so that a readable local file always gets a real content identity and
     never silently settles for a location-based one just because this

@@ -7,7 +7,7 @@ synthetic slide -> shape == grid_shape -> render_heatmap onto a thumbnail ->
 size matches. Plus the analysis-capabilities tool logic (hescope-level:
 find_spec probe + list_models) returns valid JSON with an "analyses" key.
 
-Uses the REAL hescope.features.extract_features (no stubbing): the patches
+Uses the REAL hescope.analysis.features.extract_features (no stubbing): the patches
 are tiny, so the whole module stays well under the 5s budget.
 """
 
@@ -19,12 +19,12 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 import hescope
-from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.grid import grid_shape, tissue_fraction_proxy
-from hescope.heatmap import compute_grid, render_heatmap
-from hescope.ml import train_from_annotations
-from hescope.rois import ROI
-from hescope.slides import open_slide
+from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+from hescope.analysis.grid import grid_shape, tissue_fraction_proxy
+from hescope.analysis.heatmap import compute_grid, render_heatmap
+from hescope.analysis.ml import train_from_annotations
+from hescope.core.rois import ROI
+from hescope.wsi.slides import open_slide
 
 TILE = 128
 DS = 2.0

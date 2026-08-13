@@ -1,6 +1,6 @@
 """QuPath-compatible GeoJSON export for saved ROI annotations.
 
-HE-Scope persists ROIs in the ``rois`` table (see hescope.db); this module
+HE-Scope persists ROIs in the ``rois`` table (see hescope.store.db); this module
 serializes them as a GeoJSON FeatureCollection that QuPath can import
 ("Objects → Annotations → Import from GeoJSON"). Geometry follows the shape
 the user actually drew -- a lasso exports as its own vertices, a circle as a
@@ -134,7 +134,7 @@ def slide_feature_collection(engine: Any, slide_id: int | None) -> dict:
     was the file-writing function, which app.py never called (R05-8).
 
     ``slide_id=None`` means EVERY saved ROI, exactly as it does for
-    ``hescope.db.export_rois``. It used to mean "an empty FeatureCollection,
+    ``hescope.store.db.export_rois``. It used to mean "an empty FeatureCollection,
     so the button is always safe to click", which put the GeoJSON button out
     of step with the JSON and CSV buttons beside it — same panel, same label
     pattern, one shared comment promising "the current slide's ROIs (or all
@@ -144,7 +144,7 @@ def slide_feature_collection(engine: Any, slide_id: int | None) -> dict:
     there: QuPath opens it and shows nothing, which reads as "this slide has
     no annotations" rather than "the export exported nothing" (R07-7).
     """
-    from .db import ROIRepo, SlideRepo
+    from ..store.db import ROIRepo, SlideRepo
 
     slide_repo = SlideRepo(engine)
     if slide_id is None:

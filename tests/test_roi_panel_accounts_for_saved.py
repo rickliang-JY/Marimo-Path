@@ -29,7 +29,7 @@ import pathlib
 
 import pytest
 
-from hescope.rois import ROI
+from hescope.core.rois import ROI
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app.py"
 SOURCE = APP.read_text(encoding="utf-8")

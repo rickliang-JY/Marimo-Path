@@ -24,9 +24,9 @@ from typing import Iterator
 import numpy as np
 from PIL import Image
 
-from .slides import SlideSource, best_level_for_downsample
+from ..wsi.slides import SlideSource, best_level_for_downsample
 
-# Rec. 709 luma coefficients, matching hescope.rois.roi_stats.
+# Rec. 709 luma coefficients, matching hescope.core.rois.roi_stats.
 _LUMA = (0.2126, 0.7152, 0.0722)
 _LUMA_THRESHOLD = 0.9 * 255.0
 

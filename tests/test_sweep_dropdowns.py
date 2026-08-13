@@ -51,7 +51,7 @@ def _cell(marker: str):
 
 @pytest.fixture
 def models_dir(tmp_path):
-    """Two model directories, as ``hescope.ml`` writes them."""
+    """Two model directories, as ``hescope.analysis.ml`` writes them."""
     for name, labels in (("tumour_v1", ["tumour", "stroma"]),):
         d = tmp_path / name
         d.mkdir()
@@ -70,7 +70,7 @@ def _add_model(models_dir, name, labels):
 
 
 def _run_model_cell(models_dir, hm_choice):
-    from hescope.ml import list_models
+    from hescope.analysis.ml import list_models
 
     cell, params = _cell("# Heatmap controls (Analysis accordion).")
     deps = {

@@ -2,7 +2,7 @@
 
 All drawing happens on a copy of the input image; caller images are never
 mutated. Level-0 ROI coordinates are mapped into viewport pixel space with
-``hescope.rois.viewport_transform``.
+``hescope.core.rois.viewport_transform``.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .rois import ROI, ViewportState, viewport_transform
+from ..core.rois import ROI, ViewportState, viewport_transform
 
 # Candidate physical lengths for the viewport scale bar.
 SCALE_BAR_CANDIDATES_UM: tuple[float, ...] = (20, 50, 100, 200, 500, 1000)

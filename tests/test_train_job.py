@@ -38,9 +38,9 @@ import marimo as mo
 import pytest
 from PIL import Image
 
-from hescope.db import ROIRepo, SlideRepo
-from hescope.ml import EMBEDDER_ENV_VAR
-from hescope.rois import ROI
+from hescope.store.db import ROIRepo, SlideRepo
+from hescope.analysis.ml import EMBEDDER_ENV_VAR
+from hescope.core.rois import ROI
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app.py"
 SOURCE = APP.read_text(encoding="utf-8")

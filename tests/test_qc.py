@@ -1,9 +1,9 @@
-"""Tests for hescope.qc (tissue mask, blur score, QC report)."""
+"""Tests for hescope.analysis.qc (tissue mask, blur score, QC report)."""
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-from hescope.qc import BLUR_THRESHOLD, blur_score, qc_report, tissue_mask
+from hescope.analysis.qc import BLUR_THRESHOLD, blur_score, qc_report, tissue_mask
 
 
 def he_image(seed=0, size=256, n_blobs=10, blur=0.0):

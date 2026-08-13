@@ -1,9 +1,9 @@
-"""Tests for hescope.nuclei (watershed nuclei detection)."""
+"""Tests for hescope.analysis.nuclei (watershed nuclei detection)."""
 
 import numpy as np
 from PIL import Image, ImageDraw
 
-from hescope.nuclei import NucleiStats, detect_nuclei
+from hescope.analysis.nuclei import NucleiStats, detect_nuclei
 
 
 def he_image(seed=0, size=256, blobs=((60, 60), (180, 80), (90, 190)), r=14):
@@ -93,7 +93,7 @@ def test_min_size_boundary_is_strict():
     original min_size dropped only strictly smaller ones. Pin the original."""
     import numpy as np
 
-    from hescope.nuclei import remove_small_objects_strict
+    from hescope.analysis.nuclei import remove_small_objects_strict
 
     a = np.zeros((20, 20), dtype=bool)
     a[1, 1:5] = True   # a 4-pixel component

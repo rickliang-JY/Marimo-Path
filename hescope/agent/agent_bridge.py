@@ -15,11 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from .rois import ROI, extract_patch, roi_stats
-from .slides import SlideSource
+from ..core.rois import ROI, extract_patch, roi_stats
+from ..wsi.slides import SlideSource
 
 if TYPE_CHECKING:
-    from .db import ROIRepo
+    from ..store.db import ROIRepo
 
 MPP_10X = 2.0  # microns-per-pixel reference for 10x
 
@@ -236,7 +236,7 @@ def _record_interaction(db: object, **kwargs: object) -> None:
         engine = getattr(db, "engine", None)
         if engine is None:
             return
-        from .db import InteractionRepo
+        from ..store.db import InteractionRepo
 
         InteractionRepo(engine).record(**kwargs)  # type: ignore[arg-type]
     except Exception:
@@ -409,7 +409,7 @@ def make_live_selection_tool(
     returns the last SUBMITTED ROI payload (via AgentBridge, requiring the
     user to click "Send to code agent"), while this tool reports the raw
     live figure selection (box/lasso) as mapped by
-    ``hescope.viewer.current_selection`` — no user click required.
+    ``hescope.viewer.viewer.current_selection`` — no user click required.
 
     With ``db_getter`` the read is traced as an interactions row
     (kind=selection_view): an agent looking at what the user just drew is the
@@ -450,7 +450,7 @@ def selection_stats(
     out_dir: str | Path | None = None,
 ) -> dict:
     """Convenience: extract the patch for a live selection dict (as returned
-    by ``hescope.viewer.current_selection``) and return ``roi_stats(patch)``
+    by ``hescope.viewer.viewer.current_selection``) and return ``roi_stats(patch)``
     merged with ``{"patch_path": <saved tmp png>}`` — the patch is saved
     under a temp dir so a multimodal agent can open the file.
 

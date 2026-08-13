@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hescope.db import DEFAULT_DB_URL, get_engine
-from hescope.viewer import bootstrap_db
+from hescope.store.db import DEFAULT_DB_URL, get_engine
+from hescope.viewer.viewer import bootstrap_db
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,7 +46,7 @@ def test_the_runtime_root_is_redirected_away_from_the_repo():
     receives ROI patch PNGs and roi_history.jsonl), MODELS_DIR and
     TCGA_DATA_DIR. Imported inside the test on purpose: the module attribute
     is what app.py's cells look up, and it is what conftest patches."""
-    from hescope.paths import resolve_runtime_dir
+    from hescope.core.paths import resolve_runtime_dir
 
     runtime = resolve_runtime_dir(_REPO_ROOT)
     assert runtime != _REPO_ROOT, (

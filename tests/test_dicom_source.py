@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.dicom_source import DicomSource, is_dicom_slide
+from hescope.wsi.dicom_source import DicomSource, is_dicom_slide
 
 
 # --- detection -------------------------------------------------------------
@@ -95,9 +95,9 @@ class _StubWsiDicom:
 @pytest.fixture()
 def source(monkeypatch, tmp_path):
     stub = _StubWsiDicom()
-    monkeypatch.setattr("hescope.dicom_source._HAS_WSIDICOM", True)
+    monkeypatch.setattr("hescope.wsi.dicom_source._HAS_WSIDICOM", True)
     monkeypatch.setattr(
-        "hescope.dicom_source.WsiDicom",
+        "hescope.wsi.dicom_source.WsiDicom",
         type("W", (), {"open": staticmethod(lambda p: stub)}),
     )
     src = DicomSource(_write_dicom_magic(tmp_path / "s.dcm"))
@@ -166,9 +166,9 @@ def test_level_index_is_clamped(source):
 
 def test_mpp_is_read_when_present(monkeypatch, tmp_path):
     stub = _StubWsiDicom(mpp=0.25)
-    monkeypatch.setattr("hescope.dicom_source._HAS_WSIDICOM", True)
+    monkeypatch.setattr("hescope.wsi.dicom_source._HAS_WSIDICOM", True)
     monkeypatch.setattr(
-        "hescope.dicom_source.WsiDicom",
+        "hescope.wsi.dicom_source.WsiDicom",
         type("W", (), {"open": staticmethod(lambda p: stub)}),
     )
     assert DicomSource(_write_dicom_magic(tmp_path / "s.dcm")).mpp == pytest.approx(0.25)
@@ -186,12 +186,12 @@ def test_thumbnail_and_close(source):
 
 
 def test_it_satisfies_the_slide_protocol(source):
-    from hescope.slides import SlideSource
+    from hescope.wsi.slides import SlideSource
 
     assert isinstance(source, SlideSource)
 
 
 def test_a_clear_error_when_wsidicom_is_absent(monkeypatch, tmp_path):
-    monkeypatch.setattr("hescope.dicom_source._HAS_WSIDICOM", False)
+    monkeypatch.setattr("hescope.wsi.dicom_source._HAS_WSIDICOM", False)
     with pytest.raises(RuntimeError, match=r"\[dicom\]"):
         DicomSource(_write_dicom_magic(tmp_path / "s.dcm"))

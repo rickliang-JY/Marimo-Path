@@ -72,3 +72,14 @@ def resolve_runtime_dir(app_dir: str | Path) -> Path:
         runtime = Path.cwd() / RUNTIME_DIR_NAME
     runtime.mkdir(parents=True, exist_ok=True)
     return runtime
+
+
+# --- anchors -------------------------------------------------------------
+# The ONE place that knows how deep this module sits. Everything else asks
+# here instead of counting `.parent` itself, because a module that counts its
+# own depth breaks silently the moment it is moved -- which is exactly what
+# happened when hescope/ was split into subpackages: db.py's
+# `Path(__file__).parent.parent` had meant the repo root and started meaning
+# `hescope/`, which would have pointed DEFAULT_DB_URL at a different file.
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent   # -> <...>/hescope
+PROJECT_ROOT = PACKAGE_ROOT.parent                      # -> repo root / install dir

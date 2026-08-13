@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 
 # ImageNet normalization shared by the ResNet18 fallback (mirrors
-# ``hescope.features.extract_embedding``).
+# ``hescope.analysis.features.extract_embedding``).
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -86,7 +86,7 @@ ENCODERS: dict[str, EncoderSpec] = {
         ),
     ),
     # Local fallback: ResNet18(ImageNet) avgpool embedding — same construction
-    # as ``hescope.features.extract_embedding`` (torchvision weights, fc
+    # as ``hescope.analysis.features.extract_embedding`` (torchvision weights, fc
     # replaced by Identity). No HF repo, no license concerns.
     "resnet18": EncoderSpec(
         name="resnet18",
@@ -164,7 +164,7 @@ def _torch_device(torch):
 
 def _load_resnet18(spec: EncoderSpec) -> Encoder:
     """ResNet18(ImageNet) fallback — same weights/construction as
-    ``hescope.features.extract_embedding`` (fc -> Identity, 224px, ImageNet
+    ``hescope.analysis.features.extract_embedding`` (fc -> Identity, 224px, ImageNet
     normalization), exposed here in batchable form."""
     try:
         import torch
@@ -267,7 +267,7 @@ def load_encoder(name: str) -> Encoder:
     if spec is None:
         raise ValueError(
             f"unknown encoder {name!r}; available: {sorted(ENCODERS)} "
-            "(see hescope.embeddings.list_encoders())"
+            "(see hescope.analysis.embeddings.list_encoders())"
         )
     if name == "resnet18":
         return _load_resnet18(spec)

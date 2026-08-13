@@ -1,4 +1,4 @@
-"""Tests for hescope.rois."""
+"""Tests for hescope.core.rois."""
 
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.rois import (
+from hescope.core.rois import (
     ROI,
     ViewportState,
     extract_patch,
     roi_stats,
     viewport_transform,
 )
-from hescope.slides import PillowSource
+from hescope.wsi.slides import PillowSource
 
 
 @pytest.fixture()
@@ -123,7 +123,7 @@ def _triangle_patch():
 def test_roi_stats_respects_roi_shape():
     tri, patch = _triangle_patch()
     # the triangle fills only about half of its own bounding box
-    from hescope.rois import roi_shape_mask
+    from hescope.core.rois import roi_shape_mask
 
     m = roi_shape_mask(patch, tri)
     assert 0.45 < float(m.mean()) < 0.55

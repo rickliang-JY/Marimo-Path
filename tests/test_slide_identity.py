@@ -1,4 +1,4 @@
-"""Tests for hescope.identity (Phase 1: the SVS <-> ROI relationship).
+"""Tests for hescope.core.identity (Phase 1: the SVS <-> ROI relationship).
 
 Offline; tmp files only. Never touches data/hescope.db (R-1).
 """
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hescope.identity import CONTENT_KEY_HEAD, content_key, slide_identity
+from hescope.core.identity import CONTENT_KEY_HEAD, content_key, slide_identity
 
 
 # --- content_key -------------------------------------------------------
@@ -92,9 +92,9 @@ def test_slide_identity_returns_none_for_an_unreadable_path_the_path_fallback(
     tmp_path,
 ):
     """slide_identity() never manufactures a ('path', ...) identity itself --
-    that fallback belongs to the caller (hescope.db.SlideRepo.register,
+    that fallback belongs to the caller (hescope.store.db.SlideRepo.register,
     which also needs normalize_slide_path -- see this module's docstring for
-    why identity.py cannot depend on hescope.db). This is the boundary that
+    why identity.py cannot depend on hescope.store.db). This is the boundary that
     fallback sits on: a path that cannot be hashed resolves to None here.
     """
     missing = tmp_path / "gone.svs"

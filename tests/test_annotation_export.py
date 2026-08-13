@@ -32,14 +32,14 @@ import pathlib
 import marimo as mo
 import pytest
 
-from hescope.db import ROIRepo, SlideRepo, export_rois, get_engine, init_db
-from hescope.geojson import slide_geojson_text
-from hescope.importers import (
+from hescope.store.db import ROIRepo, SlideRepo, export_rois, get_engine, init_db
+from hescope.interop.geojson import slide_geojson_text
+from hescope.interop.importers import (
     import_annotations,
     parse_asap_xml,
     parse_geojson_annotations,
 )
-from hescope.rois import ROI
+from hescope.core.rois import ROI
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app.py"
 SOURCE = APP.read_text(encoding="utf-8")

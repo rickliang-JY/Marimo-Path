@@ -170,7 +170,7 @@ class GDCClient:
         # Kept for the caller that wants the last raw response: _record_from_hit
         # collapses cases[0]/samples[0] into four columns and drops sample_id,
         # the sample's own barcode, tissue_type and disease_type, which is
-        # exactly what hescope.tcga_schema needs to build the hierarchy.
+        # exactly what hescope.gdc.tcga_schema needs to build the hierarchy.
         self.last_hits = hits
         return [_record_from_hit(h) for h in hits], total
 
@@ -185,7 +185,7 @@ class GDCClient:
 
         The hierarchy the normalized catalog is built from lives in the parts
         of the response ``_record_from_hit`` throws away, so anything
-        populating :mod:`hescope.tcga_schema` has to see the hits themselves.
+        populating :mod:`hescope.gdc.tcga_schema` has to see the hits themselves.
         """
         records, total = self.search_slides(
             project_id=project_id, sample_type=sample_type,

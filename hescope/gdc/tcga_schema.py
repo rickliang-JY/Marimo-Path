@@ -61,7 +61,7 @@ def _utcnow() -> datetime:
 
 def _coerce_utc_datetime(value: object) -> datetime | None:
     """Normalize a caller-supplied timestamp into the naive-UTC form every
-    ``DATETIME`` column in this project is stored as (see ``hescope.db``'s
+    ``DATETIME`` column in this project is stored as (see ``hescope.store.db``'s
     naive-UTC convention: an aware datetime handed straight to SQLAlchemy's
     sqlite ``DATETIME`` binding has its offset silently discarded, not
     converted).
@@ -282,16 +282,16 @@ def init_tcga_schema(engine: sa.Engine) -> None:
 def plan_init_tcga_schema(engine: sa.Engine, conn: sa.Connection | None = None) -> dict:
     """What :func:`init_tcga_schema` WOULD do, computed read-only.
 
-    Mirrors ``hescope.db.plan_init_db``'s contract (see that function's
+    Mirrors ``hescope.store.db.plan_init_db``'s contract (see that function's
     docstring for why this pairing exists at all): ``tcga_projects`` /
     ``tcga_cases`` / ``tcga_samples`` / ``tcga_files`` live on their own
     ``DeclarativeBase`` (``TcgaBase``, deliberately separate from
-    ``hescope.db.Base`` -- see this module's docstring), so ``plan_init_db``
+    ``hescope.store.db.Base`` -- see this module's docstring), so ``plan_init_db``
     never sees them and a ``migrate --dry-run`` that only asked it would
     under-report exactly the class of gap ``plan_init_db`` itself exists to
     close for the core schema -- measured: on a database with none of the
     TCGA tables yet, a real (non-dry-run) ``migrate()`` call now creates them
-    (``hescope.migrations.migrate`` calls ``init_tcga_schema`` for migration
+    (``hescope.store.migrations.migrate`` calls ``init_tcga_schema`` for migration
     3's self-containment) while a dry run that only consulted
     ``plan_init_db`` named none of them.
 
@@ -303,7 +303,7 @@ def plan_init_tcga_schema(engine: sa.Engine, conn: sa.Connection | None = None) 
     leaves an existing one untouched; there is no column/index gap on an
     EXISTING tcga table for this function to compute (the one exception --
     ``tcga_files.slide_id``'s foreign key -- is migration 3's own job, see
-    ``hescope.migrations.plan_migration_3``, not this function's).
+    ``hescope.store.migrations.plan_migration_3``, not this function's).
     """
     inspector = sa.inspect(conn) if conn is not None else sa.inspect(engine)
     existing_tables = set(inspector.get_table_names())

@@ -27,7 +27,7 @@ import time
 import pytest
 import sqlalchemy as sa
 
-from hescope.db import (
+from hescope.store.db import (
     SQLITE_BUSY_TIMEOUT_MS,
     Base,
     ROIRepo,
@@ -36,7 +36,7 @@ from hescope.db import (
     init_db,
     sqlite_pragma_report,
 )
-from hescope.rois import ROI
+from hescope.core.rois import ROI
 
 
 @pytest.fixture()
@@ -381,7 +381,7 @@ def test_a_write_session_flags_its_connection_and_clears_it_afterwards(db_url):
     test: ``assert True is None`` on the second block, i.e. a read connection
     still carrying the write flag.
     """
-    from hescope.db import write_session
+    from hescope.store.db import write_session
 
     engine = get_engine(db_url)
     init_db(engine)

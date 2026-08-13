@@ -11,7 +11,7 @@ Commands:
   list [--kind K]               list registered slides
   dedupe-slides [--dry-run]     merge slide rows that name the same file
   migrate [--dry-run]           apply pending schema migrations (versioned,
-                                additive-only; see hescope.migrations)
+                                additive-only; see hescope.store.migrations)
   migrate-tcga-catalog [--dry-run]  import the flat TCGA catalog into the
                                 TCGA-shaped tables (never moves files)
 """
@@ -23,7 +23,7 @@ import os
 import sys
 from pathlib import Path
 
-from .db import (
+from .store.db import (
     SlideRepo,
     get_engine,
     init_db,
@@ -31,7 +31,7 @@ from .db import (
     plan_duplicate_slide_merge,
     plan_init_db,
 )
-from .slides import open_slide
+from .wsi.slides import open_slide
 
 IMAGE_EXTENSIONS = {".svs", ".tif", ".tiff", ".ndpi", ".png", ".jpg", ".jpeg"}
 
@@ -279,8 +279,8 @@ def _cmd_doctor(engine, *, verbose: bool = False) -> int:
     """
     import sqlalchemy as _sa
 
-    from .db import sqlite_pragma_report
-    from .migrations import SCHEMA_VERSION, current_version, pending
+    from .store.db import sqlite_pragma_report
+    from .store.migrations import SCHEMA_VERSION, current_version, pending
 
     url = engine.url
     print(f"url          {url.render_as_string(hide_password=True)}")
@@ -398,7 +398,7 @@ def _cmd_doctor(engine, *, verbose: bool = False) -> int:
 def _cmd_delete_roi(engine, roi_ids: list[int], *, yes: bool) -> int:
     """Delete specific ROIs by id. Prints what each one WAS before deleting it,
     because an id alone is not enough for a human to confirm they meant it."""
-    from .db import ROIRepo
+    from .store.db import ROIRepo
 
     init_db(engine)
     repo = ROIRepo(engine)
@@ -471,8 +471,8 @@ def _cmd_dedupe_slides(engine, dry_run: bool = False) -> int:
 def _cmd_migrate(engine, dry_run: bool) -> int:
     """Apply pending schema migrations, or (``--dry-run``) report what would
     run without opening a write transaction or touching the database."""
-    from .migrations import migrate, plan_migration_2, plan_migration_3
-    from .tcga_schema import plan_init_tcga_schema
+    from .store.migrations import migrate, plan_migration_2, plan_migration_3
+    from .gdc.tcga_schema import plan_init_tcga_schema
 
     if dry_run:
         # A plain get_engine(url) flips journal_mode to WAL (a persistent
@@ -527,7 +527,7 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
             # migration's apply(), so this preview is computed the same way
             # plan_init_db previews init_db: a read-only pass over the SAME
             # rows/files apply() would touch, sharing its computation (see
-            # hescope.migrations.plan_migration_2) so the two cannot drift.
+            # hescope.store.migrations.plan_migration_2) so the two cannot drift.
             if item.startswith("2:"):
                 with ro_engine.connect() as ro_conn:
                     mig2 = plan_migration_2(ro_conn)
@@ -540,7 +540,7 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
                 )
             # Migration 3's FK + backfill counts (BUILD-PLAN-DB.md Phase 2's
             # "done when" report), same shared-computation guarantee as
-            # migration 2's block above (see hescope.migrations.plan_migration_3).
+            # migration 2's block above (see hescope.store.migrations.plan_migration_3).
             if item.startswith("3:"):
                 with ro_engine.connect() as ro_conn:
                     mig3 = plan_migration_3(ro_conn)
@@ -581,7 +581,7 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
 
     # An empty database needs its tables before version 1 can be stamped;
     # a database that already has them (every shipped data/hescope.db) is
-    # untouched by this call -- see hescope.migrations' module docstring.
+    # untouched by this call -- see hescope.store.migrations' module docstring.
     init_db(engine)
     report = migrate(engine)
     for item in report.applied:
@@ -617,8 +617,8 @@ def _cmd_migrate_tcga_catalog(engine, catalog_db: str | None, dry_run: bool) -> 
     import sqlite3
     from pathlib import Path as _Path
 
-    from .paths import resolve_runtime_dir
-    from .tcga_schema import TcgaCatalog, parse_barcode
+    from .core.paths import resolve_runtime_dir
+    from .gdc.tcga_schema import TcgaCatalog, parse_barcode
 
     src = _Path(catalog_db) if catalog_db else (
         resolve_runtime_dir(_Path(__file__).resolve().parent.parent)

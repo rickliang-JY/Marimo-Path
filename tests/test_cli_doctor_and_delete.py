@@ -19,8 +19,8 @@ from __future__ import annotations
 import pytest
 
 from hescope.cli import main
-from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.rois import ROI
+from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+from hescope.core.rois import ROI
 
 
 @pytest.fixture()
@@ -87,7 +87,7 @@ def test_doctor_reports_slide_files_that_no_longer_resolve(db, capsys):
 
 def test_doctor_exits_nonzero_when_migrations_are_pending(db, capsys):
     url, engine, _sid, _ids = db
-    from hescope.migrations import current_version, migrate
+    from hescope.store.migrations import current_version, migrate
 
     if current_version(engine) == 0:
         rc = main(["--db", url, "doctor"])

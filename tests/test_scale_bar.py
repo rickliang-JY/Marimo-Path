@@ -1,4 +1,4 @@
-"""Tests for hescope.overlay.draw_scale_bar / pick_scale_bar_um."""
+"""Tests for hescope.viewer.overlay.draw_scale_bar / pick_scale_bar_um."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.overlay import (
+from hescope.viewer.overlay import (
     SCALE_BAR_CANDIDATES_UM,
     draw_scale_bar,
     pick_scale_bar_um,

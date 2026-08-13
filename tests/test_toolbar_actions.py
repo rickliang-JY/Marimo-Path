@@ -75,7 +75,7 @@ def test_pan_moves_the_viewport_when_a_slide_is_open():
     """
     import app as appmod
 
-    from hescope.demo import generate_demo_slide
+    from hescope.wsi.demo import generate_demo_slide
 
     _outputs, defs = appmod.app.run()
     open_slide_path = defs["open_slide_path"]
@@ -129,7 +129,7 @@ def test_clicking_add_roi_after_the_cell_ends_adds_an_roi():
     """
     import app as appmod
 
-    from hescope.rois import ROI
+    from hescope.core.rois import ROI
 
     appmod.app._maybe_initialize()
     cell = appmod.app._graph.cells["ZBYS"]

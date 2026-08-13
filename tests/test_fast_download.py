@@ -1,4 +1,4 @@
-"""Tests for the parallel (ranged) fast download path in hescope.tcga.
+"""Tests for the parallel (ranged) fast download path in hescope.gdc.tcga.
 
 ALL offline: the GDC /data endpoint is faked at the requests layer with a
 range-aware stub serving a deterministic payload.
@@ -14,7 +14,7 @@ import threading
 
 import pytest
 
-from hescope.tcga import (
+from hescope.gdc.tcga import (
     GDCClient,
     SlideCatalog,
     SlideRecord,
@@ -98,7 +98,7 @@ def _progress_sink():
 
 def test_parallel_download_exact_bytes(monkeypatch, tmp_path):
     fake = make_ranged_get()
-    monkeypatch.setattr("hescope.tcga.requests.get", fake)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", fake)
     client = GDCClient()
     seen, cb = _progress_sink()
 
@@ -129,7 +129,7 @@ def test_parallel_download_exact_bytes(monkeypatch, tmp_path):
 
 def test_workers1_forces_single_stream(monkeypatch, tmp_path):
     fake = make_ranged_get()
-    monkeypatch.setattr("hescope.tcga.requests.get", fake)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", fake)
     client = GDCClient()
     seen, cb = _progress_sink()
 
@@ -154,7 +154,7 @@ def test_worker_failure_falls_back_to_single_stream(monkeypatch, tmp_path):
             raise _req.ConnectionError("boom mid-range")
         return real_fake(url, params=params, headers=headers, timeout=timeout)
 
-    monkeypatch.setattr("hescope.tcga.requests.get", flaky_get)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", flaky_get)
     client = GDCClient()
     dest = client.download_slide("fid-flaky", tmp_path, workers=4)
 
@@ -163,7 +163,7 @@ def test_worker_failure_falls_back_to_single_stream(monkeypatch, tmp_path):
 
 
 def test_expected_md5_ok(monkeypatch, tmp_path):
-    monkeypatch.setattr("hescope.tcga.requests.get", make_ranged_get())
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", make_ranged_get())
     client = GDCClient()
     good = hashlib.md5(PAYLOAD).hexdigest()
     dest = client.download_slide("fid-md5", tmp_path, workers=4, expected_md5=good)
@@ -171,7 +171,7 @@ def test_expected_md5_ok(monkeypatch, tmp_path):
 
 
 def test_expected_md5_wrong_raises(monkeypatch, tmp_path):
-    monkeypatch.setattr("hescope.tcga.requests.get", make_ranged_get())
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", make_ranged_get())
     client = GDCClient()
     bad = "0" * 32
     with pytest.raises(IOError, match="md5 mismatch"):
@@ -182,7 +182,7 @@ def test_expected_md5_wrong_raises(monkeypatch, tmp_path):
 
 
 def test_expected_md5_wrong_raises_legacy(monkeypatch, tmp_path):
-    monkeypatch.setattr("hescope.tcga.requests.get", make_ranged_get())
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", make_ranged_get())
     client = GDCClient()
     with pytest.raises(IOError, match="md5 mismatch"):
         client.download_slide("fid-md5bad1", tmp_path, workers=1, expected_md5="f" * 32)
@@ -190,7 +190,7 @@ def test_expected_md5_wrong_raises_legacy(monkeypatch, tmp_path):
 
 def test_legacy_skip_if_complete_still_works(monkeypatch, tmp_path):
     fake = make_ranged_get()
-    monkeypatch.setattr("hescope.tcga.requests.get", fake)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", fake)
     dest_dir = tmp_path / "fid-done"
     dest_dir.mkdir()
     (dest_dir / FILE_NAME).write_bytes(PAYLOAD)
@@ -213,7 +213,7 @@ def test_legacy_skip_if_complete_still_works(monkeypatch, tmp_path):
 
 def test_stale_part_is_restarted_not_resumed(monkeypatch, tmp_path):
     fake = make_ranged_get()
-    monkeypatch.setattr("hescope.tcga.requests.get", fake)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", fake)
     (tmp_path / (FILE_NAME + ".part")).write_bytes(b"stale-garbage")
     client = GDCClient()
     dest = client.download_slide("fid-stale", tmp_path, workers=4)
@@ -242,7 +242,7 @@ def test_resolve_workers_env(monkeypatch):
 
 def test_env_workers_drive_parallel_download(monkeypatch, tmp_path):
     fake = make_ranged_get()
-    monkeypatch.setattr("hescope.tcga.requests.get", fake)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", fake)
     monkeypatch.setenv("HESCOPE_DL_WORKERS", "3")
     client = GDCClient()
     dest = client.download_slide("fid-env", tmp_path)
@@ -307,7 +307,7 @@ def test_search_slides_requests_and_parses_md5sum(monkeypatch):
         calls.append(params)
         return Resp()
 
-    monkeypatch.setattr("hescope.tcga.requests.get", fake_get)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", fake_get)
     records, total = GDCClient().search_slides()
     assert total == 1
     assert records[0].md5sum == "1" * 32
@@ -476,7 +476,7 @@ def test_flat_catalog_mark_downloaded_on_unknown_id_returns_false(tmp_path):
 )
 def test_filename_from_headers_is_contained(raw, expected):
     """R02-3: the name is server-controlled and gets joined onto dest_dir."""
-    from hescope.tcga import _filename_from_headers
+    from hescope.gdc.tcga import _filename_from_headers
 
     headers = {"Content-Disposition": f'attachment; filename="{raw}"'}
     assert _filename_from_headers(headers) == expected
@@ -499,7 +499,7 @@ def test_filename_from_headers_is_contained(raw, expected):
 def test_safe_file_id_is_contained(raw, expected):
     """R05-1: file_id arrives from the same untrusted place as the header file
     name (``_record_from_hit``) and is joined onto a path twice."""
-    from hescope.tcga import safe_file_id
+    from hescope.gdc.tcga import safe_file_id
 
     assert safe_file_id(raw) == expected
 
@@ -523,7 +523,7 @@ def test_download_contains_a_traversing_file_id(monkeypatch, tmp_path, workers):
     GDC-supplied file_id, which used to be joined onto dest_dir raw -- the
     escaped path was then written to disk and persisted to
     ``tcga_slides.local_path``."""
-    monkeypatch.setattr("hescope.tcga.requests.get", _get_without_filename())
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", _get_without_filename())
     dest_dir = tmp_path / "tcga" / "sub"
     dest_dir.mkdir(parents=True)
 
@@ -541,7 +541,7 @@ def test_download_contains_a_traversing_file_id(monkeypatch, tmp_path, workers):
 def test_download_stays_inside_dest_dir(monkeypatch, tmp_path, workers):
     """A traversing Content-Disposition must not write outside dest_dir."""
     monkeypatch.setattr(
-        "hescope.tcga.requests.get", make_ranged_get(file_name="../../escaped.svs")
+        "hescope.gdc.tcga.requests.get", make_ranged_get(file_name="../../escaped.svs")
     )
     dest_dir = tmp_path / "slides" / "fid-evil"
     dest_dir.mkdir(parents=True)
@@ -560,8 +560,8 @@ def test_download_stays_inside_dest_dir(monkeypatch, tmp_path, workers):
 
 import requests as _requests
 
-from hescope.tcga import _PARALLEL_MIN_BYTES, _split_ranges
-import hescope.tcga as _tcga_mod
+from hescope.gdc.tcga import _PARALLEL_MIN_BYTES, _split_ranges
+import hescope.gdc.tcga as _tcga_mod
 
 
 class BrokenResp(FakeResp):
@@ -577,7 +577,7 @@ class BrokenResp(FakeResp):
 def _no_sleep(monkeypatch):
     """Patch out backoff sleeps (keeps retry tests instant)."""
     monkeypatch.setattr(
-        "hescope.tcga._retry_sleep", lambda attempt, retry_after=None: None
+        "hescope.gdc.tcga._retry_sleep", lambda attempt, retry_after=None: None
     )
 
 
@@ -611,7 +611,7 @@ def test_flaky_range_resumes_remaining_subrange(monkeypatch, tmp_path):
                 return BrokenResp(resp._body, resp.status_code, resp.headers)
         return base(url, params=params, headers=headers, timeout=timeout)
 
-    monkeypatch.setattr("hescope.tcga.requests.get", flaky_get)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", flaky_get)
     client = GDCClient()
     seen, cb = _progress_sink()
 
@@ -638,7 +638,7 @@ def test_range_retry_honors_retry_after_on_429(monkeypatch, tmp_path):
     real_retry_sleep = _tcga_mod._retry_sleep
     recorded = []
     monkeypatch.setattr(
-        "hescope.tcga._retry_sleep",
+        "hescope.gdc.tcga._retry_sleep",
         lambda attempt, retry_after=None: recorded.append((attempt, retry_after)),
     )
     base = make_ranged_get()
@@ -657,7 +657,7 @@ def test_range_retry_honors_retry_after_on_429(monkeypatch, tmp_path):
                 return FakeResp(b"", 429, {"Retry-After": "7"})
         return base(url, params=params, headers=headers, timeout=timeout)
 
-    monkeypatch.setattr("hescope.tcga.requests.get", throttling_get)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", throttling_get)
     client = GDCClient()
     dest = client.download_slide("fid-429", tmp_path, workers=2)
 
@@ -691,7 +691,7 @@ def test_legacy_retries_chunked_encoding_errors(monkeypatch, tmp_path):
             return BrokenResp(PAYLOAD[: 2 * 1024 * 1024], 200, resp.headers)
         return base(url, params=params, headers=headers, timeout=timeout)
 
-    monkeypatch.setattr("hescope.tcga.requests.get", flaky_get)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", flaky_get)
     client = GDCClient()
     seen, cb = _progress_sink()
 
@@ -721,7 +721,7 @@ def test_all_attempts_fail_raises_ioerror_and_cleans_part(monkeypatch, tmp_path)
             raise _requests.exceptions.ConnectionError("dead connection")
         return base(url, params=params, headers=headers, timeout=timeout)
 
-    monkeypatch.setattr("hescope.tcga.requests.get", dead_get)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", dead_get)
     client = GDCClient()
 
     with pytest.raises(IOError, match="failed after 3 attempts"):
@@ -736,7 +736,7 @@ def test_small_file_skips_parallel_path(monkeypatch, tmp_path):
     small = random.Random(7).randbytes(6_500_000)  # ~6.5MB < 16MB
     assert len(small) < _PARALLEL_MIN_BYTES
     fake = make_ranged_get(payload=small)
-    monkeypatch.setattr("hescope.tcga.requests.get", fake)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", fake)
     client = GDCClient()
     seen, cb = _progress_sink()
 

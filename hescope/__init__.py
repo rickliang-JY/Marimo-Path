@@ -1,6 +1,6 @@
 """HE-Scope: marimo H&E pathology image viewer platform."""
 
-from .agent_bridge import (
+from .agent.agent_bridge import (
     AgentBridge,
     ROIPayload,
     magnification_for,
@@ -8,7 +8,7 @@ from .agent_bridge import (
     make_marimo_tool,
     selection_stats,
 )
-from .rois import (
+from .core.rois import (
     ROI,
     ViewportState,
     extract_patch,
@@ -16,7 +16,7 @@ from .rois import (
     roi_stats,
     viewport_transform,
 )
-from .slides import (
+from .wsi.slides import (
     OpenSlideSource,
     PillowSource,
     SlideSource,
@@ -24,13 +24,13 @@ from .slides import (
     best_level_for_downsample,
     open_slide,
 )
-from .tcga import GDC_API, GDCClient, SlideCatalog, SlideRecord
+from .gdc.tcga import GDC_API, GDCClient, SlideCatalog, SlideRecord
 
 # --- SPEC-ML analytics (Parts A + B): lazy-ish re-exports --------------------
 # The analytics modules only need numpy/scipy/scikit-image (+ joblib /
 # scikit-learn for ml); importing them here keeps ``hescope.detect_nuclei``
 # etc. available to agents without an extra import step.
-from .embeddings import (
+from .analysis.embeddings import (
     ENCODERS,
     EncoderSpec,
     default_encoder_name,
@@ -38,16 +38,16 @@ from .embeddings import (
     list_encoders,
     load_encoder,
 )
-from .features import FEATURE_DIM, FEATURE_NAMES, extract_embedding, extract_features
-from .grid import grid_shape, iter_grid, tissue_fraction_proxy
-from .heatmap import (
+from .analysis.features import FEATURE_DIM, FEATURE_NAMES, extract_embedding, extract_features
+from .analysis.grid import grid_shape, iter_grid, tissue_fraction_proxy
+from .analysis.heatmap import (
     compute_grid,
     get_colormap_lut,
     grid_bbox_to_level0,
     grid_coverage,
     render_heatmap,
 )
-from .ml import (
+from .analysis.ml import (
     ModelInfo,
     list_models,
     load_model,
@@ -55,16 +55,16 @@ from .ml import (
     predict_patch,
     train_from_annotations,
 )
-from .importers import (
+from .interop.importers import (
     ImportReport,
     ImportedROI,
     import_annotations,
     parse_asap_xml,
     parse_geojson_annotations,
 )
-from .nuclei import NucleiStats, detect_nuclei
-from .qc import blur_score, qc_report, tissue_mask
-from .stain import (
+from .analysis.nuclei import NucleiStats, detect_nuclei
+from .analysis.qc import blur_score, qc_report, tissue_mask
+from .analysis.stain import (
     STAIN_METHODS,
     fit_reference,
     macenko_normalize,
@@ -96,10 +96,10 @@ def analysis_capabilities(models_dir: str = "data/models") -> dict:
         )
         result = {
             "analyses": [
-                "selection_stats",      # hescope.agent_bridge.selection_stats
-                "detect_nuclei",        # hescope.nuclei.detect_nuclei
-                "qc_report",            # hescope.qc.qc_report
-                "extract_features",     # hescope.features.extract_features
+                "selection_stats",      # hescope.agent.agent_bridge.selection_stats
+                "detect_nuclei",        # hescope.analysis.nuclei.detect_nuclei
+                "qc_report",            # hescope.analysis.qc_report
+                "extract_features",     # hescope.analysis.features.extract_features
                 "STAIN_METHODS",
     "macenko_normalize",
     "import_annotations",
@@ -107,14 +107,14 @@ def analysis_capabilities(models_dir: str = "data/models") -> dict:
     "parse_asap_xml",
     "parse_geojson_annotations",
     "ruifrok_normalize",
-    "vahadane_normalize",    # hescope.stain.macenko_normalize
-                "ruifrok_normalize",    # hescope.stain.ruifrok_normalize
-                "vahadane_normalize",   # hescope.stain.vahadane_normalize
-                "reinhard_normalize",   # hescope.stain.reinhard_normalize
-                "compute_grid",         # hescope.heatmap.compute_grid
-                "render_heatmap",       # hescope.heatmap.render_heatmap
-                "train_from_annotations",  # hescope.ml.train_from_annotations
-                "predict_patch",        # hescope.ml.predict_patch
+    "vahadane_normalize",    # hescope.analysis.stain.macenko_normalize
+                "ruifrok_normalize",    # hescope.analysis.stain.ruifrok_normalize
+                "vahadane_normalize",   # hescope.analysis.stain.vahadane_normalize
+                "reinhard_normalize",   # hescope.analysis.stain.reinhard_normalize
+                "compute_grid",         # hescope.analysis.heatmap.compute_grid
+                "render_heatmap",       # hescope.analysis.heatmap.render_heatmap
+                "train_from_annotations",  # hescope.analysis.ml.train_from_annotations
+                "predict_patch",        # hescope.analysis.ml.predict_patch
             ],
             "torch_embedding_available": bool(torch_ok),
             "available_encoders": {

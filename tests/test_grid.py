@@ -1,4 +1,4 @@
-"""Tests for hescope.grid (SPEC-ML Part B.2)."""
+"""Tests for hescope.analysis.grid (SPEC-ML Part B.2)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from hescope.grid import grid_shape, iter_grid, tissue_fraction_proxy
-from hescope.slides import open_slide
+from hescope.analysis.grid import grid_shape, iter_grid, tissue_fraction_proxy
+from hescope.wsi.slides import open_slide
 
 TILE = 128
 DS = 4.0

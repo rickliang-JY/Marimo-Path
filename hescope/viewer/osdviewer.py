@@ -2,13 +2,13 @@
 
 Why this module exists
 ----------------------
-The plotly surface in :mod:`hescope.viewer` renders ONE flat bitmap per
+The plotly surface in :mod:`hescope.viewer.viewer` renders ONE flat bitmap per
 viewport change; marimo's plotly binding only reports ``points``/``range``/
 ``lasso`` back to Python, so wheel-zoom and pan are cosmetic -- they scale an
 already-rendered bitmap and can never reveal new detail or anything beyond its
 edge. OpenSeadragon fetches pyramid tiles itself, so pan/zoom are real, and an
 anywidget comm carries the resulting viewport back to Python, which is what
-keeps :class:`~hescope.rois.ViewportState` (navigator, click-to-jump, measure)
+keeps :class:`~hescope.core.rois.ViewportState` (navigator, click-to-jump, measure)
 meaningful.
 
 Layering
@@ -41,9 +41,11 @@ import functools
 import math
 import re
 from pathlib import Path
+
+from ..core.paths import PACKAGE_ROOT
 from typing import Any, Iterable, Sequence
 
-from .rois import ROI, ViewportState
+from ..core.rois import ROI, ViewportState
 
 __all__ = [
     "OSD_VERSION",
@@ -73,9 +75,9 @@ __all__ = [
 OSD_VERSION = "5.0.1"
 
 #: Directory holding the vendored OpenSeadragon build (see THIRD_PARTY.md).
-OSD_DIR = Path(__file__).resolve().parent / "static" / "vendor" / "openseadragon"
+OSD_DIR = PACKAGE_ROOT / "static" / "vendor" / "openseadragon"
 
-#: Overlay colours, kept byte-equal to hescope.overlay.draw_rois' RGB tuples
+#: Overlay colours, kept byte-equal to hescope.viewer.overlay.draw_rois' RGB tuples
 #: (255, 60, 60) / (60, 200, 60) so the client overlay and the server-rendered
 #: export path cannot drift apart visually.
 ROI_STROKE = "#ff3c3c"
@@ -892,7 +894,7 @@ _ROI_KINDS = ("rect", "polygon")
 def _finite_points(raw: Any) -> list[tuple[float, float]] | None:
     """Coerce ``[[x, y], ...]`` to finite float pairs, or None.
 
-    Mirrors the R01-3 hardening in :func:`hescope.viewer.parse_plotly_selection`
+    Mirrors the R01-3 hardening in :func:`hescope.viewer.viewer.parse_plotly_selection`
     and adds a finiteness check: ``float("nan")`` does not raise, and a NaN
     corner would silently produce an ROI whose bbox is garbage.
     """
@@ -921,7 +923,7 @@ def parse_osd_selection(value: dict | None) -> dict | None:
     ``None``. Never raises.
 
     *** VOCABULARY: this emits the FINAL kinds. ***
-    :func:`hescope.viewer.parse_plotly_selection` emits the INTERMEDIATE kinds
+    :func:`hescope.viewer.viewer.parse_plotly_selection` emits the INTERMEDIATE kinds
     ``box``/``lasso``, which ``selection_to_roi`` renames to ``rect``/
     ``polygon``. There is no rename step on this path, so copying the plotly
     branch verbatim would make ``get_current_selection()`` report
@@ -930,7 +932,7 @@ def parse_osd_selection(value: dict | None) -> dict | None:
     *** The output key is ``points_level0``, NOT ``points``. ***
     OSD hands back level-0 coordinates directly, so this geometry must NOT go
     through ``viewport_transform`` again. Naming the key differently from what
-    :func:`hescope.viewer.selection_to_roi` reads means an accidental
+    :func:`hescope.viewer.viewer.selection_to_roi` reads means an accidental
     ``selection_to_roi(parse_osd_selection(v), vp)`` raises ``KeyError``
     instead of silently double-transforming every coordinate into a
     plausible-looking wrong answer.
@@ -966,7 +968,7 @@ def parse_osd_measure(
 
     Kept separate from :func:`parse_osd_selection` precisely because measure
     geometry must never become an ROI. Feed the result straight to
-    :func:`hescope.measure.measure_box`.
+    :func:`hescope.core.measure_box`.
     """
     if not isinstance(value, dict) or value.get("kind") != "measure":
         return None
@@ -981,7 +983,7 @@ def parse_osd_measure(
 def osd_selection_to_roi(selection: dict, as_circle: bool = False) -> ROI:
     """Parsed OSD selection -> :class:`ROI`.
 
-    Twin of :func:`hescope.viewer.selection_to_roi` MINUS the
+    Twin of :func:`hescope.viewer.viewer.selection_to_roi` MINUS the
     ``viewport_transform`` call: the points are already level-0.
 
     ``as_circle`` mirrors the plotly path (radius = half the shorter box side,
@@ -1006,7 +1008,7 @@ def raw_osd_selection(value: Any) -> dict | None:
     ``mo.ui.anywidget`` element itself, a bare :class:`HEScopeViewer`, or the
     selection dict directly. Returns None when there is nothing usable.
 
-    (The plotly path needs :func:`hescope.viewer.raw_plotly_selection` for the
+    (The plotly path needs :func:`hescope.viewer.viewer.raw_plotly_selection` for the
     same reason: what an app cell holds is an element, not a payload.)
     """
     if value is None:
@@ -1032,10 +1034,10 @@ def _selection_dict_from_roi(
 ) -> dict | None:
     """The 7-key agent contract dict (AGENTS.md 4.1) for ``roi``.
 
-    Delegates to ``hescope.viewer.selection_dict_from_roi`` when that exists,
+    Delegates to ``hescope.viewer.viewer.selection_dict_from_roi`` when that exists,
     so there is ONE copy of the contract shape in the codebase. The inline
     fallback reproduces the pre-extraction body of
-    :func:`hescope.viewer.current_selection` verbatim and exists only so this
+    :func:`hescope.viewer.viewer.current_selection` verbatim and exists only so this
     module keeps working against a viewer.py that has not been refactored yet
     -- ``test_osd_selection_matches_plotly_contract`` compares the two outputs
     byte-for-byte, so the fallback cannot drift unnoticed.
@@ -1063,7 +1065,7 @@ def _selection_dict_from_roi(
 def osd_current_selection(
     source: Any, vp: ViewportState, widget_value: Any
 ) -> dict | None:
-    """OSD twin of :func:`hescope.viewer.current_selection`.
+    """OSD twin of :func:`hescope.viewer.viewer.current_selection`.
 
     Same signature, same return shape, same ``None`` semantics -- so the
     ``get_current_selection`` tool's getter can be swapped from one to the
@@ -1214,7 +1216,7 @@ def make_viewer(
     """Construct a viewer for ``source`` showing ``tile_source``.
 
     ``tile_source`` is the OSD descriptor produced by the tile server
-    (``hescope.tileserver.serve_slide(...)["tile_source"]``); an empty dict
+    (``hescope.viewer.tileserver.serve_slide(...)["tile_source"]``); an empty dict
     renders the "no slide open" placeholder rather than failing.
 
     The caller is expected to wrap the result in ``mo.ui.anywidget`` and to

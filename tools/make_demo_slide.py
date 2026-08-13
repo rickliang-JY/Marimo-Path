@@ -1,7 +1,7 @@
 """Generate the synthetic H&E demo slide at assets/demo_he.png.
 
 Thin wrapper kept for backwards compatibility; the generation logic lives
-in ``hescope.demo`` (shipped with the wheel) so non-editable installs can
+in ``hescope.wsi.demo`` (shipped with the wheel) so non-editable installs can
 also generate the demo slide.
 
 Usage: python tools/make_demo_slide.py [output_path]
@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo layout
 
-from hescope.demo import W, H, generate_demo_slide
+from hescope.wsi.demo import W, H, generate_demo_slide
 
 OUT = Path(__file__).resolve().parent.parent / "assets" / "demo_he.png"
 

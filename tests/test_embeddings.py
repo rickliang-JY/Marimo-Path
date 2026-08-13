@@ -1,4 +1,4 @@
-"""Tests for hescope.embeddings (encoder factory) and its ml.py integration.
+"""Tests for hescope.analysis.embeddings (encoder factory) and its ml.py integration.
 
 Everything is mocked: no network, no model downloads, no GPU. Real torch
 imports are only touched indirectly (torch IS installed in CI; timm and
@@ -17,8 +17,8 @@ import pytest
 from PIL import Image
 
 import hescope
-import hescope.embeddings as emb
-from hescope.embeddings import (
+import hescope.analysis.embeddings as emb
+from hescope.analysis.embeddings import (
     ENCODERS,
     EncoderSpec,
     default_encoder_name,
@@ -26,15 +26,15 @@ from hescope.embeddings import (
     list_encoders,
     load_encoder,
 )
-from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.ml import (
+from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+from hescope.analysis.ml import (
     EMBEDDER_ENV_VAR,
     load_model,
     make_prob_metric,
     predict_patch,
     train_from_annotations,
 )
-from hescope.rois import ROI
+from hescope.core.rois import ROI
 
 # ---------------------------------------------------------------------------
 # registry metadata
@@ -130,7 +130,7 @@ def test_default_never_picks_noncommercial_or_gated(monkeypatch):
 def test_module_import_does_not_import_torch():
     """Importing hescope(.embeddings) must not pull in torch or network."""
     code = (
-        "import sys; import hescope; import hescope.embeddings; "
+        "import sys; import hescope; import hescope.analysis.embeddings; "
         "assert 'torch' not in sys.modules, 'torch imported eagerly'; "
         "assert 'torchvision' not in sys.modules; "
         "assert 'timm' not in sys.modules; "
@@ -257,8 +257,8 @@ EMBED_DIM = 8
 
 @pytest.fixture
 def stub_features(monkeypatch):
-    """Inject a deterministic stub hescope.features module (as in test_ml)."""
-    mod = types.ModuleType("hescope.features")
+    """Inject a deterministic stub hescope.analysis.features module (as in test_ml)."""
+    mod = types.ModuleType("hescope.analysis.features")
     mod.FEATURE_DIM = STUB_FEATURE_DIM
 
     def extract_features(img):
@@ -271,8 +271,14 @@ def stub_features(monkeypatch):
         return np.concatenate([means, stds, rest]).astype(np.float32)
 
     mod.extract_features = extract_features
-    monkeypatch.setitem(sys.modules, "hescope.features", mod)
-    monkeypatch.setattr(hescope, "features", mod, raising=False)
+    monkeypatch.setitem(sys.modules, "hescope.analysis.features", mod)
+    # The attribute to patch moved with the module: hescope/analysis/ml.py now
+    # does `from . import features`, which resolves through hescope.analysis,
+    # not hescope. Patching the old holder left the REAL 56-dim features in
+    # play while the test believed it had a 16-dim stub.
+    import hescope.analysis
+
+    monkeypatch.setattr(hescope.analysis, "features", mod, raising=False)
     return mod
 
 

@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 import pytest
 import sqlalchemy as sa
 
-from hescope.db import get_engine
-from hescope.tcga_schema import (
+from hescope.store.db import get_engine
+from hescope.gdc.tcga_schema import (
     TcgaCatalog,
     TcgaFile,
     hits_to_rows,
@@ -187,7 +187,7 @@ def test_upsert_skips_rows_with_no_file_id(catalog):
 
 def _flat_catalog(tmp_path, rows):
     """A legacy data/tcga/catalog.db, written by the flat SlideCatalog."""
-    from hescope.tcga import SlideCatalog, SlideRecord
+    from hescope.gdc.tcga import SlideCatalog, SlideRecord
 
     cat = SlideCatalog(tmp_path / "catalog.db")
     cat.upsert([
@@ -219,13 +219,13 @@ def test_migration_dry_run_changes_nothing(tmp_path, rows, capsys):
     assert "would import 3 file row(s)" in out
     assert "nothing was changed" in out
 
-    from hescope.db import get_engine
+    from hescope.store.db import get_engine
     assert TcgaCatalog(get_engine(db_url)).stats()["files"] == 0
 
 
 def test_migration_builds_the_hierarchy_and_keeps_downloads(tmp_path, rows, capsys):
     from hescope.cli import main
-    from hescope.db import get_engine
+    from hescope.store.db import get_engine
 
     cat = _flat_catalog(tmp_path, rows)
     slide = tmp_path / "already-downloaded.svs"
@@ -257,7 +257,7 @@ def test_migration_recovers_the_sample_level_from_the_barcode(tmp_path, rows, ca
     the only place sample identity survived, so the level is reconstructed
     rather than dropped."""
     from hescope.cli import main
-    from hescope.db import get_engine
+    from hescope.store.db import get_engine
 
     _flat_catalog(tmp_path, rows)
     db_url = f"sqlite:///{tmp_path / 'main.db'}"
@@ -273,7 +273,7 @@ def test_migration_recovers_the_sample_level_from_the_barcode(tmp_path, rows, ca
 
 def test_migration_is_idempotent(tmp_path, rows, capsys):
     from hescope.cli import main
-    from hescope.db import get_engine
+    from hescope.store.db import get_engine
 
     _flat_catalog(tmp_path, rows)
     db_url = f"sqlite:///{tmp_path / 'main.db'}"
@@ -312,7 +312,7 @@ def test_migrate_tcga_catalog_preserves_first_seen_at_from_the_source(
     exact bug.
     """
     from hescope.cli import main
-    from hescope.db import get_engine
+    from hescope.store.db import get_engine
 
     _flat_catalog(tmp_path, rows)
     fid = rows[0]["file_id"]
@@ -354,7 +354,7 @@ def test_migrate_tcga_catalog_preserves_downloaded_at_from_the_source(
     fallback replaced the source catalog's own downloaded_at with the
     moment the IMPORT ran. Source vs destination (R-3), not a count."""
     from hescope.cli import main
-    from hescope.db import get_engine
+    from hescope.store.db import get_engine
 
     cat = _flat_catalog(tmp_path, rows)
     fid = rows[0]["file_id"]
@@ -401,7 +401,7 @@ def test_migrate_tcga_catalog_does_not_count_an_unwritten_link_as_preserved(
     written. Seen to fail before the fix: 'preserved 1 download(s)' printed
     while tcga_files held 0 rows."""
     from hescope.cli import main
-    from hescope.db import get_engine
+    from hescope.store.db import get_engine
 
     catalog_path = tmp_path / "catalog.db"
     con = sqlite3.connect(str(catalog_path))

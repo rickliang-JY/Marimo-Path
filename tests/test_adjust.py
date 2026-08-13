@@ -1,4 +1,4 @@
-"""Tests for hescope.adjust (Part B.3)."""
+"""Tests for hescope.viewer.adjust (Part B.3)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.adjust import apply_adjustments, channel_view
+from hescope.viewer.adjust import apply_adjustments, channel_view
 
 
 def gradient_img(w: int = 64, h: int = 48) -> Image.Image:

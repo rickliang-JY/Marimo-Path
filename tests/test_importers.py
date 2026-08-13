@@ -13,7 +13,7 @@ import pathlib
 
 import pytest
 
-from hescope.importers import (
+from hescope.interop.importers import (
     import_annotations,
     parse_asap_xml,
     parse_geojson_annotations,
@@ -140,7 +140,7 @@ def test_bad_xml_is_reported_not_raised():
 
 
 def _engine(tmp_path):
-    from hescope.db import get_engine, init_db
+    from hescope.store.db import get_engine, init_db
 
     engine = get_engine(f"sqlite:///{tmp_path / 'roundtrip.db'}")
     init_db(engine)
@@ -150,7 +150,7 @@ def _engine(tmp_path):
 def test_imported_rois_are_indistinguishable_from_drawn_ones(tmp_path):
     """They must land with points_json populated, or they cannot be exported,
     trained on, or seen by query_annotations()."""
-    from hescope.db import ROIRepo, SlideRepo
+    from hescope.store.db import ROIRepo, SlideRepo
 
     engine = _engine(tmp_path)
     slide_id = SlideRepo(engine).register(
@@ -172,8 +172,8 @@ def test_geojson_round_trip_preserves_geometry_and_class(tmp_path):
     """import -> persist -> export -> import must be identity on the outline
     and the class. This is what makes the export/import pair worth having; it
     only works because the exporter stopped flattening shapes to their bbox."""
-    from hescope.db import SlideRepo
-    from hescope.geojson import slide_feature_collection
+    from hescope.store.db import SlideRepo
+    from hescope.interop.geojson import slide_feature_collection
 
     engine = _engine(tmp_path)
     slide_id = SlideRepo(engine).register(
@@ -196,8 +196,8 @@ def test_geojson_round_trip_preserves_geometry_and_class(tmp_path):
 def test_asap_round_trips_through_our_geojson(tmp_path):
     """An ASAP file imported here must survive export as QuPath GeoJSON, which
     is the practical path from a CAMELYON ground-truth set into QuPath."""
-    from hescope.db import SlideRepo
-    from hescope.geojson import slide_feature_collection
+    from hescope.store.db import SlideRepo
+    from hescope.interop.geojson import slide_feature_collection
 
     engine = _engine(tmp_path)
     slide_id = SlideRepo(engine).register(

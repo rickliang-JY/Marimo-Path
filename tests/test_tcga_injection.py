@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 
-from hescope.db import SlideRepo, get_engine, init_db
-from hescope.tcga_schema import TcgaCatalog
+from hescope.store.db import SlideRepo, get_engine, init_db
+from hescope.gdc.tcga_schema import TcgaCatalog
 
 
 def _simulate_completed_download(engine, *, file_id, local_path, md5, hits_row) -> int:

@@ -1,7 +1,7 @@
 """Grid metric computation and matplotlib-free heatmap rendering
 (SPEC-ML Part B.3).
 
-``compute_grid`` evaluates a metric per tile over :func:`hescope.grid.iter_grid`
+``compute_grid`` evaluates a metric per tile over :func:`hescope.analysis.grid.iter_grid`
 and returns a float array with NaN where tiles were skipped.
 ``render_heatmap`` colorizes such a grid with a hardcoded 256-entry viridis
 LUT (exact published viridis data, stored zlib+base64 compressed) and
@@ -18,7 +18,7 @@ import numpy as np
 from PIL import Image
 
 from .grid import grid_shape, iter_grid
-from .slides import SlideSource
+from ..wsi.slides import SlideSource
 
 # Exact 256x3 uint8 viridis LUT (published matplotlib viridis data sampled
 # at 256 points), zlib-compressed and base64-encoded to keep the source
@@ -87,7 +87,7 @@ def compute_grid(
     """Evaluate ``metric_fn(pil_tile) -> float`` over the slide grid.
 
     Returns a ``(rows, cols)`` float64 array matching
-    :func:`hescope.grid.grid_shape`; cells skipped by the tissue filter (or
+    :func:`hescope.analysis.grid_shape`; cells skipped by the tissue filter (or
     beyond ``max_tiles``) are ``np.nan``. ``progress_cb(done, total)`` is
     called with ``total = rows * cols`` grid cells; ``done`` counts cells
     swept so far, and a final ``progress_cb(total, total)`` call is

@@ -1,7 +1,7 @@
 """Contract tests for the OpenSeadragon viewing surface (offline, no browser).
 
 Everything that decides a coordinate or builds an agent payload lives in plain
-functions in :mod:`hescope.osdviewer`; this file is the proof that those
+functions in :mod:`hescope.viewer.osdviewer`; this file is the proof that those
 functions agree, byte-for-byte, with the plotly path they replace.
 
 What is NOT covered here (browser-only): that OpenSeadragon actually boots
@@ -18,11 +18,11 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope import osdviewer as osd
-from hescope.measure import measure_box
-from hescope.rois import ROI, ViewportState, viewport_transform
-from hescope.slides import PillowSource
-from hescope.viewer import current_selection, selection_to_roi
+from hescope.viewer import osdviewer as osd
+from hescope.core.measure import measure_box
+from hescope.core.rois import ROI, ViewportState, viewport_transform
+from hescope.wsi.slides import PillowSource
+from hescope.viewer.viewer import current_selection, selection_to_roi
 
 # The exact viewport tests/test_live_selection.py pins the agent contract to.
 VP = ViewportState(center=(1000.0, 800.0), downsample=2.0, size=(400, 300))
@@ -105,7 +105,7 @@ def test_build_esm_is_cached():
 
 
 def test_overlay_colours_match_the_server_renderer():
-    """The client overlay and hescope.overlay.draw_rois must not drift.
+    """The client overlay and hescope.viewer.overlay.draw_rois must not drift.
 
     draw_rois bakes (255, 60, 60) / (60, 200, 60) into the exported PNG; the
     SVG overlay is what the user actually looks at. A mismatch would make a
@@ -113,7 +113,7 @@ def test_overlay_colours_match_the_server_renderer():
     """
     import inspect
 
-    from hescope import overlay
+    from hescope.viewer import overlay
 
     assert osd.ROI_STROKE == "#ff3c3c"
     assert osd.ROI_STROKE_SELECTED == "#3cc83c"
@@ -325,7 +325,7 @@ def test_parse_osd_selection_key_name_blocks_double_transform():
     """The output key is points_level0, not points, on purpose.
 
     OSD already reports level-0 coordinates. Feeding them to
-    hescope.viewer.selection_to_roi would apply viewport_transform a SECOND
+    hescope.viewer.viewer.selection_to_roi would apply viewport_transform a SECOND
     time and produce plausible, silently wrong bboxes. The key name makes that
     mistake raise instead.
     """
@@ -441,7 +441,7 @@ def test_osd_current_selection_never_raises(source, garbage):
 
 def test_contract_dict_delegates_to_viewer_when_available(source, monkeypatch):
     """There must be exactly ONE implementation of the 7-key shape in use."""
-    import hescope.viewer as viewer_mod
+    import hescope.viewer.viewer as viewer_mod
 
     calls = []
     real = viewer_mod.selection_dict_from_roi
@@ -460,7 +460,7 @@ def test_contract_dict_delegates_to_viewer_when_available(source, monkeypatch):
 def test_contract_dict_fallback_matches_viewer_exactly(source, monkeypatch):
     """The inline fallback exists only for a viewer.py without the extraction;
     it must be indistinguishable from the real thing."""
-    import hescope.viewer as viewer_mod
+    import hescope.viewer.viewer as viewer_mod
 
     expected = osd.osd_current_selection(source, VP, {"selection": OSD_BOX})
     monkeypatch.delattr(viewer_mod, "selection_dict_from_roi")
@@ -644,8 +644,8 @@ def test_osd_current_selection_matches_plotly_none_semantics():
     """R01-style contract check: the OSD getter is a drop-in for the plotly
     one, so a missing source OR a missing viewport returns None rather than
     raising. Found by the round-02 adversarial review."""
-    from hescope.osdviewer import osd_current_selection
-    from hescope.slides import PillowSource
+    from hescope.viewer.osdviewer import osd_current_selection
+    from hescope.wsi.slides import PillowSource
     from PIL import Image
     import numpy as np, tempfile, pathlib
 

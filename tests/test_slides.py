@@ -1,4 +1,4 @@
-"""Tests for hescope.slides."""
+"""Tests for hescope.wsi.slides."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.slides import (
+from hescope.wsi.slides import (
     PillowSource,
     SlideSource,
     best_level_for_downsample,
@@ -94,7 +94,7 @@ def test_open_slide_falls_back_to_pillow(slide_path):
 def _fake_tifffile_source(arr, y_idx, x_idx):
     """A TifffileSource with its axis mapping set and zarr stubbed out, so the
     region-slicing logic can be exercised without a real pyramidal TIFF."""
-    from hescope.slides import TifffileSource
+    from hescope.wsi.slides import TifffileSource
 
     src = object.__new__(TifffileSource)
     src._y_idx, src._x_idx = y_idx, x_idx
@@ -158,7 +158,7 @@ class _StubOpenSlide:
 
 
 def _fake_openslide_source(arr):
-    from hescope.slides import OpenSlideSource
+    from hescope.wsi.slides import OpenSlideSource
 
     src = object.__new__(OpenSlideSource)
     src.name = "stub.svs"

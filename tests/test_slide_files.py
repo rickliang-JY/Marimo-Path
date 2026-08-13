@@ -1,4 +1,4 @@
-"""Tests for hescope.db's slide_files table (BUILD-PLAN-DB.md Phase 1):
+"""Tests for hescope.store.db's slide_files table (BUILD-PLAN-DB.md Phase 1):
 one slide, many locations -- defect 1.1's fix.
 
 Offline; tmp sqlite files and tmp images. Never touches data/hescope.db (R-1).
@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 
-from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.rois import ROI
+from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+from hescope.core.rois import ROI
 
 
 def _rect() -> ROI:
@@ -147,7 +147,7 @@ def test_slide_files_cascade_deletes_with_the_slide(tmp_path):
     repo.delete(slide_id)
 
     with sa.orm.Session(engine) as s:
-        from hescope.db import SlideFile
+        from hescope.store.db import SlideFile
         remaining = s.execute(
             sa.select(sa.func.count()).select_from(SlideFile)
         ).scalar_one()

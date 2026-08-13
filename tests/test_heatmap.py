@@ -1,4 +1,4 @@
-"""Tests for hescope.heatmap (SPEC-ML Part B.3)."""
+"""Tests for hescope.analysis.heatmap (SPEC-ML Part B.3)."""
 
 from __future__ import annotations
 
@@ -6,15 +6,15 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from hescope.grid import grid_shape, tissue_fraction_proxy
-from hescope.heatmap import (
+from hescope.analysis.grid import grid_shape, tissue_fraction_proxy
+from hescope.analysis.heatmap import (
     compute_grid,
     get_colormap_lut,
     grid_bbox_to_level0,
     grid_coverage,
     render_heatmap,
 )
-from hescope.slides import open_slide
+from hescope.wsi.slides import open_slide
 
 TILE = 128
 DS = 4.0

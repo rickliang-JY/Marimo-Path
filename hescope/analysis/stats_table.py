@@ -83,7 +83,7 @@ def roi_stats_rows(
     have a label and a size, and dropping them would quietly under-report how
     much of the slide has been annotated.
     """
-    from .db import ROIRepo
+    from ..store.db import ROIRepo
 
     rows: list[dict] = []
     for row in ROIRepo(engine).for_slide(slide_id):

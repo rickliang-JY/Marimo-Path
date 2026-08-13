@@ -15,7 +15,7 @@ to the next, and it must still make sense to read after the ORM models have
 moved on.
 
 Version 1 is a stamp, not a change: the tables it describes are created by
-``hescope.db.init_db`` (``create_all``), not by this module. Applying it to a
+``hescope.store.db.init_db`` (``create_all``), not by this module. Applying it to a
 database whose tables already exist (the shipped ``data/hescope.db``) writes
 one row to ``schema_migrations`` and nothing else. Later phases add real
 migrations at version 2, 3, ... — each one still additive (R-4: no ``DROP``,
@@ -31,13 +31,13 @@ from typing import Callable
 
 import sqlalchemy as sa
 
-from .identity import content_key
+from ..core.identity import content_key
 
 SCHEMA_VERSION = 3  # bumped by each phase that adds a migration
 
 
 def _utcnow() -> datetime:
-    """Current UTC time, naive (matches how ``hescope.db`` stores timestamps:
+    """Current UTC time, naive (matches how ``hescope.store.db`` stores timestamps:
     naive-but-UTC, since an aware datetime is silently stripped of its offset
     by SQLAlchemy's SQLite ``DATETIME`` binding)."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -46,7 +46,7 @@ def _utcnow() -> datetime:
 def _db_datetime(dt: datetime) -> str:
     """Render ``dt`` the same way SQLAlchemy's sqlite ``DATETIME`` type does
     (``YYYY-MM-DD HH:MM:SS.ffffff``), by hand rather than by importing
-    ``hescope.db``'s ORM types -- this module must stay readable, and this
+    ``hescope.store.db``'s ORM types -- this module must stay readable, and this
     exact statement runnable, after the ORM models have moved on (see the
     module docstring). Migrations write raw SQL, so nothing here relies on
     SQLAlchemy's type-driven bind processing to get the format right."""
@@ -71,7 +71,7 @@ class Migration:
 
 def _migration_1_baseline(conn: sa.Connection) -> None:
     """Stamp only. The tables this version describes already come from
-    ``hescope.db.init_db`` (``create_all``) — called separately, before this
+    ``hescope.store.db.init_db`` (``create_all``) — called separately, before this
     migration runs, so an empty database gets its tables first and a
     database that already has them (every shipped ``data/hescope.db``) is
     untouched by this function. This migration exists so ``schema_migrations``
@@ -85,7 +85,7 @@ class _SlideBackfill:
     shared by :func:`_migration_2_apply` (which writes it) and
     :func:`plan_migration_2` (which only counts it) -- so the dry-run report
     can never drift from what the real run does (the same reason
-    ``hescope.db.plan_init_db`` and ``init_db`` share one computation)."""
+    ``hescope.store.db.plan_init_db`` and ``init_db`` share one computation)."""
 
     slide_id: int
     path: str
@@ -209,7 +209,7 @@ def _migration_2_apply(conn: sa.Connection) -> None:
     The schema itself -- ``slides.identity_scheme`` / ``identity_key`` /
     ``file_size`` / ``md5sum``, the partial unique index on identity, the
     ``slide_files`` table, and ``rois.bbox_x0..bbox_y1`` -- is declared on
-    the current ORM models (``hescope.db.Slide``, ``SlideFile``, ``ROI``)
+    the current ORM models (``hescope.store.db.Slide``, ``SlideFile``, ``ROI``)
     and so is already created by ``init_db``'s additive ``create_all`` +
     ``ALTER TABLE`` path BEFORE this function runs (``hescope.cli``'s
     ``migrate`` command calls ``init_db(engine)`` then ``migrate(engine)``;
@@ -306,7 +306,7 @@ def _rebuild_tcga_files_with_slide_fk(conn: sa.Connection) -> None:
     old table, rename the new one into place -- inside THIS migration's own
     transaction, so a failure partway rolls the whole thing back (the same
     guarantee ``engine.begin()`` already gives every other migration; see
-    ``hescope.db``'s pragma hook for why DDL here is transactional at all).
+    ``hescope.store.db``'s pragma hook for why DDL here is transactional at all).
     All columns and all data are preserved exactly; only the constraint (and
     the indexes SQLite drops along with the table) are re-created -- this is
     additive in effect, even though the mechanism is a drop (R-4's intent is
@@ -316,7 +316,7 @@ def _rebuild_tcga_files_with_slide_fk(conn: sa.Connection) -> None:
     ``TcgaFile.slide_id`` (the ORM model, ``hescope/tcga_schema.py``) does
     NOT declare this ``ForeignKey`` itself, deliberately: ``TcgaFile`` lives
     on ``TcgaBase``, a SEPARATE ``DeclarativeBase`` from ``slides``'
-    ``hescope.db.Base`` (by design -- see ``tcga_schema.py``'s module
+    ``hescope.store.db.Base`` (by design -- see ``tcga_schema.py``'s module
     docstring), and a cross-``MetaData`` ``ForeignKey`` makes
     ``create_all()`` raise ``NoReferencedTableError`` the moment it tries to
     topologically sort tables to create (measured: any ``TcgaBase.metadata
@@ -478,7 +478,7 @@ def _find_slide_for_local_path(
             ).scalar()
             if found is not None:
                 return int(found)
-    # Local import: this module must not depend on hescope.db at module
+    # Local import: this module must not depend on hescope.store.db at module
     # level (see migrate()'s docstring on the import cycle that avoids).
     from .db import normalize_slide_path
 
@@ -580,7 +580,7 @@ def _migration_3_apply(conn: sa.Connection) -> None:
     # no ORM relationship, living on separate DeclarativeBases), and, on a
     # database from before round 3's OTHER fix, merge_duplicate_slide_paths
     # deleting the row it pointed at (that path is now closed -- see
-    # hescope.db.merge_duplicate_slide_paths -- but a database this
+    # hescope.store.db.merge_duplicate_slide_paths -- but a database this
     # migration reaches after upgrading from an older version can already
     # carry the dangling reference from before the fix existed). Must be
     # cleared BEFORE the rebuild's INSERT ... SELECT, which is
@@ -700,7 +700,7 @@ class MigrationReport:
 def migrate(engine: sa.Engine, *, dry_run: bool = False) -> MigrationReport:
     """Apply every pending migration, each in its own transaction.
 
-    Calls ``hescope.db.init_db(engine)`` AND ``hescope.tcga_schema
+    Calls ``hescope.store.db.init_db(engine)`` AND ``hescope.gdc.tcga_schema
     .init_tcga_schema(engine)`` first (unless ``dry_run``) so this function
     is self-contained: migration 2's DDL (``slide_files``, the identity
     columns/index, the bbox columns) is declared on the core ORM models and
@@ -718,7 +718,7 @@ def migrate(engine: sa.Engine, *, dry_run: bool = False) -> MigrationReport:
     Both are idempotent and additive-only (R-4), so calling them here even
     when ``hescope.cli`` has already called ``init_db`` once is a no-op, not
     a double-write. Imported locally (not at module top) to avoid a
-    module-level import cycle with ``hescope.db`` / ``hescope.tcga_schema``.
+    module-level import cycle with ``hescope.store.db`` / ``hescope.gdc.tcga_schema``.
 
     A migration that raises rolls back ONLY that migration's transaction
     (``schema_migrations`` included, since the table is created inside the
@@ -732,7 +732,7 @@ def migrate(engine: sa.Engine, *, dry_run: bool = False) -> MigrationReport:
     and computes what running for real would do. Safe to call against a
     database this process must never write to (R-1): point it at a copy.
     (The CLI's ``--dry-run`` path additionally previews what ``init_db``
-    itself would do, via ``hescope.db.plan_init_db`` against a read-only
+    itself would do, via ``hescope.store.db.plan_init_db`` against a read-only
     engine — see ``hescope.cli._cmd_migrate`` — since this function's own
     dry run does not touch ``init_db`` at all; migration 3's own preview,
     :func:`plan_migration_3`, reports ``tcga_files_exists`` for the
@@ -740,7 +740,7 @@ def migrate(engine: sa.Engine, *, dry_run: bool = False) -> MigrationReport:
     """
     if not dry_run:
         from .db import init_db
-        from .tcga_schema import init_tcga_schema
+        from ..gdc.tcga_schema import init_tcga_schema
 
         init_db(engine)
         init_tcga_schema(engine)

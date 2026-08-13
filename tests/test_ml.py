@@ -1,6 +1,6 @@
-"""Tests for hescope.ml (SPEC-ML Part B.4).
+"""Tests for hescope.analysis.ml (SPEC-ML Part B.4).
 
-hescope.features is stubbed via sys.modules injection so these tests are
+hescope.analysis.features is stubbed via sys.modules injection so these tests are
 fast and pass even while the real features module does not exist yet.
 """
 
@@ -14,23 +14,23 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.db import AgentRunRepo, ROIRepo, SlideRepo, get_engine, init_db
-from hescope.ml import (
+from hescope.store.db import AgentRunRepo, ROIRepo, SlideRepo, get_engine, init_db
+from hescope.analysis.ml import (
     list_models,
     load_model,
     make_prob_metric,
     predict_patch,
     train_from_annotations,
 )
-from hescope.rois import ROI
+from hescope.core.rois import ROI
 
 FEATURE_DIM = 16
 
 
 @pytest.fixture(autouse=True)
 def stub_features(monkeypatch):
-    """Inject a deterministic stub hescope.features module."""
-    mod = types.ModuleType("hescope.features")
+    """Inject a deterministic stub hescope.analysis.features module."""
+    mod = types.ModuleType("hescope.analysis.features")
     mod.FEATURE_DIM = FEATURE_DIM
 
     def extract_features(img):
@@ -43,13 +43,15 @@ def stub_features(monkeypatch):
         return np.concatenate([means, stds, rest]).astype(np.float32)
 
     mod.extract_features = extract_features
-    monkeypatch.setitem(sys.modules, "hescope.features", mod)
-    # If the real hescope.features was already imported earlier in the session,
-    # the `hescope` package attribute still points to it; override both so
-    # `from hescope import features` inside ml.py resolves to the stub.
-    import hescope
+    monkeypatch.setitem(sys.modules, "hescope.analysis.features", mod)
+    # If the real module was already imported earlier in the session, the
+    # PACKAGE attribute still points at it; override both so `from . import
+    # features` inside hescope/analysis/ml.py resolves to the stub. The
+    # attribute to patch moved with the module -- it is hescope.analysis now,
+    # not hescope.
+    import hescope.analysis
 
-    monkeypatch.setattr(hescope, "features", mod, raising=False)
+    monkeypatch.setattr(hescope.analysis, "features", mod, raising=False)
     return mod
 
 

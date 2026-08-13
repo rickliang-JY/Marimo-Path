@@ -1,4 +1,4 @@
-"""DICOM whole-slide images as a :class:`~hescope.slides.SlideSource`.
+"""DICOM whole-slide images as a :class:`~hescope.wsi.slides.SlideSource`.
 
 DICOM VL Whole Slide Microscopy Image is what clinical scanners increasingly
 emit, and it is the one format neither OpenSlide nor tifffile covers here. The
@@ -8,7 +8,7 @@ the code below is about the one place the two disagree.
 THE COORDINATE TRAP
 -------------------
 ``SlideSource.read_region`` takes ``location`` in **level-0** pixels. That is
-the OpenSlide convention, it is what :mod:`hescope.rois` and the tile server
+the OpenSlide convention, it is what :mod:`hescope.core.rois` and the tile server
 both assume, and both existing backends implement it.
 
 ``wsidicom`` does the opposite. Its ``read_region`` scales the region *up* from

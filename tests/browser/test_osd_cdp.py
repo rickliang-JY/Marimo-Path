@@ -8,7 +8,7 @@ It needs Google Chrome on the machine and is therefore not part of the default
 suite; ``tests/test_osdviewer.py`` covers everything that can be proven without
 one. What only a browser can prove, and what this file exists for:
 
-* the UMD wrapper in :func:`hescope.osdviewer.build_esm` is enough to make
+* the UMD wrapper in :func:`hescope.viewer.osdviewer.build_esm` is enough to make
   ``openseadragon.min.js`` evaluate as an ES module (the failure mode is a
   ``TypeError`` on ``this`` and a SILENT blank widget);
 * OpenSeadragon boots, tiles are drawn, and the ``open`` event fires;
@@ -45,7 +45,7 @@ import threading
 
 import pytest
 
-from hescope.osdviewer import build_esm, parse_osd_selection, viewport_state_from_report
+from hescope.viewer.osdviewer import build_esm, parse_osd_selection, viewport_state_from_report
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("HESCOPE_BROWSER_TESTS", "") not in ("1", "true", "yes"),
@@ -338,7 +338,7 @@ def test_selection_outline_survives_mouse_up(browser_result):
 
 
 def test_selection_outline_is_visually_distinct_from_saved_rois(browser_result):
-    from hescope.osdviewer import ROI_STROKE, SEL_STROKE
+    from hescope.viewer.osdviewer import ROI_STROKE, SEL_STROKE
 
     strokes = browser_result["dashed_strokes"]
     assert SEL_STROKE in strokes, (

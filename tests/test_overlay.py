@@ -1,12 +1,12 @@
-"""Tests for hescope.overlay (Part B.2)."""
+"""Tests for hescope.viewer.overlay (Part B.2)."""
 
 from __future__ import annotations
 
 import numpy as np
 from PIL import Image
 
-from hescope.overlay import draw_navigator_markers, draw_rois
-from hescope.rois import ROI, ViewportState
+from hescope.viewer.overlay import draw_navigator_markers, draw_rois
+from hescope.core.rois import ROI, ViewportState
 
 # Viewport: 400x300 px, downsample 1, centered on level-0 (500, 400)
 # -> level-0 x in [300, 700), y in [250, 550); viewport (0,0) == level0 (300, 250).

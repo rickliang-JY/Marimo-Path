@@ -23,13 +23,13 @@ from sqlalchemy import ForeignKey, Index, String, Text, event, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
-if TYPE_CHECKING:  # avoid a hard runtime dependency cycle with hescope.rois
-    from .rois import ROI as ROIGeometry
+if TYPE_CHECKING:  # avoid a hard runtime dependency cycle with hescope.core.rois
+    from ..core.rois import ROI as ROIGeometry
 
-from .identity import slide_identity
-from .paths import resolve_runtime_dir
+from ..core.identity import slide_identity
+from ..core.paths import PROJECT_ROOT, resolve_runtime_dir
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = PROJECT_ROOT
 # Writable runtime root: the repo root for checkouts/editable installs,
 # <cwd>/hescope_runtime for non-editable installs (never site-packages).
 _RUNTIME_ROOT = resolve_runtime_dir(_PROJECT_ROOT)
@@ -417,7 +417,7 @@ class Slide(Base):
     mpp: Mapped[float | None] = mapped_column(nullable=True)
     extra_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
-    # Identity that does not assume a local file (see hescope.identity).
+    # Identity that does not assume a local file (see hescope.core.identity).
     # ``path`` above stays and stays UNIQUE (R-4); it is now a cache of the
     # most-recently-seen location, and ``slide_files`` is the durable record
     # of every location this slide has been seen at.
@@ -660,7 +660,7 @@ class SlideRepo:
         ``path`` is canonicalized (see ``normalize_slide_path``). Identity
         resolves in this order: the ``identity`` argument, if given (pass
         this for a slide with no readable local path yet, e.g. one opened
-        from a DICOMweb endpoint -- see ``hescope.identity.slide_identity``);
+        from a DICOMweb endpoint -- see ``hescope.core.identity.slide_identity``);
         otherwise a content hash of ``path`` if it is readable
         (``('sha256', ...)``); otherwise ``('path', path)`` as a last resort.
         Re-registering the SAME identity from a NEW path updates the
@@ -677,7 +677,7 @@ class SlideRepo:
         ``md5sum`` (BUILD-PLAN-DB.md Phase 2): the GDC-supplied checksum for
         a TCGA download, stored on ``slides.md5sum`` -- distinct from
         ``identity_key``, which is this project's own head/tail content hash
-        (:func:`hescope.identity.content_key`), not the GDC md5. Same
+        (:func:`hescope.core.identity.content_key`), not the GDC md5. Same
         "omitting is not clearing" contract as ``extra``: a plain local open
         (no md5 available) must not blank out a value a download already
         recorded.
@@ -694,7 +694,7 @@ class SlideRepo:
         "no row" from the SELECT and both attempt the INSERT; the loser
         raised ``IntegrityError`` instead of folding into an UPDATE.
         Measured against a bare (deferred) ``BEGIN`` -- the transaction
-        semantics this project used before ``hescope.db.get_engine``'s
+        semantics this project used before ``hescope.store.db.get_engine``'s
         ``BEGIN IMMEDIATE`` hook -- 8 concurrent registrations of ONE slide
         raised ``IntegrityError`` between 2 and 7 times across repeated
         runs (``tests/test_register_race.py`` reproduces this as a control).
@@ -1029,7 +1029,7 @@ def _bbox_columns(roi: "ROIGeometry") -> tuple[float, float, float, float]:
 
     The single writer: both ``ROIRepo.add`` and (independently, since a
     migration cannot import evolving ORM/geometry code -- see
-    ``hescope.migrations``' module docstring) migration 2's backfill compute
+    ``hescope.store.migrations``' module docstring) migration 2's backfill compute
     this from the SAME ``roi.bbox()`` / ``bbox_json`` values so the derived
     columns can never disagree with the JSON they are a queryable cache of.
     """
@@ -1054,7 +1054,7 @@ class ROIRepo:
         stats: dict | None = None,
         magnification: float | None = None,
     ) -> int:
-        """Persist a geometry ROI (hescope.rois.ROI) for a slide."""
+        """Persist a geometry ROI (hescope.core.rois.ROI) for a slide."""
         points = [[float(x), float(y)] for x, y in roi.points]
         bbox = [int(v) for v in roi.bbox()]
         bbox_x0, bbox_y0, bbox_x1, bbox_y1 = _bbox_columns(roi)

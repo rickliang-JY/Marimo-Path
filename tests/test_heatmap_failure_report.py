@@ -29,12 +29,12 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.grid import tissue_fraction_proxy
-from hescope.heatmap import compute_grid, render_heatmap
-from hescope.ml import train_from_annotations
-from hescope.rois import ROI
-from hescope.slides import open_slide
+from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+from hescope.analysis.grid import tissue_fraction_proxy
+from hescope.analysis.heatmap import compute_grid, render_heatmap
+from hescope.analysis.ml import train_from_annotations
+from hescope.core.rois import ROI
+from hescope.wsi.slides import open_slide
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app.py"
 SOURCE = APP.read_text(encoding="utf-8")

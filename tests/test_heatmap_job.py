@@ -36,7 +36,7 @@ import marimo as mo
 import pytest
 from PIL import Image
 
-from hescope.demo import generate_demo_slide
+from hescope.wsi.demo import generate_demo_slide
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app.py"
 SOURCE = APP.read_text(encoding="utf-8")

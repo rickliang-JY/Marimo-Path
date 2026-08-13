@@ -1,4 +1,4 @@
-"""Tests for hescope.paths.resolve_runtime_dir."""
+"""Tests for hescope.core.paths.resolve_runtime_dir."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hescope.paths import RUNTIME_DIR_NAME, resolve_runtime_dir
+from hescope.core.paths import RUNTIME_DIR_NAME, resolve_runtime_dir
 
 
 def _make_repo_layout(root: Path) -> Path:

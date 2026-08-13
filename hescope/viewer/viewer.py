@@ -9,7 +9,7 @@ Two encoders live here and the distinction is load-bearing:
   gets saved (navigator thumbnail, heatmap export, report images).
 * :func:`viewport_jpeg_bytes` / :func:`viewport_data_uri` -- LOSSY JPEG, for
   the ON-SCREEN frame only. Never for patches, statistics, or the database:
-  those go through ``hescope.rois.extract_patch``, which reads unadjusted
+  those go through ``hescope.core.rois.extract_patch``, which reads unadjusted
   source pixels straight from ``SlideSource.read_region``.
 """
 
@@ -24,9 +24,9 @@ from typing import Any, Iterable, Literal
 
 from PIL import Image, ImageDraw
 
-from .agent_bridge import magnification_for  # re-exported for app convenience
-from .rois import ROI, ViewportState, viewport_transform
-from .slides import SlideSource, best_level_for_downsample
+from ..agent.agent_bridge import magnification_for  # re-exported for app convenience
+from ..core.rois import ROI, ViewportState, viewport_transform
+from ..wsi.slides import SlideSource, best_level_for_downsample
 
 __all__ = [
     "render_viewport",
@@ -127,7 +127,7 @@ def viewport_jpeg_bytes(
 
     NEVER use this for agent payloads, patch extraction, ROI statistics, or
     anything written to the database. Those paths read unadjusted source
-    pixels via ``hescope.rois.extract_patch``.
+    pixels via ``hescope.core.rois.extract_patch``.
     """
     buf = io.BytesIO()
     img.convert("RGB").save(
@@ -293,7 +293,7 @@ def parse_plotly_selection(value: dict | None) -> dict | None:
         # get_current_selection() as a bare `NaN` token. AGENTS.md 2 makes
         # "the tools return JSON" a hard rule, and NaN is not JSON -- Python's
         # json.loads accepts it, so a Python agent never notices, while
-        # JSON.parse in a JS agent throws. hescope.osdviewer._finite_points is
+        # JSON.parse in a JS agent throws. hescope.viewer.osdviewer._finite_points is
         # the same guard on the OpenSeadragon surface; this is the twin it
         # says it mirrors (R07-16).
         if not all(math.isfinite(x) and math.isfinite(y) for x, y in pts):
@@ -416,9 +416,9 @@ class DBContext:
     """
 
     engine: Any | None
-    slide_repo: Any | None  # hescope.db.SlideRepo
-    roi_repo: Any | None  # hescope.db.ROIRepo
-    run_repo: Any | None  # hescope.db.AgentRunRepo
+    slide_repo: Any | None  # hescope.store.db.SlideRepo
+    roi_repo: Any | None  # hescope.store.db.ROIRepo
+    run_repo: Any | None  # hescope.store.db.AgentRunRepo
     error: str | None
 
     @property
@@ -444,7 +444,7 @@ class DBContext:
         if self.engine is None:
             return None
         try:
-            from .db import InteractionRepo
+            from ..store.db import InteractionRepo
 
             return InteractionRepo(self.engine).record(kind=kind, **fields)
         except Exception:
@@ -457,7 +457,7 @@ def bootstrap_db(url: str | None = None) -> DBContext:
     Never raises: any failure (bad URL, missing driver, unreachable server)
     returns a disabled DBContext so the app can run in DB-free mode.
     """
-    from .db import AgentRunRepo, ROIRepo, SlideRepo, get_engine, init_db
+    from ..store.db import AgentRunRepo, ROIRepo, SlideRepo, get_engine, init_db
 
     try:
         engine = get_engine(url)

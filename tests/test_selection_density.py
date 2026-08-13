@@ -28,8 +28,8 @@ import marimo as mo
 import pytest
 from PIL import Image
 
-from hescope.rois import ROI, extract_patch, patch_mpp
-from hescope.slides import open_slide
+from hescope.core.rois import ROI, extract_patch, patch_mpp
+from hescope.wsi.slides import open_slide
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app.py"
 SOURCE = APP.read_text(encoding="utf-8")
@@ -75,7 +75,7 @@ def _analyze_cell():
 def _click_analyze(source, roi):
     """Drive app.py's OWN analyze cell with ``roi`` as the live selection."""
     import hescope
-    from hescope.db import ROIRepo  # noqa: F401  (import symmetry with app.py)
+    from hescope.store.db import ROIRepo  # noqa: F401  (import symmetry with app.py)
 
     published: dict = {}
 

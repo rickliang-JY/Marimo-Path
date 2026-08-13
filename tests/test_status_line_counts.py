@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from hescope.rois import ROI, ViewportState
+from hescope.core.rois import ROI, ViewportState
 
 
 class _MO:

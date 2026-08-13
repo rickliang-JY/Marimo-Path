@@ -27,7 +27,7 @@ import re
 import pytest
 from PIL import Image
 
-from hescope.db import (
+from hescope.store.db import (
     INTERACTION_KINDS,
     InteractionRepo,
     ROIRepo,
@@ -35,8 +35,8 @@ from hescope.db import (
     get_engine,
     init_db,
 )
-from hescope.rois import ROI
-from hescope.viewer import bootstrap_db
+from hescope.core.rois import ROI
+from hescope.viewer.viewer import bootstrap_db
 
 
 def _rect(x0=0.0, y0=0.0, x1=20.0, y1=20.0) -> ROI:
@@ -78,7 +78,7 @@ def test_trace_is_a_noop_in_db_free_mode_and_never_raises():
 
 
 def test_live_selection_tool_records_a_selection_view(tmp_path):
-    from hescope.agent_bridge import make_live_selection_tool
+    from hescope.agent.agent_bridge import make_live_selection_tool
 
     ctx = bootstrap_db(f"sqlite:///{tmp_path / 'sel.db'}")
     sid = ctx.slide_repo.register(
@@ -99,7 +99,7 @@ def test_live_selection_tool_records_a_selection_view(tmp_path):
 def test_live_selection_tool_without_a_db_is_unchanged():
     """The db arguments are optional; the AGENTS.md contract (JSON string or
     the exact sentinel, never raises) must not move."""
-    from hescope.agent_bridge import make_live_selection_tool
+    from hescope.agent.agent_bridge import make_live_selection_tool
 
     assert make_live_selection_tool(lambda: None)() == "NO_SELECTION"
 
@@ -114,7 +114,10 @@ def test_every_declared_interaction_kind_has_a_writer_except_the_reserved_one():
     in production code. `human_gate` stays unwritten on purpose -- there is no
     human-gate UI -- and both READMEs now say so."""
     root = pathlib.Path(__file__).resolve().parents[1]
-    sources = [root / "app.py"] + sorted((root / "hescope").glob("*.py"))
+    # rglob, not glob: hescope/ is a tree of subpackages now, and a flat glob
+    # silently stopped seeing every writer that moved into one -- reporting
+    # "nothing records selection_view" about kinds that are recorded fine.
+    sources = [root / "app.py"] + sorted((root / "hescope").rglob("*.py"))
     text = "\n".join(p.read_text(encoding="utf-8") for p in sources)
     # a WRITE is `kind="..."` or `db.trace("...")`; the INTERACTION_KINDS
     # declaration itself matches neither, so it cannot vouch for itself
@@ -140,8 +143,8 @@ def notebook():
     once and performs no reactive re-running, so the Annotations panel only
     ever builds its ``mo.ui.table`` if rows exist at that moment.
     """
-    import hescope.paths as paths_mod
-    from hescope.demo import generate_demo_slide
+    import hescope.core.paths as paths_mod
+    from hescope.wsi.demo import generate_demo_slide
 
     demo = paths_mod.resolve_runtime_dir(".") / "assets" / "demo_he.png"
     if not demo.is_file():  # normally the cached copy the conftest laid down

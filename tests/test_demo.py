@@ -1,10 +1,10 @@
-"""Tests for hescope.demo (in-package demo slide generation)."""
+"""Tests for hescope.wsi.demo (in-package demo slide generation)."""
 
 from __future__ import annotations
 
 from PIL import Image
 
-from hescope.demo import H, SEED, W, generate, generate_demo_slide
+from hescope.wsi.demo import H, SEED, W, generate, generate_demo_slide
 
 
 def test_generate_deterministic_shape_and_dtype():

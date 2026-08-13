@@ -27,8 +27,8 @@ from __future__ import annotations
 import pytest
 from PIL import Image
 
-from hescope.demo import generate_demo_slide
-from hescope.rois import ROI
+from hescope.wsi.demo import generate_demo_slide
+from hescope.core.rois import ROI
 
 
 @pytest.fixture(scope="module")

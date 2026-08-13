@@ -2,10 +2,10 @@
 
 The cheapest way to absorb the existing ecosystem is to let other people's
 artifacts move in and out, so this is the inbound half of
-:mod:`hescope.geojson`: QuPath GeoJSON and ASAP/CAMELYON XML in, HE-Scope
-:class:`~hescope.rois.ROI` objects out, in level-0 pixel coordinates.
+:mod:`hescope.interop.geojson`: QuPath GeoJSON and ASAP/CAMELYON XML in, HE-Scope
+:class:`~hescope.core.rois.ROI` objects out, in level-0 pixel coordinates.
 
-Imported annotations go through :meth:`hescope.db.ROIRepo.add` like any drawn
+Imported annotations go through :meth:`hescope.store.db.ROIRepo.add` like any drawn
 one, so they are indistinguishable afterwards -- exportable, trainable on, and
 visible to ``query_annotations()``.
 
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from .rois import ROI
+from ..core.rois import ROI
 
 __all__ = [
     "ImportedROI",
@@ -289,7 +289,7 @@ def import_annotations(
     exactly as a drawn ROI would be, which is what makes an imported
     annotation indistinguishable from one made here.
     """
-    from .db import ROIRepo
+    from ..store.db import ROIRepo
 
     repo = ROIRepo(engine)
     return [

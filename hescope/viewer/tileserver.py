@@ -13,7 +13,7 @@ Design constraints that are not obvious from the code:
   segment, and no handler ever calls ``open()``. The only bytes this server
   emits are JPEGs it just encoded and descriptors it just formatted.
 * **The pyramid mismatch is real.** DZI assumes a power-of-two pyramid;
-  :class:`~hescope.slides.TifffileSource` derives ``level_downsamples`` from
+  :class:`~hescope.wsi.slides.TifffileSource` derives ``level_downsamples`` from
   the actual level shapes, so they are things like ``15.9744``. The DZI grid
   is therefore *virtual*: every DZI level is synthesized by reading the
   largest real level whose downsample is <= the DZI level's, then downscaling.
@@ -44,7 +44,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from PIL import Image
 
-from .slides import SlideSource, best_level_for_downsample
+from ..wsi.slides import SlideSource, best_level_for_downsample
 
 __all__ = [
     "TILE_SIZE",
@@ -315,7 +315,7 @@ class SlideRefs:
         caller has to make. Without one, ``stain_norm`` is skipped.
         """
         from . import adjust as _adjust
-        from . import stain as _stain
+        from ..analysis import stain as _stain
 
         channel_lohi: dict[str, tuple[float, float]] = {}
         stain_source: dict | None = None
@@ -360,7 +360,7 @@ def _apply_display(
 ) -> "Image.Image":
     """Bake the discrete display settings into a rendered tile."""
     from .adjust import channel_view
-    from .stain import macenko_normalize
+    from ..analysis.stain import macenko_normalize
 
     out = img
     if display.stain_norm and refs is not None and refs.stain_target is not None:

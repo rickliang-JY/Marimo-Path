@@ -1,4 +1,4 @@
-"""Tests for hescope.tcga and the TifffileSource backend.
+"""Tests for hescope.gdc.tcga and the TifffileSource backend.
 
 NO network access: all requests to the GDC API are mocked. The canned
 /files response in fixtures/gdc_files_response.json is a real GDC API
@@ -15,9 +15,9 @@ import pytest
 import tifffile
 from PIL import Image
 
-from hescope import slides as slides_mod
-from hescope.slides import SlideSource, TifffileSource, open_slide
-from hescope.tcga import GDCClient, SlideCatalog, SlideRecord
+from hescope.wsi import slides as slides_mod
+from hescope.wsi.slides import SlideSource, TifffileSource, open_slide
+from hescope.gdc.tcga import GDCClient, SlideCatalog, SlideRecord
 
 FIXTURE = Path(__file__).parent / "fixtures" / "gdc_files_response.json"
 
@@ -65,7 +65,7 @@ def mock_search(monkeypatch, gdc_payload):
         calls.append({"url": url, "params": params})
         return FakeResponse(payload=gdc_payload)
 
-    monkeypatch.setattr("hescope.tcga.requests.get", fake_get)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", fake_get)
     return calls
 
 
@@ -138,7 +138,7 @@ def _download_response(data: bytes, name: str) -> FakeResponse:
 def test_download_slide_writes_file(monkeypatch, tmp_path):
     payload = b"fake-svs-bytes" * 100
     monkeypatch.setattr(
-        "hescope.tcga.requests.get",
+        "hescope.gdc.tcga.requests.get",
         lambda *a, **k: _download_response(payload, "slide.svs"),
     )
     client = GDCClient()
@@ -164,7 +164,7 @@ def test_download_slide_skips_when_complete(monkeypatch, tmp_path):
         calls.append(1)
         return _download_response(payload, "slide.svs")
 
-    monkeypatch.setattr("hescope.tcga.requests.get", fake_get)
+    monkeypatch.setattr("hescope.gdc.tcga.requests.get", fake_get)
     client = GDCClient()
     dest = client.download_slide("fid-2", dest_dir)
     assert dest.read_bytes() == payload
@@ -181,7 +181,7 @@ def test_download_slide_http_error_raises(monkeypatch, tmp_path):
             raise _requests.HTTPError("404")
 
     monkeypatch.setattr(
-        "hescope.tcga.requests.get", lambda *a, **k: BoomResponse()
+        "hescope.gdc.tcga.requests.get", lambda *a, **k: BoomResponse()
     )
     client = GDCClient()
     with pytest.raises(_requests.HTTPError):
@@ -355,7 +355,7 @@ def test_local_file_finds_a_downloaded_slide(tmp_path):
     disk. That made "Download & Open" -- the only route to a TCGA slide in the
     UI -- fail offline for a slide already downloaded.
     """
-    from hescope.tcga import SlideCatalog, SlideRecord
+    from hescope.gdc.tcga import SlideCatalog, SlideRecord
 
     cat = SlideCatalog(tmp_path / "catalog.db")
     cat.upsert([
@@ -379,7 +379,7 @@ def test_local_file_ignores_a_stale_path(tmp_path):
     """A recorded path whose file was moved or deleted must not be reported as
     openable -- the caller would hand it to open_slide and get an error it
     cannot explain."""
-    from hescope.tcga import SlideCatalog, SlideRecord
+    from hescope.gdc.tcga import SlideCatalog, SlideRecord
 
     cat = SlideCatalog(tmp_path / "catalog.db")
     cat.upsert([
@@ -411,7 +411,7 @@ def test_opening_a_downloaded_slide_needs_no_network(tmp_path):
 
     import pytest as _pytest
 
-    from hescope.tcga import GDCClient, SlideCatalog, SlideRecord
+    from hescope.gdc.tcga import GDCClient, SlideCatalog, SlideRecord
 
     cat = SlideCatalog(tmp_path / "catalog.db")
     cat.upsert([
@@ -435,7 +435,7 @@ def test_opening_a_downloaded_slide_needs_no_network(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# hescope.tcga_panel.records_to_rows (BUILD-PLAN-DB.md Phase 2, defect 2.3)
+# hescope.gdc.tcga_panel.records_to_rows (BUILD-PLAN-DB.md Phase 2, defect 2.3)
 # --------------------------------------------------------------------------
 
 
@@ -444,7 +444,7 @@ def test_records_to_rows_carries_md5sum():
     ``_sel[0].get("md5sum") or <catalog scan>`` had a permanently dead first
     branch -- every download's integrity check went through the O(n) scan
     fallback, never the table row itself."""
-    from hescope.tcga_panel import records_to_rows
+    from hescope.gdc.tcga_panel import records_to_rows
 
     rec = SlideRecord(
         file_id="a", file_name="a.svs", file_size=1, project_id="TCGA-BRCA",

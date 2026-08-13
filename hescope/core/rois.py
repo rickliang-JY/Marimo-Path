@@ -9,7 +9,7 @@ from typing import Callable, Literal
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .slides import SlideSource, best_level_for_downsample
+from ..wsi.slides import SlideSource, best_level_for_downsample
 
 
 @dataclass(frozen=True)

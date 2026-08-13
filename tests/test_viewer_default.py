@@ -33,7 +33,7 @@ _PROBE = textwrap.dedent(
         ):
             return False, "disabled"
         import anywidget  # noqa: F401
-        from hescope.osdviewer import build_esm
+        from hescope.viewer.osdviewer import build_esm
 
         build_esm()
         return True, None

@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from PIL import Image
 
 from hescope.cli import main
-from hescope.db import SlideRepo, get_engine
+from hescope.store.db import SlideRepo, get_engine
 
 
 @pytest.fixture()
@@ -144,7 +144,7 @@ def test_ingest_reports_merged_duplicate_content_instead_of_double_counting(
 
 def test_ingest_single_file_and_recursive(db_url, tmp_path, capsys):
     # distinct pixel content for each file: registration now dedups on
-    # CONTENT (hescope.identity), not path, so two byte-identical files
+    # CONTENT (hescope.core.identity), not path, so two byte-identical files
     # would otherwise collapse into one slide and defeat this test's point.
     Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8), "RGB").save(
         tmp_path / "one.png"
@@ -187,8 +187,8 @@ def test_dedupe_slides_merges_rows_that_name_one_file(tmp_path, capsys):
     already holds several rows per file, so the fix needs a way to reunite
     them (the shipped data/hescope.db had two rows for the demo slide, one ROI
     hanging off each)."""
-    from hescope.db import ROIRepo, Slide
-    from hescope.rois import ROI
+    from hescope.store.db import ROIRepo, Slide
+    from hescope.core.rois import ROI
 
     db_url = f"sqlite:///{tmp_path}/dedupe.db"
     slide = tmp_path / "dup.png"
@@ -285,8 +285,8 @@ def test_dedupe_slides_dry_run_shows_the_blast_radius_and_changes_nothing(
     repair of the shipped database sat parked for three review rounds: the tool
     was correct and tested, but there was no way to see what it would do first.
     """
-    from hescope.db import ROIRepo, Slide
-    from hescope.rois import ROI
+    from hescope.store.db import ROIRepo, Slide
+    from hescope.core.rois import ROI
 
     db_url = f"sqlite:///{tmp_path}/dryrun.db"
     slide = tmp_path / "dup.png"
@@ -327,7 +327,7 @@ def test_dedupe_slides_dry_run_reports_only_real_path_rewrites(tmp_path, capsys)
     """``merge_duplicate_slide_paths`` assigns the canonical path to EVERY
     keeper, so counting assignments overstates the change by an order of
     magnitude -- on the shipped database, 32 assignments for 2 real rewrites."""
-    from hescope.db import Slide, plan_duplicate_slide_merge
+    from hescope.store.db import Slide, plan_duplicate_slide_merge
 
     db_url = f"sqlite:///{tmp_path}/rewrites.db"
     a = tmp_path / "a.png"
@@ -363,7 +363,7 @@ def test_dedupe_slides_dry_run_reports_only_real_path_rewrites(tmp_path, capsys)
 
 def test_migrate_on_empty_database_reaches_schema_version(db_url, capsys):
     """A fresh database, migrated for real, ends at SCHEMA_VERSION."""
-    from hescope.migrations import SCHEMA_VERSION, current_version
+    from hescope.store.migrations import SCHEMA_VERSION, current_version
 
     assert main(["--db", db_url, "migrate"]) == 0
     out = capsys.readouterr().out
@@ -388,7 +388,7 @@ def test_migrate_reports_error_and_exits_1_on_a_raising_migration(
 ):
     """A migration that raises: exit code 1, and the error lands on stderr
     (not swallowed, not printed as if it were success)."""
-    import hescope.migrations as mig
+    import hescope.store.migrations as mig
 
     def _boom(conn):
         raise RuntimeError("synthetic failure for the CLI test")
@@ -603,7 +603,7 @@ def test_migrate_dry_run_does_not_mutate_a_non_wal_database(tmp_path, capsys):
     import hashlib
     import sqlite3
 
-    from hescope.db import init_db
+    from hescope.store.db import init_db
 
     db_path = tmp_path / "nonwal.db"
     engine = get_engine(f"sqlite:///{db_path}")

@@ -1,4 +1,4 @@
-"""Tests for hescope.tileserver.
+"""Tests for hescope.viewer.tileserver.
 
 Three groups:
 
@@ -21,8 +21,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.slides import best_level_for_downsample, open_slide
-from hescope.tileserver import (
+from hescope.wsi.slides import best_level_for_downsample, open_slide
+from hescope.viewer.tileserver import (
     HARD_MAX_READ_PIXELS,
     MAX_SLIDES,
     DisplayParams,
@@ -38,7 +38,7 @@ from hescope.tileserver import (
     serve_slide,
     shutdown_server,
 )
-from hescope.tileserver import _source_edge  # the seam rule under test
+from hescope.viewer.tileserver import _source_edge  # the seam rule under test
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEMO = REPO_ROOT / "assets" / "demo_he.png"
@@ -375,8 +375,8 @@ def test_tiles_reconstruct_render_viewport(demo_source):
     level *and* the right origin. Viewport geometry is chosen so the tiles
     involved lie fully inside every level (no edge padding to explain away).
     """
-    from hescope.rois import ViewportState
-    from hescope.viewer import render_viewport
+    from hescope.core.rois import ViewportState
+    from hescope.viewer.viewer import render_viewport
 
     lay = dzi_layout(*demo_source.dimensions)
     vw, vh = 512, 256
@@ -869,7 +869,7 @@ def test_shutdown_is_idempotent_and_frees_the_port(demo_source):
 def test_allow_reuse_address_is_off():
     # On Windows SO_REUSEADDR lets another local process bind the same
     # 127.0.0.1:port and take over our traffic.
-    from hescope.tileserver import _Server
+    from hescope.viewer.tileserver import _Server
 
     assert _Server.allow_reuse_address is False
 

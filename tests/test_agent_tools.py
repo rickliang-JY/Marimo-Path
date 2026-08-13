@@ -1,4 +1,4 @@
-"""Tests for the DB-backed agent tools in hescope.agent_bridge
+"""Tests for the DB-backed agent tools in hescope.agent.agent_bridge
 (annotate_roi / query_annotations / get_slide_info). Offline; tmp sqlite."""
 
 from __future__ import annotations
@@ -9,15 +9,15 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.agent_bridge import (
+from hescope.agent.agent_bridge import (
     make_annotate_roi_tool,
     make_query_annotations_tool,
     make_slide_info_tool,
 )
-from hescope.db import InteractionRepo, ROIRepo, SlideRepo
-from hescope.rois import ROI
-from hescope.slides import PillowSource
-from hescope.viewer import DBContext, bootstrap_db
+from hescope.store.db import InteractionRepo, ROIRepo, SlideRepo
+from hescope.core.rois import ROI
+from hescope.wsi.slides import PillowSource
+from hescope.viewer.viewer import DBContext, bootstrap_db
 
 
 @pytest.fixture()

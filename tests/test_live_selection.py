@@ -9,10 +9,10 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.agent_bridge import make_live_selection_tool, selection_stats
-from hescope.rois import ViewportState, viewport_transform
-from hescope.slides import PillowSource
-from hescope.viewer import current_selection, raw_plotly_selection
+from hescope.agent.agent_bridge import make_live_selection_tool, selection_stats
+from hescope.core.rois import ViewportState, viewport_transform
+from hescope.wsi.slides import PillowSource
+from hescope.viewer.viewer import current_selection, raw_plotly_selection
 
 # Known viewport: offset = center - (size/2) * downsample = (600, 500).
 VP = ViewportState(center=(1000.0, 800.0), downsample=2.0, size=(400, 300))
@@ -215,7 +215,7 @@ def test_selection_stats_default_temp_dir(source):
 
 
 def test_lasso_malformed_returns_none():
-    from hescope.viewer import parse_plotly_selection
+    from hescope.viewer.viewer import parse_plotly_selection
 
     # box branch already guarded; lasso must behave identically
     assert parse_plotly_selection({"range": {"x": [None, 5], "y": [0, 5]}}) is None
@@ -232,7 +232,7 @@ def test_lasso_malformed_returns_none():
 def test_a_non_finite_plotly_selection_is_refused():
     """``float("nan")`` raises none of (TypeError, ValueError, IndexError).
 
-    ``hescope.osdviewer._finite_points`` has this guard and its docstring says
+    ``hescope.viewer.osdviewer._finite_points`` has this guard and its docstring says
     it "mirrors the R01-3 hardening in parse_plotly_selection and ADDS a
     finiteness check"; the plotly twin never got one back, and
     ``test_osd_selection_matches_plotly_contract`` compares the two on
@@ -245,7 +245,7 @@ def test_a_non_finite_plotly_selection_is_refused():
     """
     import math
 
-    from hescope.viewer import parse_plotly_selection
+    from hescope.viewer.viewer import parse_plotly_selection
 
     nan, inf = float("nan"), float("inf")
     assert parse_plotly_selection({"lasso": {"x": [0.0, 1.0, nan], "y": [0.0, 1.0, 2.0]}}) is None
@@ -260,8 +260,8 @@ def test_a_non_finite_plotly_selection_is_refused():
 
 def test_the_agent_contract_stays_strict_json_on_the_plotly_surface(source):
     """End to end through the REAL tool factory, in strict-JSON terms."""
-    from hescope.agent_bridge import make_live_selection_tool
-    from hescope.viewer import current_selection
+    from hescope.agent.agent_bridge import make_live_selection_tool
+    from hescope.viewer.viewer import current_selection
 
     tool = make_live_selection_tool(
         lambda: current_selection(

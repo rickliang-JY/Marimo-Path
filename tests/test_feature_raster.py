@@ -18,7 +18,7 @@ than two genuinely different tissue regions did at one raster, and the
 predicted class flipped on 8 of 16 of a model's own training patches from
 resampling alone.
 
-These tests use the REAL hescope.features (no stub): the point is the real
+These tests use the REAL hescope.analysis.features (no stub): the point is the real
 function's raster dependence, which a stub cannot express.
 """
 
@@ -31,16 +31,16 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.features import FEATURE_NAMES, extract_features
-from hescope.ml import (
+from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+from hescope.analysis.features import FEATURE_NAMES, extract_features
+from hescope.analysis.ml import (
     FEATURE_RASTER,
     _feature_vector_for_model,
     load_model,
     make_prob_metric,
     train_from_annotations,
 )
-from hescope.rois import ROI
+from hescope.core.rois import ROI
 
 
 def he_image(seed=0, size=512, n_blobs=10, bg=(235, 190, 205)):

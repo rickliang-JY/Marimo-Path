@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.heatmap import grid_coverage, render_heatmap
+from hescope.analysis.heatmap import grid_coverage, render_heatmap
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app.py"
 SOURCE = APP.read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-"""Tests for hescope.agent_bridge."""
+"""Tests for hescope.agent.agent_bridge."""
 
 from __future__ import annotations
 
@@ -8,14 +8,14 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.agent_bridge import (
+from hescope.agent.agent_bridge import (
     AgentBridge,
     ROIPayload,
     magnification_for,
     make_marimo_tool,
 )
-from hescope.rois import ROI
-from hescope.slides import PillowSource
+from hescope.core.rois import ROI
+from hescope.wsi.slides import PillowSource
 
 
 @pytest.fixture()
@@ -121,7 +121,7 @@ _GOOD_LINE = (
 def test_history_skips_corrupt_lines(tmp_path):
     """A process killed mid-write leaves a truncated final line; it must not
     make the whole history unreadable."""
-    from hescope.agent_bridge import AgentBridge
+    from hescope.agent.agent_bridge import AgentBridge
 
     bridge = AgentBridge(tmp_path)
     (tmp_path / "roi_history.jsonl").write_text(
@@ -135,7 +135,7 @@ def test_history_skips_corrupt_lines(tmp_path):
 
 
 def test_get_latest_selection_never_raises(tmp_path):
-    from hescope.agent_bridge import AgentBridge, make_marimo_tool
+    from hescope.agent.agent_bridge import AgentBridge, make_marimo_tool
 
     bridge = AgentBridge(tmp_path)
     (tmp_path / "roi_history.jsonl").write_text(
@@ -153,7 +153,7 @@ def test_get_latest_selection_never_raises(tmp_path):
 
 
 def test_get_current_selection_never_raises():
-    from hescope.agent_bridge import make_live_selection_tool
+    from hescope.agent.agent_bridge import make_live_selection_tool
 
     def boom():
         raise ValueError("malformed plotly selection")

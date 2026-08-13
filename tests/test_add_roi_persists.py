@@ -26,8 +26,8 @@ from __future__ import annotations
 
 import pytest
 
-from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.rois import ROI
+from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+from hescope.core.rois import ROI
 
 
 @pytest.fixture()
@@ -71,7 +71,7 @@ def _click_add_roi(*, db, slide_id, selection=None, circle=False, measure=False)
     """
     import app as appmod
 
-    from hescope.rois import ROI as _ROI
+    from hescope.core.rois import ROI as _ROI
 
     appmod.app._maybe_initialize()
     cell = appmod.app._graph.cells["ZBYS"]

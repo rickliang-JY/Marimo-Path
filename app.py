@@ -37,7 +37,7 @@ def _():
     import marimo as mo
 
     from hescope import analysis_capabilities
-    from hescope.agent_bridge import (
+    from hescope.agent.agent_bridge import (
         AgentBridge,
         magnification_for,
         make_annotate_roi_tool,
@@ -46,29 +46,29 @@ def _():
         make_query_annotations_tool,
         make_slide_info_tool,
     )
-    from hescope.db import export_rois
-    from hescope.geojson import slide_geojson_text
-    from hescope.importers import (
+    from hescope.store.db import export_rois
+    from hescope.interop.geojson import slide_geojson_text
+    from hescope.interop.importers import (
         import_annotations,
         parse_asap_xml,
         parse_geojson_annotations,
     )
-    from hescope.stats_table import (
+    from hescope.analysis.stats_table import (
         label_summary,
         roi_stats_rows,
         rows_to_csv,
     )
-    from hescope.grid import tissue_fraction_proxy
-    from hescope.heatmap import compute_grid, grid_coverage, render_heatmap
-    from hescope.measure import format_measurement, measure_box
-    from hescope.ml import (
+    from hescope.analysis.grid import tissue_fraction_proxy
+    from hescope.analysis.heatmap import compute_grid, grid_coverage, render_heatmap
+    from hescope.core.measure import format_measurement, measure_box
+    from hescope.analysis.ml import (
         list_models,
         load_model,
         make_prob_metric,
         train_from_annotations,
     )
-    from hescope.nuclei import detect_nuclei
-    from hescope.osdviewer import (
+    from hescope.analysis.nuclei import detect_nuclei
+    from hescope.viewer.osdviewer import (
         make_viewer,
         osd_current_selection,
         osd_selection_to_roi,
@@ -79,17 +79,17 @@ def _():
         viewport_changed,
         viewport_state_from_report,
     )
-    from hescope.overlay import draw_navigator_markers, draw_scale_bar
-    from hescope.qc import qc_report
-    from hescope.rois import ROI, ViewportState, extract_patch, patch_mpp
-    from hescope.slides import open_slide
-    from hescope.tileserver import (
+    from hescope.viewer.overlay import draw_navigator_markers, draw_scale_bar
+    from hescope.analysis.qc import qc_report
+    from hescope.core.rois import ROI, ViewportState, extract_patch, patch_mpp
+    from hescope.wsi.slides import open_slide
+    from hescope.viewer.tileserver import (
         DisplayParams,
         SlideRefs,
         ensure_server,
         serve_slide,
     )
-    from hescope.viewer import (
+    from hescope.viewer.viewer import (
         apply_display_pipeline,
         bootstrap_db,
         current_selection,
@@ -128,7 +128,7 @@ def _():
         try:
             import anywidget  # noqa: F401
 
-            from hescope.osdviewer import build_esm
+            from hescope.viewer.osdviewer import build_esm
 
             build_esm()  # reads the vendored bundle; cached after the first call
             return True, None
@@ -205,8 +205,8 @@ def _():
 
 @app.cell(hide_code=True)
 def _(Path):
-    from hescope.demo import generate_demo_slide
-    from hescope.paths import resolve_runtime_dir
+    from hescope.wsi.demo import generate_demo_slide
+    from hescope.core.paths import resolve_runtime_dir
 
     try:
         _app_dir = Path(__file__).resolve().parent
@@ -232,7 +232,7 @@ def _(Path):
     def ensure_demo_slide():
         """Return the demo slide path, generating it in-process if missing.
 
-        Generation is in-process via hescope.demo (shipped with the wheel);
+        Generation is in-process via hescope.wsi.demo (shipped with the wheel);
         tools/make_demo_slide.py is not packaged and is no longer required.
         """
         if not DEMO_SLIDE_PATH.exists():
@@ -279,7 +279,7 @@ def _(AgentBridge, OUT_DIR, ViewportState, make_marimo_tool, mo):
     get_db_msg, set_db_msg = mo.state(None)  # (kind, text) or None
     get_ann_version, set_ann_version = mo.state(None)  # opaque refresh token
     get_measure_msg, set_measure_msg = mo.state(None)  # (kind, text) or None
-    # Tile-server descriptor for the open slide (hescope.tileserver.serve_slide
+    # Tile-server descriptor for the open slide (hescope.viewer.tileserver.serve_slide
     # output) or None when the OpenSeadragon path is unavailable and the plotly
     # fallback is driving the viewer.
     get_tiles, set_tiles = mo.state(None)
@@ -687,7 +687,7 @@ def _(mo):
     # Sidebar "Display" panel. These affect the DISPLAYED viewer only:
     # selection coordinates, extracted patches, ROI statistics and everything
     # written to the database read UNADJUSTED source pixels
-    # (hescope.rois.extract_patch -> SlideSource.read_region).
+    # (hescope.core.rois.extract_patch -> SlideSource.read_region).
     #
     # brightness / contrast / gamma are continuous sliders, so on the
     # OpenSeadragon surface they are applied as a CSS filter on the tile canvas
@@ -715,7 +715,7 @@ def _(mo):
     # NOTE: the "stain normalize (Macenko)" checkbox was removed here. It was
     # dead-wired — the viewer cell declared the stain helpers but never called
     # them, so the checkbox did nothing at all. It cannot simply be re-wired to
-    # the tiled viewer either: hescope.stain.macenko_normalize refits the
+    # the tiled viewer either: hescope.analysis.stain.macenko_normalize refits the
     # SOURCE stain matrix from whatever image it is handed, so a blank
     # background tile normalizes to solid black. Bringing it back needs a
     # pinned source matrix (a `source_reference=` argument on
@@ -2305,7 +2305,7 @@ def _(
         def _geojson():
             # README advertises "one click turns annotations into a
             # QuPath-compatible FeatureCollection"; until R05-8 the only
-            # entry point was hescope.geojson, which app.py never called, so
+            # entry point was hescope.interop.geojson, which app.py never called, so
             # the one interop feature on the user-facing list was agent-only.
             # slide_id=None means ALL ROIs here, exactly as it does for
             # export_rois beside it -- it used to mean an empty
@@ -2422,11 +2422,11 @@ def _(
 
 @app.cell(hide_code=True)
 def _(Path, db, mo):
-    from hescope import tcga_panel
-    from hescope.tcga import GDCClient, SlideCatalog, safe_file_id
+    from hescope.gdc import tcga_panel
+    from hescope.gdc.tcga import GDCClient, SlideCatalog, safe_file_id
 
     # marimo rule: imported names must be unique across cells -> underscore.
-    from hescope.paths import resolve_runtime_dir as _resolve_runtime_dir
+    from hescope.core.paths import resolve_runtime_dir as _resolve_runtime_dir
 
     try:
         _tcga_app_dir = Path(__file__).resolve().parent
@@ -2444,9 +2444,9 @@ def _(Path, db, mo):
     # slides row and from there to its annotations. The flat SlideCatalog above
     # stays: it still drives the results table, and both are written on
     # download until the flat one is retired.
-    from hescope.tcga_schema import TcgaCatalog as _TcgaCatalog
-    from hescope.tcga_schema import hits_to_rows as _hits_to_rows
-    from hescope.tcga_schema import storage_relpath as _storage_relpath
+    from hescope.gdc.tcga_schema import TcgaCatalog as _TcgaCatalog
+    from hescope.gdc.tcga_schema import hits_to_rows as _hits_to_rows
+    from hescope.gdc.tcga_schema import storage_relpath as _storage_relpath
 
     try:
         tcga_db = _TcgaCatalog(db.engine) if db.enabled else None

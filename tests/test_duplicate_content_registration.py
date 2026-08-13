@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import pytest
 
-from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.rois import ROI
+from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+from hescope.core.rois import ROI
 
 
 @pytest.fixture()

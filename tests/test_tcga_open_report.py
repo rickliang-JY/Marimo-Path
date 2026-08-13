@@ -35,7 +35,7 @@ import pathlib
 import marimo as mo
 import pytest
 
-from hescope.tcga import SlideCatalog, SlideRecord
+from hescope.gdc.tcga import SlideCatalog, SlideRecord
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app.py"
 SOURCE = APP.read_text(encoding="utf-8")
@@ -85,7 +85,7 @@ def _new_dl():
 
 
 class _PanelSpy:
-    """The real ``hescope.tcga_panel``, keeping the widgets it builds.
+    """The real ``hescope.gdc.tcga_panel``, keeping the widgets it builds.
 
     The cells hand their widgets straight into an ``mo.vstack``/``mo.hstack``,
     so this is how the test gets hold of the REAL table and the REAL button
@@ -93,7 +93,7 @@ class _PanelSpy:
     """
 
     def __init__(self):
-        import hescope.tcga_panel as panel
+        import hescope.gdc.tcga_panel as panel
 
         self._panel = panel
         self.table = None
@@ -213,7 +213,7 @@ def _run_status_cell(tcga_dl, catalog, *, open_raises=False):
         "set_tcga_records": lambda v: published.__setitem__("records", v),
         "tcga_catalog": catalog,
         "tcga_dl": tcga_dl,
-        "tcga_panel": __import__("hescope.tcga_panel", fromlist=["x"]),
+        "tcga_panel": __import__("hescope.gdc.tcga_panel", fromlist=["x"]),
         "tcga_ticker": mo.ui.refresh(options=["1s"], default_interval="1s"),
     }
     missing = [p for p in params if p not in deps]
@@ -490,8 +490,8 @@ def test_a_failed_catalog_link_after_a_real_download_surfaces_a_warning(tmp_path
     first try and on the retry (the fake client's ``last_hits`` is empty, so
     there is nothing to seed from).
     """
-    from hescope.db import SlideRepo, get_engine, init_db
-    from hescope.tcga_schema import TcgaCatalog, hits_to_rows
+    from hescope.store.db import SlideRepo, get_engine, init_db
+    from hescope.gdc.tcga_schema import TcgaCatalog, hits_to_rows
 
     engine = get_engine(f"sqlite:///{tmp_path}/link_warn.db")
     init_db(engine)

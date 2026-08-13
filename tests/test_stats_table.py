@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from hescope.db import ROIRepo, SlideRepo, get_engine, init_db
-from hescope.rois import ROI
-from hescope.stats_table import (
+from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+from hescope.core.rois import ROI
+from hescope.analysis.stats_table import (
     label_summary,
     roi_stats_rows,
     rows_to_csv,

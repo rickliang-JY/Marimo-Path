@@ -1,4 +1,4 @@
-"""Tests for hescope.db (unified database layer). Offline; tmp sqlite files."""
+"""Tests for hescope.store.db (unified database layer). Offline; tmp sqlite files."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import pytest
 import sqlalchemy as sa
 from PIL import Image
 
-from hescope import db as dbmod
-from hescope.db import (
+from hescope.store import db as dbmod
+from hescope.store.db import (
     DEFAULT_DB_URL,
     AgentRunRepo,
     InteractionRepo,
@@ -24,7 +24,7 @@ from hescope.db import (
     init_db,
     normalize_slide_path,
 )
-from hescope.rois import ROI
+from hescope.core.rois import ROI
 
 
 @pytest.fixture()
@@ -51,12 +51,22 @@ def _rect(x0=10.0, y0=20.0, x1=110.0, y1=220.0) -> ROI:
 
 
 def test_default_db_url_points_at_project_data_dir():
+    """The database must stay at <project>/data/hescope.db.
+
+    Anchored on PROJECT_ROOT rather than on `dbmod.__file__`'s parent count.
+    Splitting `hescope/` into subpackages moved db.py one level deeper, and a
+    test that counts `dirname` itself would have happily followed the code to
+    the wrong directory instead of catching it -- which is the whole failure
+    this assertion exists to prevent.
+    """
+    from hescope.core.paths import PROJECT_ROOT
+
     assert DEFAULT_DB_URL.startswith("sqlite:///")
-    expected = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(dbmod.__file__))),
-        "data", "hescope.db",
-    )
+    expected = os.path.join(str(PROJECT_ROOT), "data", "hescope.db")
     assert DEFAULT_DB_URL == f"sqlite:///{expected}"
+    # and PROJECT_ROOT really is the repo root, not somewhere inside the package
+    assert (PROJECT_ROOT / "hescope").is_dir()
+    assert (PROJECT_ROOT / "app.py").is_file()
 
 
 def test_get_engine_default_resolution(tmp_path, monkeypatch):
@@ -316,7 +326,7 @@ def test_merge_duplicate_slide_paths_reunites_a_split_slide(engine, tmp_path):
     """R05-2 repair: rows written before normalization already exist in the
     shipped database (``assets\\demo_he.png`` and its absolute twin, one ROI
     each). Merging must move the ROIs, not cascade-delete them."""
-    from hescope.db import Slide, merge_duplicate_slide_paths
+    from hescope.store.db import Slide, merge_duplicate_slide_paths
 
     real = tmp_path / "split.png"
     Image.new("RGB", (8, 8), (240, 230, 240)).save(real)
@@ -359,8 +369,8 @@ def test_merge_duplicate_slide_paths_repoints_a_linked_tcga_file(engine, tmp_pat
     Seen to fail before the fix: ``tcga_files.slide_id`` stayed equal to the
     now-deleted dup id after the merge.
     """
-    from hescope.db import Slide, merge_duplicate_slide_paths
-    from hescope.tcga_schema import TcgaCatalog
+    from hescope.store.db import Slide, merge_duplicate_slide_paths
+    from hescope.gdc.tcga_schema import TcgaCatalog
 
     real = tmp_path / "split.svs"
     real.write_bytes(b"pretend slide bytes for the repoint repro")
@@ -395,7 +405,7 @@ def test_merge_duplicate_slide_paths_repoints_a_linked_tcga_file(engine, tmp_pat
 
 
 def test_merge_duplicate_slide_paths_is_a_noop_on_a_clean_database(engine, slide_id):
-    from hescope.db import merge_duplicate_slide_paths
+    from hescope.store.db import merge_duplicate_slide_paths
 
     assert merge_duplicate_slide_paths(engine) == []
     assert len(SlideRepo(engine).list()) == 1
@@ -670,7 +680,7 @@ def test_export_rois_csv(engine, slide_id):
 def png_source(tmp_path):
     import numpy as np
 
-    from hescope.slides import PillowSource
+    from hescope.wsi.slides import PillowSource
 
     arr = np.zeros((200, 300, 3), dtype=np.uint8)
     arr[..., 0] = 200
@@ -681,7 +691,7 @@ def png_source(tmp_path):
 
 
 def test_agent_bridge_with_repository_persists(engine, slide_id, png_source, tmp_path):
-    from hescope.agent_bridge import AgentBridge
+    from hescope.agent.agent_bridge import AgentBridge
 
     bridge = AgentBridge(tmp_path / "out", repository=ROIRepo(engine), slide_id=slide_id)
     payload = bridge.submit(png_source, _rect())
@@ -697,7 +707,7 @@ def test_agent_bridge_with_repository_persists(engine, slide_id, png_source, tmp
 
 
 def test_agent_bridge_repository_without_slide_id_raises(engine, png_source, tmp_path):
-    from hescope.agent_bridge import AgentBridge
+    from hescope.agent.agent_bridge import AgentBridge
 
     bridge = AgentBridge(tmp_path / "out", repository=ROIRepo(engine), slide_id=None)
     with pytest.raises(ValueError, match="slide_id"):
@@ -705,7 +715,7 @@ def test_agent_bridge_repository_without_slide_id_raises(engine, png_source, tmp
 
 
 def test_agent_bridge_without_repository_unchanged(png_source, tmp_path):
-    from hescope.agent_bridge import AgentBridge
+    from hescope.agent.agent_bridge import AgentBridge
 
     bridge = AgentBridge(tmp_path / "out")
     payload = bridge.submit(png_source, _rect())
@@ -714,7 +724,7 @@ def test_agent_bridge_without_repository_unchanged(png_source, tmp_path):
 
 
 def test_roipayload_from_json_tolerates_missing_roi_id(png_source, tmp_path):
-    from hescope.agent_bridge import AgentBridge, ROIPayload
+    from hescope.agent.agent_bridge import AgentBridge, ROIPayload
 
     bridge = AgentBridge(tmp_path / "out")
     payload = bridge.submit(png_source, _rect())

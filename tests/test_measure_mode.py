@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import pytest
 
-from hescope.demo import generate_demo_slide
+from hescope.wsi.demo import generate_demo_slide
 
 
 @pytest.fixture(scope="module")

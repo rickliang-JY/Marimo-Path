@@ -23,10 +23,10 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from hescope.overlay import draw_rois
-from hescope.rois import ROI, ViewportState, extract_patch, viewport_transform
-from hescope.slides import PillowSource
-from hescope.viewer import (
+from hescope.viewer.overlay import draw_rois
+from hescope.core.rois import ROI, ViewportState, extract_patch, viewport_transform
+from hescope.wsi.slides import PillowSource
+from hescope.viewer.viewer import (
     DEFAULT_OVERSCAN,
     apply_display_pipeline,
     current_selection,

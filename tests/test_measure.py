@@ -1,10 +1,10 @@
-"""Tests for hescope.measure (Part B.4)."""
+"""Tests for hescope.core.measure (Part B.4)."""
 
 from __future__ import annotations
 
 import math
 
-from hescope.measure import Measurement, format_measurement, measure_box
+from hescope.core.measure import Measurement, format_measurement, measure_box
 
 
 def test_measure_box_with_mpp():
