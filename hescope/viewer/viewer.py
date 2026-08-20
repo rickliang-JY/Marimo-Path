@@ -51,6 +51,7 @@ __all__ = [
     "bootstrap_db",
     "roi_from_db_row",
     "jump_viewport_for_bbox",
+    "viewport_status_line",
     "apply_display_pipeline",
 ]
 
@@ -516,6 +517,78 @@ def jump_viewport_for_bbox(
     ds = max(w / (vw * fill), h / (vh * fill))
     ds = min(max(ds, 1.0), max(float(max_downsample), 1.0))
     return ((x0 + x1) / 2.0, (y0 + y1) / 2.0), ds
+
+
+def viewport_status_line(
+    src: SlideSource,
+    vp: ViewportState,
+    sel: dict | None,
+    db_roi_rows: list[dict],
+    session_rois: list[ROI],
+) -> str:
+    """Markdown text for the status line under the viewer: selection state,
+    ROI count, viewport center, magnification and viewport size.
+
+    Moved out of app.py's status-line cell (design doc §9.2 extraction, see
+    HE-Scope-设计文档-数据与Harness.md): that cell still owns everything that
+    reads LIVE marimo state (``get_source`` / ``get_vp`` / ``live_selection``)
+    and wraps the returned text in ``mo.md``; this function is the pure
+    formatting logic that used to sit inline in the cell body, now reachable
+    from hescope's own test suite instead of only through the two browser
+    tests app.py has. ``sel`` must already be resolved (the live-selection
+    dict, or None) -- this function does not call ``live_selection()`` itself.
+    """
+    mag = magnification_for(src.mpp, vp.downsample)
+    mag_s = (
+        f"magnification ~{mag:.1f}x"
+        if mag is not None
+        else f"downsample x{vp.downsample:g}"
+    )
+    # Selection and ROI count belong here, not only on the canvas. The
+    # dashed outline says WHERE, and nothing said WHETHER: a user who had
+    # drawn nothing and a user whose selection was ignored saw the same
+    # screen, and "Add ROI" confirmed itself only by a row appearing in a
+    # sidebar list they may not be looking at.
+    sel_s = "no selection"
+    if sel is not None:
+        bx0, by0, bx1, by1 = sel["bbox_level0"]
+        sw, sh = bx1 - bx0, by1 - by0
+        sel_s = f"selection: {sel['kind']} {sw}x{sh} px"
+        if src.mpp:
+            # level-0 px * mpp: the bbox is level-0, unlike the patch
+            # dimensions in roi_stats (R07-2).
+            sel_s += f" ({sw * src.mpp:.0f}x{sh * src.mpp:.0f} um)"
+        # "not added yet" used to be unconditional, so it went on
+        # describing a region the user had just saved -- the selection
+        # outline is deliberately persistent, so the one sentence whose
+        # job is to separate "drawn" from "saved" gave the same answer in
+        # both states (R09-2). Compare the selection against what is
+        # actually stored for this slide.
+        saved_boxes = [
+            [int(v) for v in (r.get("bbox") or [])] for r in db_roi_rows
+        ]
+        try:
+            saved_boxes += [[int(v) for v in r.bbox()] for r in session_rois]
+        except Exception:  # a status line must never be what breaks
+            pass
+        sel_s += (
+            " — added" if [bx0, by0, bx1, by1] in saved_boxes
+            else " — not added yet"
+        )
+    # Count what the VIEWER draws: overlay_rois is session + persisted, and
+    # this line used to count the session list alone. R08-2 moved "Add ROI"
+    # into the database, which left the counter reading 0 however many ROIs
+    # the user had added, over an image showing every one of them (R09-1).
+    n_session = len(session_rois)
+    n_saved = len(db_roi_rows)
+    roi_s = f"{n_session + n_saved} ROI(s) on this slide"
+    if n_session and n_saved:
+        roi_s += f" ({n_saved} saved + {n_session} this session)"
+    return (
+        f"**{sel_s}** | {roi_s} | "
+        f"center=({vp.center[0]:.0f}, {vp.center[1]:.0f}) | "
+        f"{mag_s} | viewport {vp.size[0]}x{vp.size[1]} px"
+    )
 
 
 def apply_display_pipeline(

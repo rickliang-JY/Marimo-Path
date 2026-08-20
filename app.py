@@ -102,6 +102,7 @@ def _():
         roi_from_db_row,
         selection_to_roi,
         viewport_png_bytes,
+        viewport_status_line,
     )
 
     # The OpenSeadragon surface (hescope/osdviewer.py) fed by the loopback tile
@@ -200,6 +201,7 @@ def _():
         viewport_changed,
         viewport_png_bytes,
         viewport_state_from_report,
+        viewport_status_line,
     )
 
 
@@ -1629,71 +1631,30 @@ def _(
     get_source,
     get_vp,
     live_selection,
-    magnification_for,
     mo,
+    viewport_status_line,
 ):
     # Status line under the viewer: viewport readout + measurement / DB
-    # message callouts.
+    # message callouts. The viewport-readout TEXT itself (selection state,
+    # ROI count, magnification -- see hescope/viewer/viewer.py for the R07-2 /
+    # R08-2 / R09-1 / R09-2 history behind that string) is built by
+    # hescope.viewer.viewer.viewport_status_line, moved there (design doc
+    # §9.2 extraction) so it sits inside hescope's own test suite
+    # (tests/test_viewport_status_line.py) instead of only being reachable by
+    # executing this cell's body (tests/test_status_line_counts.py still does
+    # that, now asserting the hand-off). This cell keeps everything that
+    # reads LIVE marimo state (get_source / get_vp / live_selection /
+    # get_rois) and every mo.md / mo.callout / mo.vstack call.
     _parts = []
     _src = get_source()
     if _src is not None:
         _vp = get_vp()
-        _mag = magnification_for(_src.mpp, _vp.downsample)
-        _mag_s = (
-            f"magnification ~{_mag:.1f}x"
-            if _mag is not None
-            else f"downsample x{_vp.downsample:g}"
-        )
-        # Selection and ROI count belong here, not only on the canvas. The
-        # dashed outline says WHERE, and nothing said WHETHER: a user who had
-        # drawn nothing and a user whose selection was ignored saw the same
-        # screen, and "Add ROI" confirmed itself only by a row appearing in a
-        # sidebar list they may not be looking at.
-        _sel_s = "no selection"
         try:
             _sel = live_selection()
         except Exception:  # a status line must never be the thing that breaks
             _sel = None
-        if _sel is not None:
-            _bx0, _by0, _bx1, _by1 = _sel["bbox_level0"]
-            _sw, _sh = _bx1 - _bx0, _by1 - _by0
-            _sel_s = f"selection: {_sel['kind']} {_sw}x{_sh} px"
-            if _src.mpp:
-                # level-0 px * mpp: the bbox is level-0, unlike the patch
-                # dimensions in roi_stats (R07-2).
-                _sel_s += f" ({_sw * _src.mpp:.0f}x{_sh * _src.mpp:.0f} um)"
-            # "not added yet" used to be unconditional, so it went on
-            # describing a region the user had just saved -- the selection
-            # outline is deliberately persistent, so the one sentence whose
-            # job is to separate "drawn" from "saved" gave the same answer in
-            # both states (R09-2). Compare the selection against what is
-            # actually stored for this slide.
-            _saved_boxes = [
-                [int(v) for v in (_r.get("bbox") or [])] for _r in db_roi_rows
-            ]
-            try:
-                _saved_boxes += [[int(v) for v in _r.bbox()] for _r in get_rois()]
-            except Exception:  # a status line must never be what breaks
-                pass
-            _sel_s += (
-                " — added" if [_bx0, _by0, _bx1, _by1] in _saved_boxes
-                else " — not added yet"
-            )
-        # Count what the VIEWER draws: overlay_rois is session + persisted, and
-        # this line used to count the session list alone. R08-2 moved "Add ROI"
-        # into the database, which left the counter reading 0 however many ROIs
-        # the user had added, over an image showing every one of them (R09-1).
-        _n_session = len(get_rois())
-        _n_saved = len(db_roi_rows)
-        _roi_s = f"{_n_session + _n_saved} ROI(s) on this slide"
-        if _n_session and _n_saved:
-            _roi_s += f" ({_n_saved} saved + {_n_session} this session)"
         _parts.append(
-            mo.md(
-                f"**{_sel_s}** | {_roi_s} | "
-                f"center=({_vp.center[0]:.0f}, {_vp.center[1]:.0f}) | "
-                f"{_mag_s} | viewport {_vp.size[0]}x{_vp.size[1]} px"
-            )
+            mo.md(viewport_status_line(_src, _vp, _sel, db_roi_rows, get_rois()))
         )
     _mm = get_measure_msg()
     if _mm is not None:

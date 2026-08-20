@@ -15,6 +15,13 @@ so after the fix the counter reads 0 no matter how many ROIs the user has added
 Exactly the class bugs/SUMMARY.md names as *a second place re-deriving what one
 owner decides*, and the same split that made the ROIs panel say "No ROIs yet"
 over four visible outlines.
+
+Design doc §9.2 extraction: the string-building logic this module exercises
+now lives in ``hescope.viewer.viewer.viewport_status_line`` (moved out of the
+cell body so it is covered directly -- see
+tests/test_viewport_status_line.py). This module still executes the REAL
+cell (``exec(cell.body, ns)``), so it continues to guard the wiring: that the
+cell resolves live state and hands it to that function unchanged.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from __future__ import annotations
 import pytest
 
 from hescope.core.rois import ROI, ViewportState
+from hescope.viewer.viewer import viewport_status_line
 
 
 class _MO:
@@ -70,7 +78,13 @@ def _render(*, session_rois, saved_rows, selection=None):
             center=(40835.0, 9105.0), downsample=16.0, size=(1702, 820)
         ),
         "live_selection": lambda: selection,
-        "magnification_for": lambda mpp, ds: 12.3,
+        # The real function, not a stub: the selection/ROI-count string logic
+        # this file exercises now LIVES in hescope.viewer.viewer (design doc
+        # §9.2 extraction; see tests/test_viewport_status_line.py for the
+        # direct unit tests). This cell now only resolves live state and
+        # hands it off, so the "the status cell grew new dependencies" guard
+        # below is what caught the extraction -- it is supposed to.
+        "viewport_status_line": viewport_status_line,
         "mo": mo,
     }
     missing = [
