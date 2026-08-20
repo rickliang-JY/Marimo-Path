@@ -7,33 +7,17 @@ session via marimo-pair.
 
 ## 1. Starting the app
 
-```bash
-hescope app                          # installed CLI (pip install -e .)
-# or, equivalently, from the repo root:
-marimo edit app.py --no-token
-```
+Connection mechanics — the exact launch command, why `marimo run` cannot be
+paired, and the lazy-loading code-mode snippet that runs every cell once —
+are workflow, not constraint, and now live in exactly one place:
+`skills/he-scope/SKILL.md` §1. (They used to be duplicated here too; two
+copies of the same recipe is the fastest way for this file to drift out of
+sync with itself — see §10 below.)
 
-The app MUST run under `marimo edit`: marimo-pair requires the edit-mode
-APIs (`marimo run` is read-only — the server returns 401 on `/api/sessions`
-and blocks `/execute`, so pairing cannot attach). Users who want a
-chrome-free UI can enable "app view" (eye icon in the bottom-right toolbar,
-or Cmd/Ctrl + `.`) — the UI then looks exactly like run mode, but the
-session stays an edit session and agent attachment is unaffected. All cells
-in this app are `hide_code` by default.
-
-marimo 0.23 opens lazy: kernel globals do NOT exist until the cells have
-run. Either ask the user to press "Run" in the notebook, or run all cells
-yourself via marimo-pair code mode:
-
-```python
-import marimo._code_mode as cm
-
-async with cm.get_context() as ctx:
-    for cell in ctx.cells:
-        ctx.run_cell(cell.id)
-```
-
-After that, the entry points below are live in the kernel globals.
+The one fact that belongs in a *contract* rather than a *how-to*: the app
+MUST be running under `marimo edit`, never `marimo run`. Once it is, and
+every cell has run at least once, the entry points in §3 below are live in
+the kernel globals.
 
 ## 2. Hard rules (marimo-pair)
 
@@ -194,7 +178,7 @@ available on demand.
 The analytics stack (SPEC-ML) is plain module-scope code — no UI required.
 Everything below works offline with numpy/scipy/scikit-image (+ joblib /
 scikit-learn for training); torch/torchvision are OPTIONAL and only used
-lazily by `hescope.features.extract_embedding`.
+lazily by `hescope.analysis.features.extract_embedding`.
 
 ```python
 import json
@@ -245,10 +229,10 @@ if db.enabled:
     tumor_grid = hescope.compute_grid(src, metric, tile=256, downsample=16.0)
 ```
 
-Direct imports also work: `hescope.nuclei.detect_nuclei`,
-`hescope.qc.qc_report`, `hescope.stain.macenko_normalize`,
-`hescope.features.extract_features`, `hescope.grid.iter_grid`,
-`hescope.heatmap.compute_grid`, `hescope.ml.train_from_annotations` —
+Direct imports also work: `hescope.analysis.nuclei.detect_nuclei`,
+`hescope.analysis.qc.qc_report`, `hescope.analysis.stain.macenko_normalize`,
+`hescope.analysis.features.extract_features`, `hescope.analysis.grid.iter_grid`,
+`hescope.analysis.heatmap.compute_grid`, `hescope.analysis.ml.train_from_annotations` —
 all are additionally re-exported at the `hescope` top level.
 
 Notes:
@@ -271,3 +255,92 @@ Notes:
   raster: `extract_features` is raster-dependent (nuclei counts, mean nucleus
   area, blur), so a tile must be resampled to the training raster before it
   is comparable. `predict_patch` / `make_prob_metric` do this for you.
+
+## 10. Partitioning
+
+`app.py` is split by one marker, `▼▼▼ SCRATCH ▼▼▼`, in the last cell before
+the `if __name__ == "__main__":` footer:
+
+- **Above and including the marker cell = skeleton.** Human-maintained. Do
+  not edit it on disk (§2 already forbids that for the whole file during a
+  live session) and do not propose edits to it via `ctx.edit_cell` either —
+  every skeleton cell is covered by `skeleton.lock` and by the cell-count /
+  cell-length ceiling, both enforced in `tests/test_harness.py`. An edit
+  here makes `test_skeleton_unchanged` fail; that failure is the point, not
+  a bug to route around.
+- **Below the marker cell = scratch.** `ctx.create_cell` appends new cells
+  just above the module footer — i.e. immediately after the marker cell —
+  so using `ctx.create_cell` already keeps you on the right side of the
+  line without having to think about it. Scratch cells do not count against
+  the skeleton's cell-count / cell-length budget, and are session-scoped:
+  promote anything worth keeping into `hescope/` (with a test, per R-2 in
+  the repo's engineering log) before the session's scratch cells are
+  cleared — see §11.
+
+**Why the marker lives *inside* a cell, not as a bare comment between two
+`@app.cell` blocks:** marimo regenerates the entire file from its cell list
+on every save (`marimo/_ast/codegen.py:generate_filecontents`) — anything
+that is not part of a cell's own source text is silently dropped on the
+next save, live-session autosave included. A comment inside a cell's body
+is part of that cell's code and survives; a free-floating comment between
+cells does not. (This is also why `# NEVER edit app.py on disk during a
+live session` in §2 is the load-bearing rule, not this one — a hand edit
+that doesn't go through `ctx.*` can be clobbered by the next autosave
+regardless of where the marker lives; see the repo's engineering log on
+marimo autosave clobbering `app.py` edits.)
+
+Today the skeleton is the entire notebook — `app.py`'s 2,400-line
+extraction (design doc §9.2) has not happened yet — and the scratch region
+is empty until an agent or a human uses it.
+
+## 11. Countertop
+
+The scratch region does not need to re-derive state from the database:
+everything in §3's entry-point table is already live in kernel globals by
+the time a cell runs. A scratch cell can call `get_source()`, `get_vp()`,
+`get_current_selection()`, `get_slide_info()`, `query_annotations()`,
+`agent_bridge`, `db` and `open_slide` directly — the same names the
+workflow example in `skills/he-scope/SKILL.md` §3 uses.
+
+Design doc §10 additionally specifies a richer, layer-based countertop:
+`current_slide`, `current_selection` (the drawn polygon plus which view it
+came from), `available_layers` (`list[Layer]`, each with its `registration`
+status) and `resolve(layer_id)` (`-> ndarray` of hit entity indices),
+built on the `layers` / `selection_resolutions` tables already in
+`hescope/store/db.py`. **Those two tables exist; the four names do not
+exist in `app.py` yet** — Phase 1 ("通用点集层") has not started. Do not
+assume `current_slide` or `resolve()` are callable until this paragraph is
+replaced by a row in §3's table: until then they are a plan, not a
+contract, and `tests/test_harness.py` deliberately does not check for them
+(see that file's docstring on why Lock 1 is table-driven rather than
+"every backtick in the document").
+
+## 12. Invariants
+
+When not to trust a number — these are the single source of truth; each
+`skills/*/SKILL.md`'s own "failure" notes only say how a given workflow
+trips one of these, they do not redefine them.
+
+- A layer's `registration` is `'unregistered'` (`hescope/store/db.py`'s
+  `layers.registration`, which defaults to exactly that string) → stop and
+  ask the user; never substitute an identity transform for a real one.
+- Two measurements differ in `mpp_effective` (`measurements.mpp_effective`)
+  beyond a stated tolerance → do not average them; report them as
+  not-comparable instead.
+- A cohort has no recorded tissue-source-site / submitting-institution
+  information → do not draw a "morphology ↔ molecular" conclusion from it.
+  Site-specific digital-pathology signatures are picked up by both
+  handcrafted features and foundation-model embeddings (design doc §5.3);
+  without provenance you cannot tell a real biological effect from an
+  institution fingerprint.
+- Any density-style measurement (count per area) → must declare its
+  denominator's source (which tissue-region kind the area came from) before
+  it is comparable to another density number.
+- A selection made on a projection view (anything whose `frame` is a
+  `<projection_id>`, not `level0`) → must record `projection_id`, `method`,
+  `params` and the random seed used to produce the projection (the layer's
+  `params_json`), not just the polygon.
+- A selection made on a non-deterministic projection → on recompute,
+  compare `index_digest` (`selection_resolutions.index_digest`) against the
+  prior value and report if it changed; never assume the same polygon still
+  hits the same entities.

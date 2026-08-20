@@ -106,10 +106,10 @@ For long tasks that need several rounds, work in the following loop, where
 ## 5. Export and interoperability
 
 - QuPath interop:
-  `hescope.geojson.export_rois_geojson(db.engine, slide_id, path)` exports all
+  `hescope.interop.geojson.export_rois_geojson(db.engine, slide_id, path)` exports all
   annotations for a slide as GeoJSON that QuPath can import (bbox polygons, with
   `classification` mapped from label).
 - General export:
-  `hescope.db.export_rois(db.engine, slide_id=..., fmt="json"|"csv")`.
+  `hescope.store.db.export_rois(db.engine, slide_id=..., fmt="json"|"csv")`.
 
 The full contract is in `AGENTS.md` at the repository root.

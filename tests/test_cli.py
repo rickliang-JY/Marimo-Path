@@ -626,3 +626,79 @@ def test_migrate_dry_run_does_not_mutate_a_non_wal_database(tmp_path, capsys):
 
     assert after == before, "dry run wrote to the database file"
     assert mode_after == "delete"
+
+
+def test_migrate_dry_run_reports_migration_4_backfill_counts(tmp_path, capsys):
+    """`hescope migrate --dry-run` must print migration 4's detail, not just
+    its title.
+
+    plan_migration_4 existed and was correct from the day it was written, and
+    NOTHING CALLED IT. The dry run printed
+
+        would apply migration 4: L5 measurement layers ...
+
+    and no detail line, so the duplicate (slide_id, geom_key) groups --
+    the one thing docs/DATABASE-DESIGN.md §5 step 5 says must be REPORTED
+    rather than silently dropped -- were invisible in the only place a user
+    would look before touching a real database.
+
+    Observed before the fix, against a copy of the real database: migration 2
+    and 3 each printed a detail line, migration 4 printed none, while calling
+    plan_migration_4(conn) directly on the same file returned
+    {'rois': 10, 'created_by_backfilled': 10, 'duplicate_geom_key_groups': 2,
+     'duplicate_geom_key_rois': 5}.
+
+    Third instance of this defect class on this branch (ba84d17 "make migrate
+    --dry-run tell the truth", 4b93f58 "preview vs actual identity drift").
+    """
+    from hescope.core.rois import ROI
+    from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+
+    url = f"sqlite:///{(tmp_path / 'm4.db').as_posix()}"
+    engine = get_engine(url)
+    init_db(engine)
+    slide_id = SlideRepo(engine).register(
+        source_kind="local", name="s.svs", path=str(tmp_path / "s.svs"),
+        width=1000, height=800, mpp=0.5,
+    )
+    repo = ROIRepo(engine)
+    # two ROIs with IDENTICAL geometry -> one duplicate group, plus a third
+    same = ROI(kind="rect", points=((0.0, 0.0), (10.0, 10.0)))
+    repo.add(slide_id, same)
+    repo.add(slide_id, same)
+    repo.add(slide_id, ROI(kind="rect", points=((50.0, 50.0), (70.0, 70.0))))
+
+    main(["--db", url, "migrate", "--dry-run"])
+    out = capsys.readouterr().out
+
+    assert "would apply migration 4" in out
+    assert "would backfill geom_key on 3 roi(s)" in out, (
+        f"migration 4 printed a title and no detail line:\n{out}"
+    )
+    assert "1 duplicate (slide_id, geom_key) group(s) covering 2 roi(s)" in out, (
+        "the duplicate groups DATABASE-DESIGN.md §5 says must be reported are "
+        f"invisible in the dry run:\n{out}"
+    )
+    assert "not merged" in out, "the user must be told they are kept, not dropped"
+
+
+def test_migrate_dry_run_says_nothing_about_duplicates_when_there_are_none(
+    tmp_path, capsys
+):
+    """Guard against the fix overreaching: no duplicate line on a clean slide."""
+    from hescope.core.rois import ROI
+    from hescope.store.db import ROIRepo, SlideRepo, get_engine, init_db
+
+    url = f"sqlite:///{(tmp_path / 'clean.db').as_posix()}"
+    engine = get_engine(url)
+    init_db(engine)
+    slide_id = SlideRepo(engine).register(
+        source_kind="local", name="s.svs", path=str(tmp_path / "s.svs"),
+        width=1000, height=800, mpp=0.5,
+    )
+    ROIRepo(engine).add(slide_id, ROI(kind="rect", points=((0.0, 0.0), (10.0, 10.0))))
+
+    main(["--db", url, "migrate", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "would backfill geom_key on 1 roi(s)" in out
+    assert "duplicate (slide_id, geom_key)" not in out

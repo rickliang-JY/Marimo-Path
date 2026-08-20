@@ -3697,5 +3697,27 @@ def _(mo):
     return
 
 
+@app.cell(hide_code=True)
+def _():
+    # ============================================================
+    # SKELETON ends above this cell. Everything above is human-
+    # maintained, protected by ``skeleton.lock`` and the cell-count /
+    # cell-length ceiling in tests/test_harness.py (design doc §9,
+    # §15.3 lock two/three). Do not edit those cells via
+    # ctx.edit_cell either -- see AGENTS.md "Partitioning".
+    #
+    # ▼▼▼ SCRATCH ▼▼▼
+    # Draft cells belong BELOW this one. ctx.create_cell appends new
+    # cells just above the module footer -- i.e. immediately after
+    # this cell -- so an agent using ctx.create_cell never has to
+    # think about the line. Scratch cells are not covered by
+    # skeleton.lock and do not count against the cell-count /
+    # cell-length budget; they are session-scoped (design doc §9.3,
+    # §10.2) -- promote anything worth keeping into hescope/ (with a
+    # test) before it is cleared, per AGENTS.md "Countertop".
+    # ============================================================
+    return
+
+
 if __name__ == "__main__":
     app.run()

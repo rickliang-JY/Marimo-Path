@@ -479,7 +479,12 @@ def _cmd_dedupe_slides(engine, dry_run: bool = False) -> int:
 def _cmd_migrate(engine, dry_run: bool) -> int:
     """Apply pending schema migrations, or (``--dry-run``) report what would
     run without opening a write transaction or touching the database."""
-    from .store.migrations import migrate, plan_migration_2, plan_migration_3
+    from .store.migrations import (
+        migrate,
+        plan_migration_2,
+        plan_migration_3,
+        plan_migration_4,
+    )
     from .gdc.tcga_schema import plan_init_tcga_schema
 
     if dry_run:
@@ -575,6 +580,31 @@ def _cmd_migrate(engine, dry_run: bool) -> int:
                         "have a slide_id pointing at a slide that no longer "
                         "exists -- would be cleared and re-linked from "
                         "local_path"
+                    )
+
+            # Migration 4's backfill counts. plan_migration_4 existed and was
+            # correct from the start, and NOTHING CALLED IT: `hescope migrate
+            # --dry-run` printed migration 4's title and no detail line, so the
+            # duplicate (slide_id, geom_key) groups -- the one thing
+            # docs/DATABASE-DESIGN.md §5 step 5 says must be REPORTED rather
+            # than silently dropped -- were invisible in the only place a user
+            # would look. Third time this branch has paid for a preview that
+            # cannot match its run (ba84d17, 4b93f58); the fix each time is to
+            # make the command ask the planner, not to reason about it.
+            if item.startswith("4:"):
+                with ro_engine.connect() as ro_conn:
+                    mig4 = plan_migration_4(ro_conn)
+                print(
+                    f"  would backfill geom_key on {mig4['rois']} roi(s) and "
+                    f"created_by on {mig4['created_by_backfilled']}"
+                )
+                if mig4["duplicate_geom_key_groups"]:
+                    print(
+                        f"  {mig4['duplicate_geom_key_groups']} duplicate "
+                        f"(slide_id, geom_key) group(s) covering "
+                        f"{mig4['duplicate_geom_key_rois']} roi(s) -- reported, "
+                        "not merged; geometry-identical ROIs stay as separate "
+                        "rows until you decide"
                     )
         total_new_tables = len(init_plan["new_tables"]) + len(tcga_init_plan["new_tables"])
         print(
