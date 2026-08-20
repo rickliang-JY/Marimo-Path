@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import math
 import os
 import re
@@ -45,6 +46,8 @@ from urllib.parse import parse_qs, urlsplit
 from PIL import Image
 
 from ..wsi.slides import SlideSource, best_level_for_downsample
+
+_LOG = logging.getLogger(__name__)
 
 __all__ = [
     "TILE_SIZE",
@@ -329,11 +332,31 @@ class SlideRefs:
                 try:
                     lo, hi = fit_channel(thumb, ch)
                     channel_lohi[ch] = (float(lo), float(hi))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # NOT a benign skip: an unpinned hematoxylin/eosin
+                    # channel view falls back to per-TILE min-max
+                    # normalization, which -- per _hed_channel_gray's own
+                    # docstring -- renders a blank background tile as
+                    # "convincing fake structure" (measured: std 31.4 vs 1.1,
+                    # up to 246/255 per-pixel difference). A silently-missing
+                    # fit here is the exact "failure rendered as success"
+                    # shape, just one call removed, so it must at least be
+                    # observable.
+                    _LOG.warning(
+                        "could not fit a pinned %s channel reference for "
+                        "%r; that channel view will fall back to unpinned "
+                        "per-tile normalization: %s: %s",
+                        ch, getattr(source, "name", source), type(exc).__name__, exc,
+                    )
         try:
             stain_source = _stain.fit_reference(thumb)
-        except Exception:
+        except Exception as exc:
+            _LOG.warning(
+                "could not fit a stain reference for %r; Macenko "
+                "normalization for this slide will use no source reference: "
+                "%s: %s",
+                getattr(source, "name", source), type(exc).__name__, exc,
+            )
             stain_source = None
         return cls(channel_lohi=channel_lohi, stain_source=stain_source)
 

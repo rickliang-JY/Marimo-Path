@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import re
 import tempfile
 from dataclasses import dataclass, field
@@ -20,6 +21,8 @@ from ..wsi.slides import SlideSource
 
 if TYPE_CHECKING:
     from ..store.db import ROIRepo
+
+_LOG = logging.getLogger(__name__)
 
 MPP_10X = 2.0  # microns-per-pixel reference for 10x
 
@@ -231,7 +234,14 @@ def make_marimo_tool(bridge_getter: Callable[[], AgentBridge]) -> Callable[[], s
 
 
 def _record_interaction(db: object, **kwargs: object) -> None:
-    """Best-effort interaction trace write; swallows everything."""
+    """Best-effort interaction trace write; swallows everything.
+
+    Deliberately never raises -- tracing an agent tool call must not be able
+    to break the call it is tracing. But "swallow" used to mean total
+    silence: a lost ``interactions`` row (part of the harness's L4
+    provenance layer, see ``docs/DATABASE-DESIGN.md``) left zero trace of
+    itself. Logged now so the degradation is at least observable.
+    """
     try:
         engine = getattr(db, "engine", None)
         if engine is None:
@@ -239,8 +249,11 @@ def _record_interaction(db: object, **kwargs: object) -> None:
         from ..store.db import InteractionRepo
 
         InteractionRepo(engine).record(**kwargs)  # type: ignore[arg-type]
-    except Exception:
-        pass
+    except Exception as exc:
+        _LOG.warning(
+            "could not record interaction trace (kind=%r): %s: %s",
+            kwargs.get("kind"), type(exc).__name__, exc,
+        )
 
 
 def make_annotate_roi_tool(

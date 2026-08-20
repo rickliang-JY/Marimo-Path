@@ -7,12 +7,16 @@ mutated. Level-0 ROI coordinates are mapped into viewport pixel space with
 
 from __future__ import annotations
 
+import logging
 import math
+from pathlib import Path
 from typing import Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
 from ..core.rois import ROI, ViewportState, viewport_transform
+
+_LOG = logging.getLogger(__name__)
 
 # Candidate physical lengths for the viewport scale bar.
 SCALE_BAR_CANDIDATES_UM: tuple[float, ...] = (20, 50, 100, 200, 500, 1000)
@@ -38,19 +42,53 @@ def pick_scale_bar_um(
 def _scale_bar_font_and_label(um: float):
     """Return (font, label) for the scale-bar caption.
 
-    PIL's built-in bitmap font is ASCII-only and renders "µ" as a tofu box,
-    so prefer a bundled DejaVuSans (ships with matplotlib) which has a proper
-    µ glyph; fall back to the ASCII-safe "um" label with the default font.
-    """
-    try:  # matplotlib bundles DejaVuSans.ttf; no hard dependency
-        import matplotlib
+    Neither of PIL's own fonts has a MICRO SIGN (µ) glyph: the classic
+    bitmap font is ASCII-only, and Pillow's ``ImageFont.load_default()``
+    fallback (a bundled "Aileron" TrueType font, "with a more limited
+    character set" per its own docstring) renders µ as a tofu box too --
+    verified by comparing its rendered mask for chr(181) against a codepoint
+    guaranteed absent from the font: identical bitmaps. So a real µ needs a
+    font from elsewhere; prefer the bundled DejaVuSans that ships inside
+    matplotlib (an optional, NOT a core, dependency -- see the ``fonts``
+    extra in pyproject.toml) which does have the glyph; fall back to the
+    ASCII-safe "um" label with the default font when matplotlib is not
+    installed or its bundled font cannot be found/loaded.
 
-        ttf = Path(matplotlib.__file__).parent / "mpl-data" / "fonts" / "ttf" / "DejaVuSans.ttf"
-        if ttf.exists():
-            return ImageFont.truetype(str(ttf), 14), f"{um:g} µm"
-    except Exception:
-        pass
-    return ImageFont.load_default(), f"{um:g} um"
+    Each fallback branch is a deliberate, logged degradation, not a silently
+    swallowed error: only the two specific failure modes below are caught,
+    so a genuine bug (e.g. a future refactor breaking this function some
+    other way) still raises instead of quietly producing an "um" label.
+    """
+    try:  # matplotlib bundles DejaVuSans.ttf; optional dependency
+        import matplotlib
+    except ModuleNotFoundError:
+        _LOG.debug(
+            "matplotlib not installed; scale bar falls back to the ASCII "
+            "'um' label instead of 'µm' (install the 'fonts' extra for a "
+            "proper micro-sign glyph)"
+        )
+        return ImageFont.load_default(), f"{um:g} um"
+
+    ttf = Path(matplotlib.__file__).parent / "mpl-data" / "fonts" / "ttf" / "DejaVuSans.ttf"
+    if not ttf.exists():
+        _LOG.warning(
+            "matplotlib is installed but its bundled DejaVuSans.ttf was not "
+            "found at %s; scale bar falls back to the ASCII 'um' label",
+            ttf,
+        )
+        return ImageFont.load_default(), f"{um:g} um"
+
+    try:
+        font = ImageFont.truetype(str(ttf), 14)
+    except OSError as exc:
+        _LOG.warning(
+            "matplotlib's bundled DejaVuSans.ttf at %s could not be loaded "
+            "as a font (%s); scale bar falls back to the ASCII 'um' label",
+            ttf, exc,
+        )
+        return ImageFont.load_default(), f"{um:g} um"
+
+    return font, f"{um:g} µm"
 
 
 def draw_scale_bar(

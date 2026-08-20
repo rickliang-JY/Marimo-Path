@@ -9,7 +9,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue.svg)
 ![marimo](https://img.shields.io/badge/marimo-%E2%89%A50.23-8B5FA8.svg)
-![tests](https://img.shields.io/badge/tests-276%20passed-brightgreen.svg)
 
 [English](README.md) · **简体中文**
 
@@ -150,8 +149,16 @@ hescope ingest /path/to/slides -r && hescope list   # 批量登记 + 查看
 
 ### 已验证环境
 
-以下组合已在本仓库实测通过(`pytest` → **276 passed, 1 skipped**;
-跳过的是一条只在 POSIX 下成立的权限位测试):
+以下组合已在本仓库实测通过(`pytest` → **约 940 passed, 17 skipped**;测于
+2026-08-20)。passed 数字会在相邻两次运行间浮动 1——因为有一条竞态回归测试
+本身就是概率性的(见该测试模块的 docstring),所以"约 940"是"自己跑一遍"
+的意思,不是承诺。17 个跳过里:15 个需要真实 Chrome(`HESCOPE_BROWSER_TESTS=1`)、
+1 个是只在 POSIX 下成立、Windows 跑不了的权限位检查,1 个是那条竞态测试本次
+没复现出竞态。想看当前跳过清单,跑 `pytest -rs`。本仓库没有 CI——没有
+`.github/`,没有任何自动化在跑这个数字——上面那行 `tests-N passed` 徽章曾经
+两次被真实测试数量甩开都没人发现(徽章钉死在 276,实测先变成 909,现在到
+这里),这也是删掉它而不是补数字的原因:一个要靠人手动更新的数字迟早会漂,
+漂了的徽章比没有徽章更糟。
 
 | 组件 | 版本 |
 | --- | --- |

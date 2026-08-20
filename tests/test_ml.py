@@ -6,6 +6,7 @@ fast and pass even while the real features module does not exist yet.
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
 from pathlib import Path
@@ -13,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
+from sqlalchemy import text
 
 from hescope.store.db import AgentRunRepo, ROIRepo, SlideRepo, get_engine, init_db
 from hescope.analysis.ml import (
@@ -113,6 +115,42 @@ def test_train_from_annotations(tmp_path):
     assert len(runs) == 1
     assert "m1" in runs[0]["input_json"]
     assert runs[0]["status"] == "ok"
+
+
+def test_agent_runs_write_failure_is_logged_not_swallowed(tmp_path, caplog):
+    """The docstring says "any database hiccup while recording is swallowed
+    so it never fails training" -- true, but before this test the swallow
+    was total silence: a lost agent_runs row (the harness's provenance
+    record for this training run, see AGENTS.md's "out\" contract) left
+    zero trace anywhere.
+
+    Reproduces a REAL hiccup (not a mock): drop the agent_runs table out
+    from under a live engine, so AgentRunRepo.record's INSERT hits an
+    actual sqlalchemy.exc.OperationalError. Training must still succeed
+    (the documented contract) AND the failure must now be logged with the
+    real exception text.
+    """
+    engine = _engine(tmp_path)
+    _seed_db(tmp_path, engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE agent_runs"))
+
+    with caplog.at_level(logging.WARNING, logger="hescope.analysis.ml"):
+        info = train_from_annotations(
+            engine, name="m1", models_dir=tmp_path / "models", seed=7
+        )
+
+    # training itself is unaffected -- the documented part of the contract
+    assert info.name == "m1"
+    assert (tmp_path / "models" / "m1" / "model.joblib").is_file()
+
+    # the swallow is no longer silent: the real DB error is logged
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("m1" in r.message for r in warnings), caplog.text
+    assert any(
+        "OperationalError" in r.message or "no such table" in r.message
+        for r in warnings
+    ), caplog.text
 
 
 def test_a_label_lost_to_missing_patches_is_recorded_in_the_warning(tmp_path):

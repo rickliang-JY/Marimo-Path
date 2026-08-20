@@ -9,7 +9,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue.svg)
 ![marimo](https://img.shields.io/badge/marimo-%E2%89%A50.23-8B5FA8.svg)
-![tests](https://img.shields.io/badge/tests-276%20passed-brightgreen.svg)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -171,8 +170,18 @@ hescope ingest /path/to/slides -r && hescope list   # bulk register + inspect
 ### Verified environment
 
 The combination below was tested in this repository — `pytest` reports
-**276 passed, 1 skipped**, the skip being a permission-bit test that only holds
-on POSIX:
+**~940 passed, 17 skipped** (measured 2026-08-20; the exact passed count can
+shift by one between runs because one race-condition regression test is
+probabilistic by design — see its module docstring — so treat "~940" as
+"run it yourself", not a promise). Of the 17 skips: 15 need a real Chrome
+browser (`HESCOPE_BROWSER_TESTS=1`), 1 is a POSIX-only permission-bit check
+that cannot run on Windows, and 1 is that same race test on a run where the
+race did not reproduce. `pytest -rs` prints the live list. There is no CI in
+this repo — no `.github/`, nothing runs this automatically — which is also
+why there used to be a `tests-N passed` badge above: it went stale twice
+(measured at 276, then real counts moved to 909 and then here without
+anyone updating it) because a number that has to be hand-updated on every PR
+will drift, and a stale badge is worse than no badge.
 
 | Component | Version |
 | --- | --- |

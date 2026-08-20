@@ -21,11 +21,13 @@ DB-backed `db` the notebook bootstrapped.
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import re
 
 import pytest
 from PIL import Image
+from sqlalchemy import text
 
 from hescope.store.db import (
     INTERACTION_KINDS,
@@ -72,6 +74,35 @@ def test_trace_is_a_noop_in_db_free_mode_and_never_raises():
     ok = bootstrap_db("sqlite:///:memory:")
     # a bad keyword reaches InteractionRepo.record and must still be swallowed
     assert ok.trace("roi_submit", nonsense=1) is None
+
+
+def test_trace_failure_is_logged_not_silently_swallowed(tmp_path, caplog):
+    """"Never raises" (the contract above) used to also mean "never says
+    anything": a lost interactions row -- the exact automation-bias record
+    this table exists to keep -- left no trace anywhere, defeating its own
+    purpose without anyone finding out.
+
+    Triggers a REAL failure, not a mock: PRAGMA foreign_keys=ON (see
+    docs/DATABASE-DESIGN.md) makes an interactions.slide_id that does not
+    exist in slides raise an actual sqlalchemy.exc.IntegrityError. trace()
+    must still return None (documented contract) AND now log it.
+    """
+    ctx = bootstrap_db(f"sqlite:///{tmp_path / 'trace_fk.db'}")
+
+    # The actual swallow-and-return-None lives in InteractionRepo.record
+    # (hescope.store.db) -- trace()'s own try/except only ever sees an
+    # exception if something before that call fails, which this scenario
+    # does not exercise. Assert on the module that really emits the log.
+    with caplog.at_level(logging.WARNING, logger="hescope.store.db"):
+        row_id = ctx.trace("roi_submit", payload={"actor": "human"}, slide_id=999999)
+
+    assert row_id is None  # documented contract: never raises
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("roi_submit" in r.message for r in warnings), caplog.text
+    assert any(
+        "IntegrityError" in r.message or "FOREIGN KEY" in r.message
+        for r in warnings
+    ), caplog.text
 
 
 # --- the agent side: get_current_selection is a "selection view" -------------

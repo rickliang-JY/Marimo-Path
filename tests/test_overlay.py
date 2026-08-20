@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
-import numpy as np
-from PIL import Image
+import logging
+import sys
+import types
 
-from hescope.viewer.overlay import draw_navigator_markers, draw_rois
+import numpy as np
+import pytest
+from PIL import Image, ImageFont
+
+from hescope.viewer import overlay
+from hescope.viewer.overlay import (
+    _scale_bar_font_and_label,
+    draw_navigator_markers,
+    draw_rois,
+)
 from hescope.core.rois import ROI, ViewportState
 
 # Viewport: 400x300 px, downsample 1, centered on level-0 (500, 400)
@@ -126,3 +136,124 @@ def test_navigator_markers_circle_uses_bbox():
     # bbox (400,400)-(600,600) -> (40,40)-(60,60)
     assert red[40, 40] and red[60, 60]
     assert red.any()
+
+
+# ---------------------------------------------------------------------------
+# _scale_bar_font_and_label: two stacked, historically-swallowed defects.
+#
+# Before the fix this function was:
+#
+#   try:
+#       import matplotlib
+#       ttf = Path(matplotlib.__file__).parent / ...   # Path never imported
+#       ...
+#   except Exception:
+#       pass
+#   return ImageFont.load_default(), f"{um:g} um"
+#
+# In THIS environment (matplotlib not installed) it raised
+# ModuleNotFoundError: No module named 'matplotlib' on the `import` line.
+# Even with matplotlib installed it would have raised
+# NameError: name 'Path' is not defined on the next line (verified directly
+# by executing that exact snippet -- see the PR/session notes). Both are
+# swallowed by the bare `except Exception: pass`, so the function always
+# "successfully" returned the ASCII "um" fallback -- a function that returns
+# without error is not a signal that its content is right; only asserting on
+# the returned label catches this class of bug.
+# ---------------------------------------------------------------------------
+
+
+def _mask_is_tofu(font: "ImageFont.FreeTypeFont", ch: str) -> bool:
+    """True if ``font`` renders ``ch`` identically to a codepoint guaranteed
+    absent from every font (U+FFFE, a permanently-unassigned noncharacter) --
+    i.e. as the font's fallback ".notdef" glyph, a tofu box."""
+    absent = chr(0xFFFE)
+    a, b = np.array(font.getmask(ch)), np.array(font.getmask(absent))
+    return a.shape == b.shape and bool((a == b).all())
+
+
+def test_pil_default_font_cannot_render_micro_sign():
+    """Documents WHY the fallback label is ASCII "um", not "µm": PIL's own
+    bundled font (used by ImageFont.load_default()) has no MICRO SIGN glyph.
+    If a future Pillow release adds one, this pins the current known-false
+    assumption rather than letting the overlay module silently rely on a
+    property no test ever checked."""
+    assert _mask_is_tofu(ImageFont.load_default(size=14), "µ")
+
+
+def test_scale_bar_label_has_micro_sign_when_matplotlib_available():
+    """The happy path, exercised for real: hescope[fonts] (matplotlib) is
+    installed in this environment. Asserts CONTENT, not just a successful
+    return -- a NameError from the missing `Path` import, or matplotlib
+    being unimportable, would both have been silently swallowed into the
+    exact same "500 um" string the old code always produced."""
+    pytest.importorskip("matplotlib")
+    font, label = _scale_bar_font_and_label(500)
+    assert label == "500 µm"
+    assert "µ" in label
+    assert isinstance(font, ImageFont.FreeTypeFont)
+    # and the glyph is a REAL one, not another tofu box
+    assert not _mask_is_tofu(font, "µ")
+
+
+def test_scale_bar_label_falls_back_and_logs_when_matplotlib_missing(
+    monkeypatch, caplog
+):
+    """Simulates the exact environment this session found: matplotlib not
+    installed. `import matplotlib` raises ModuleNotFoundError -- forced here
+    via the standard sys.modules-None trick so the test does not depend on
+    whether the optional `fonts` extra happens to be installed. The fallback
+    must still happen (no crash) AND must be observable: a deliberate
+    degradation that never logs is indistinguishable from the swallowed bug
+    this test suite exists to prevent.
+    """
+    monkeypatch.setitem(sys.modules, "matplotlib", None)
+    with caplog.at_level(logging.DEBUG, logger=overlay.__name__):
+        font, label = _scale_bar_font_and_label(500)
+    assert label == "500 um"
+    assert "µ" not in label
+    assert any(
+        "matplotlib" in r.message and r.levelno == logging.DEBUG
+        for r in caplog.records
+    )
+
+
+def test_scale_bar_label_falls_back_and_logs_when_ttf_file_missing(
+    monkeypatch, tmp_path, caplog
+):
+    """matplotlib importable, but its bundled DejaVuSans.ttf is not where
+    expected (e.g. a stripped-down matplotlib install). Must degrade to the
+    ASCII label -- and say so -- rather than raise FileNotFoundError deep
+    inside ImageFont.truetype."""
+    fake_mpl = types.ModuleType("matplotlib")
+    fake_mpl.__file__ = str(tmp_path / "matplotlib" / "__init__.py")
+    monkeypatch.setitem(sys.modules, "matplotlib", fake_mpl)
+    # deliberately do NOT create mpl-data/fonts/ttf/DejaVuSans.ttf under tmp_path
+    with caplog.at_level(logging.WARNING, logger=overlay.__name__):
+        font, label = _scale_bar_font_and_label(500)
+    assert label == "500 um"
+    assert any(
+        "DejaVuSans" in r.message and r.levelno == logging.WARNING
+        for r in caplog.records
+    )
+
+
+def test_scale_bar_label_survives_unrelated_matplotlib_import_error(monkeypatch):
+    """A non-ModuleNotFoundError raised while importing matplotlib (e.g. a
+    real bug in some unrelated matplotlib submodule import hook) must NOT be
+    silently swallowed -- only "matplotlib is not installed" is a deliberate,
+    documented degradation. Anything else is a bug that should surface."""
+    class _BrokenImport(types.ModuleType):
+        pass
+
+    def _raise_on_import(name, *a, **k):
+        if name == "matplotlib":
+            raise RuntimeError("simulated unrelated import-time failure")
+        return real_import(name, *a, **k)
+
+    import builtins
+
+    real_import = builtins.__import__
+    monkeypatch.setattr(builtins, "__import__", _raise_on_import)
+    with pytest.raises(RuntimeError, match="simulated unrelated import-time failure"):
+        _scale_bar_font_and_label(500)

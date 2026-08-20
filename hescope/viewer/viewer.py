@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import math
 from dataclasses import dataclass, replace as dc_replace
 from typing import Any, Iterable, Literal
@@ -27,6 +28,8 @@ from PIL import Image, ImageDraw
 from ..agent.agent_bridge import magnification_for  # re-exported for app convenience
 from ..core.rois import ROI, ViewportState, viewport_transform
 from ..wsi.slides import SlideSource, best_level_for_downsample
+
+_LOG = logging.getLogger(__name__)
 
 __all__ = [
     "render_viewport",
@@ -439,7 +442,11 @@ class DBContext:
         Same contract as ``InteractionRepo.record``: never raises, and it is a
         no-op in DB-free mode, so a UI handler can call it without a
         ``try``/``except`` of its own. Tracing must never be able to break the
-        action it is tracing.
+        action it is tracing -- but a swallowed failure here used to leave no
+        trace of itself either, silently defeating the exact automation-bias
+        record this method exists to keep. Logged now, not just returned as
+        None, so the degradation is observable without every caller having
+        to check the return value.
         """
         if self.engine is None:
             return None
@@ -447,7 +454,11 @@ class DBContext:
             from ..store.db import InteractionRepo
 
             return InteractionRepo(self.engine).record(kind=kind, **fields)
-        except Exception:
+        except Exception as exc:
+            _LOG.warning(
+                "could not record interaction trace (kind=%r): %s: %s",
+                kind, type(exc).__name__, exc,
+            )
             return None
 
 

@@ -14,6 +14,7 @@ import hashlib
 import http.client
 import io
 import json
+import logging
 import threading
 from pathlib import Path
 
@@ -589,6 +590,39 @@ def test_stain_norm_without_a_target_is_a_noop(demo_source):
         demo_source, plan, display=DisplayParams(stain_norm=True), refs=refs
     )
     assert np.array_equal(np.asarray(plain), np.asarray(normed))
+
+
+def test_channel_fit_failure_degrades_and_logs_instead_of_failing_silently(
+    demo_source, monkeypatch, caplog
+):
+    """SlideRefs.fit is documented "Never raises": a failed per-channel fit
+    must not break registration. But _hed_channel_gray's OWN docstring (this
+    same module tree) measures what an UNPINNED fallback looks like on a
+    blank tile: std 31.4 vs 1.1 in context, up to 246/255 per-pixel
+    difference -- "convincing fake structure" from sensor noise. A silently
+    empty ``channel_lohi`` reproduces exactly that on every hematoxylin/eosin
+    tile of THIS slide, with nothing anywhere saying the pinned fit never
+    happened.
+
+    fit_channel_reference does not fail on a normal thumbnail (skimage is a
+    hard core dependency), so this injects the failure deliberately -- same
+    technique as test_overlay.py's "unrelated import error" test -- rather
+    than claim an organic repro that does not exist in this environment.
+    """
+    import hescope.viewer.adjust as adjust_mod
+
+    def _boom(img, channel):
+        raise RuntimeError(f"simulated rgb2hed failure for {channel}")
+
+    monkeypatch.setattr(adjust_mod, "fit_channel_reference", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="hescope.viewer.tileserver"):
+        refs = SlideRefs.fit(demo_source)
+
+    assert refs.channel_lohi == {}  # documented contract: never raises
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("hematoxylin" in r.message for r in warnings), caplog.text
+    assert any("simulated rgb2hed failure" in r.message for r in warnings), caplog.text
 
 
 def test_encode_jpeg_is_a_jpeg(demo_source):

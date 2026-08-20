@@ -344,6 +344,7 @@ def _cmd_doctor(engine, *, verbose: bool = False) -> int:
 
         # The two references that carry no FK, checked by hand.
         dangling = {}
+        unchecked: list[str] = []
         for label, q in (
             ("interactions.roi_id", "SELECT count(*) FROM interactions i LEFT JOIN rois r "
                                     "ON r.id=i.roi_id WHERE i.roi_id IS NOT NULL AND r.id IS NULL"),
@@ -352,12 +353,19 @@ def _cmd_doctor(engine, *, verbose: bool = False) -> int:
         ):
             try:
                 n = conn.execute(_sa.text(q)).scalar() or 0
-            except Exception:
+            except Exception as exc:
+                # A doctor tool that quietly drops a check it could not run
+                # defeats the point of running `doctor` at all -- say so
+                # instead of just omitting the label from the report.
+                unchecked.append(f"{label} ({exc})")
                 continue
             dangling[label] = n
             if n:
                 problems.append(f"{n} dangling {label}")
         print("references   " + ", ".join(f"{k}={v}" for k, v in dangling.items()))
+        if unchecked:
+            print("             could not check: " + "; ".join(unchecked))
+            problems.append(f"{len(unchecked)} reference check(s) could not run")
 
         if url.get_backend_name() == "sqlite":
             try:

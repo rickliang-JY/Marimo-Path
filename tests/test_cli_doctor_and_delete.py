@@ -61,6 +61,31 @@ def test_doctor_reports_the_file_the_pragmas_and_the_counts(db, capsys):
     assert rc in (0, 1)
 
 
+def test_doctor_says_when_a_reference_check_cannot_run(db, capsys):
+    """The dangling-reference checks used to `except Exception: continue`:
+    if a query failed, its label just vanished from the "references" line
+    with no explanation anywhere in the report -- exactly the failure mode
+    a tool whose entire job is "tell the user what is wrong" must not have.
+
+    Reproduces a REAL failure, not a mock: drop the `rois` table so the
+    `rois.slide_id` dangling-reference query hits an actual
+    sqlalchemy.exc.OperationalError (`no such table: rois`).
+    """
+    url, engine, _sid, _ids = db
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE rois"))
+
+    rc = main(["--db", url, "doctor"])
+    out = capsys.readouterr().out
+
+    assert "could not check" in out
+    assert "rois.slide_id" in out
+    assert "no such table" in out or "OperationalError" in out
+    assert isinstance(rc, int)
+
+
 def test_doctor_says_when_the_file_does_not_exist(tmp_path, capsys):
     """The question that prompted this: a URL that looks fine and a file that
     is not there."""

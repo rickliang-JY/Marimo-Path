@@ -11,6 +11,7 @@ plus a JSON sidecar under ``models_dir/<name>/``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -20,6 +21,8 @@ import numpy as np
 from PIL import Image
 
 from ..store.db import AgentRunRepo, ROIRepo
+
+_LOG = logging.getLogger(__name__)
 
 MODEL_FILENAME = "model.joblib"
 META_FILENAME = "meta.json"
@@ -382,8 +385,15 @@ def train_from_annotations(
             output_text=summary,
             model=name,
         )
-    except Exception:
-        pass  # DB hiccup must never fail training
+    except Exception as exc:
+        # DB hiccup must never fail training (the model files are already
+        # durably written above) -- but a lost agent_runs row is a lost
+        # provenance record (the harness's "evidence" for this training
+        # run), so the degradation must be observable, not silent.
+        _LOG.warning(
+            "could not record agent_runs provenance for train_model %r: "
+            "%s: %s", name, type(exc).__name__, exc,
+        )
 
     return info
 

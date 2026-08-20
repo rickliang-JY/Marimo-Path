@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import numpy as np
 import pytest
 from PIL import Image
+from sqlalchemy import text
 
 from hescope.agent.agent_bridge import (
     make_annotate_roi_tool,
@@ -83,6 +85,41 @@ def test_annotate_roi_partial_update(db, slide_id):
     out = json.loads(tool(rid, notes="edited"))
     assert out["label"] == "keep"  # None left unchanged
     assert out["notes"] == "edited"
+
+
+def test_annotate_roi_interaction_write_failure_is_logged_not_swallowed(
+    db, slide_id, caplog
+):
+    """`_record_interaction` (agent_bridge.py) is documented to "swallow
+    everything" so a trace write can never break the tool call it traces --
+    but before this test the swallow was total silence. Reproduces a REAL
+    failure (drop `interactions` out from under the live engine, a genuine
+    sqlalchemy.exc.OperationalError) rather than a mock. annotate_roi must
+    still succeed (the documented contract) AND the lost trace row must now
+    be logged with the real exception text.
+    """
+    repo = ROIRepo(db.engine)
+    rid = repo.add(slide_id, _rect(), label="", notes="orig")
+    with db.engine.begin() as conn:
+        conn.execute(text("DROP TABLE interactions"))
+
+    # The actual swallow-and-return-None lives in InteractionRepo.record
+    # (hescope.store.db); _record_interaction's own try/except only sees an
+    # exception if something before that call fails, which this scenario
+    # does not exercise. Assert on the module that really emits the log.
+    tool = make_annotate_roi_tool(lambda: db)
+    with caplog.at_level(logging.WARNING, logger="hescope.store.db"):
+        out = json.loads(tool(rid, label="tumor"))
+
+    assert out["label"] == "tumor"  # the annotate itself is unaffected
+    assert ROIRepo(db.engine).get(rid)["label"] == "tumor"
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("label_set" in r.message for r in warnings), caplog.text
+    assert any(
+        "OperationalError" in r.message or "no such table" in r.message
+        for r in warnings
+    ), caplog.text
 
 
 def test_annotate_roi_missing_and_invalid(db, slide_id):

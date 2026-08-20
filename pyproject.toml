@@ -53,6 +53,19 @@ dicom = ["wsidicom>=0.20"]
 # Weakly-supervised training (hescope.ml) + torch/FM embedding backends
 # (hescope.features.extract_embedding, hescope.embeddings).
 ml = ["scikit-learn", "joblib", "torch", "torchvision", "timm"]
+# A proper MICRO SIGN (µ) glyph for the viewport scale bar
+# (hescope.viewer.overlay._scale_bar_font_and_label): neither of PIL's own
+# fonts has one (verified: PIL.ImageFont.load_default()'s bundled "Aileron"
+# renders µ as the same tofu-box bitmap as a guaranteed-absent codepoint),
+# and matplotlib's bundled DejaVuSans.ttf is the cheapest font we already
+# know how to locate that does. Deliberately optional and deliberately not
+# folded into core: measured against this environment it resolves to 8 new
+# packages (contourpy, cycler, fonttools, kiwisolver, matplotlib, pyparsing,
+# python-dateutil, six) -- `uv pip install --dry-run matplotlib` -- with zero
+# uninstalls and zero downgrades, for what is otherwise a single font file.
+# Without this extra, the scale bar falls back to the ASCII-safe "um" label
+# (logged, not silent -- see that function's docstring).
+fonts = ["matplotlib"]
 test = ["pytest"]
 
 [project.scripts]
