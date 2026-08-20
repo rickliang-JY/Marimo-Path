@@ -11,8 +11,20 @@ from datetime import datetime
 import pytest
 import sqlalchemy as sa
 
-from hescope.store.db import ROI, Slide, SlideRepo, get_engine, init_db
+from hescope.store.db import (
+    ROI,
+    LayerRepo,
+    MeasurementRepo,
+    ROIRepo,
+    SelectionResolutionRepo,
+    Slide,
+    SlideRepo,
+    geom_key,
+    get_engine,
+    init_db,
+)
 from hescope.core.identity import content_key
+from hescope.core.rois import ROI as ROIGeometry
 from hescope.store.migrations import (
     MIGRATIONS,
     SCHEMA_VERSION,
@@ -22,6 +34,7 @@ from hescope.store.migrations import (
     current_version,
     migrate,
     plan_migration_2,
+    plan_migration_4,
     pending,
 )
 
@@ -740,9 +753,9 @@ def test_migrate_dry_run_still_touches_nothing_and_does_not_call_init_db(tmp_pat
 # =============================================================================
 
 
-def test_schema_version_is_3_for_phase_2():
-    assert SCHEMA_VERSION == 3
-    assert [m.version for m in MIGRATIONS] == [1, 2, 3]
+def test_schema_version_is_4_for_l5_measurement_layers():
+    assert SCHEMA_VERSION == 4
+    assert [m.version for m in MIGRATIONS] == [1, 2, 3, 4]
 
 
 def test_migration_3_gives_tcga_files_slide_id_a_real_foreign_key(tmp_path):
@@ -1213,3 +1226,552 @@ def test_migration_3_preserves_a_column_outside_the_original_hardcoded_list(tmp_
             sa.text("SELECT future_note FROM tcga_files WHERE file_id='f-extra'")
         ).scalar_one()
     assert value == "do not lose me"
+
+
+# =============================================================================
+# Migration 4: L5 measurement layers (design doc §6.4 / §6.5), and Phase 0's
+# remaining three columns (measurements.mpp_effective, rois.geom_key,
+# rois.created_by -- docs/DATABASE-DESIGN.md L3)
+# =============================================================================
+
+
+def _legacy_roi_at(
+    engine, slide_id: int, kind: str, points: list[list[float]], *, created_by=None
+) -> int:
+    """A ``rois`` row the way a database written BEFORE migration 4 would
+    have it -- ``geom_key``/``created_by`` NULL going in, bypassing
+    ``ROIRepo.add`` -- with caller-chosen geometry (rather than
+    ``_legacy_roi``'s fixed bbox-derived rect) so duplicate-geometry pairs
+    can be constructed on purpose."""
+    import json as _json
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    bbox = [min(xs), min(ys), max(xs), max(ys)]
+    with sa.orm.Session(engine) as s:
+        roi = ROI(
+            slide_id=slide_id,
+            kind=kind,
+            points_json=_json.dumps(points),
+            bbox_json=_json.dumps(bbox),
+            created_by=created_by,
+        )
+        s.add(roi)
+        s.commit()
+        return roi.id
+
+
+def test_migration_4_backfills_geom_key_matching_the_source_geometry(tmp_path):
+    """R-3: geom_key must equal the SAME hash ``hescope.store.db.geom_key``
+    computes from the row's own (pre-migration) kind/points_json -- compared
+    here against an independent call to that function, not against whatever
+    the migration happened to write."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    points = [[12.4, 30.6], [112.0, 230.0]]
+    roi_id = _legacy_roi_at(engine, slide_id, "rect", points)
+
+    migrate(engine)
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text("SELECT geom_key FROM rois WHERE id=:id"), {"id": roi_id}
+        ).one()
+    expected = geom_key("rect", [(p[0], p[1]) for p in points])
+    assert row.geom_key == expected
+
+
+def test_migration_4_backfills_created_by_to_user_when_null(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    roi_id = _legacy_roi_at(engine, slide_id, "rect", [[0, 0], [10, 10]], created_by=None)
+
+    migrate(engine)
+
+    with engine.connect() as conn:
+        value = conn.execute(
+            sa.text("SELECT created_by FROM rois WHERE id=:id"), {"id": roi_id}
+        ).scalar_one()
+    assert value == "user"
+
+
+def test_migration_4_leaves_an_already_set_created_by_alone(tmp_path):
+    """R-3: source value 'agent' -> target value 'agent', unchanged -- the
+    backfill must not clobber a value some other write path already set."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    roi_id = _legacy_roi_at(
+        engine, slide_id, "rect", [[0, 0], [10, 10]], created_by="agent"
+    )
+
+    migrate(engine)
+
+    with engine.connect() as conn:
+        value = conn.execute(
+            sa.text("SELECT created_by FROM rois WHERE id=:id"), {"id": roi_id}
+        ).scalar_one()
+    assert value == "agent"
+
+
+def test_migration_4_reports_duplicate_geom_key_groups_without_merging(tmp_path):
+    """Two ROIs on the SAME slide with IDENTICAL geometry: this migration
+    must not merge them (deciding which survives is a separate, consented
+    step -- see the module-level migration-4 docstring) and must not crash
+    on a same-key pair even though DATABASE-DESIGN.md's prototype DDL is
+    UNIQUE(slide_id, geom_key). Both rows keep their own row and BOTH get
+    the (identical) computed geom_key -- 'report, do not silently drop'."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    points = [[5, 5], [50, 50]]
+    roi1 = _legacy_roi_at(engine, slide_id, "rect", points)
+    roi2 = _legacy_roi_at(engine, slide_id, "rect", [list(p) for p in points])
+
+    report = migrate(engine)
+
+    assert report.error is None
+    with engine.connect() as conn:
+        rows = {
+            r.id: r.geom_key
+            for r in conn.execute(
+                sa.text("SELECT id, geom_key FROM rois")
+            ).all()
+        }
+    assert rows[roi1] is not None and rows[roi1] == rows[roi2]
+    # additive, not destructive: both rows still exist
+    assert set(rows) == {roi1, roi2}
+
+
+def test_plan_migration_4_matches_what_migration_4_actually_writes(tmp_path):
+    """Shared-computation guarantee (see :class:`_RoiBackfill`'s docstring):
+    the dry-run preview's counts cannot drift from what the real migration
+    does, including the duplicate-group count."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    _legacy_roi_at(engine, slide_id, "rect", [[0, 0], [1, 1]], created_by="agent")
+    _legacy_roi_at(engine, slide_id, "rect", [[9, 9], [10, 10]], created_by=None)
+    dup_points = [[3, 3], [4, 4]]
+    # both duplicate rows also have created_by=None (_legacy_roi_at's default),
+    # so 3 of the 4 rows (everything but the 'agent' one) need the backfill.
+    _legacy_roi_at(engine, slide_id, "polygon", dup_points)
+    _legacy_roi_at(engine, slide_id, "polygon", [list(p) for p in dup_points])
+
+    with engine.connect() as conn:
+        preview = plan_migration_4(conn)
+
+    migrate(engine)
+
+    with engine.connect() as conn:
+        actual_created_by_backfilled = conn.execute(
+            sa.text(
+                "SELECT COUNT(*) FROM rois WHERE created_by='user'"
+            )
+        ).scalar_one()
+        actual_rois = conn.execute(sa.text("SELECT COUNT(*) FROM rois")).scalar_one()
+
+    assert preview["rois"] == actual_rois == 4
+    assert preview["created_by_backfilled"] == actual_created_by_backfilled == 3
+    assert preview["duplicate_geom_key_groups"] == 1
+    assert preview["duplicate_geom_key_rois"] == 2
+
+
+def test_plan_migration_4_on_an_empty_database_is_all_zero(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_empty.db")
+    with engine.connect() as conn:
+        preview = plan_migration_4(conn)
+    assert preview == {
+        "rois": 0,
+        "created_by_backfilled": 0,
+        "duplicate_geom_key_groups": 0,
+        "duplicate_geom_key_rois": 0,
+    }
+
+
+def test_plan_migration_4_does_not_crash_when_rois_predates_created_by(tmp_path):
+    """Seen to fail before the fix:
+
+        sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such
+        column: created_by
+        [SQL: SELECT id, slide_id, kind, points_json, created_by FROM rois]
+
+    Reproduced by running ``plan_migration_4`` against a COPY of the REAL
+    shipped ``data/hescope.db`` rather than one of this test file's own
+    fixtures: every fixture here calls ``init_db()`` (or ``migrate()``,
+    which calls it) before touching migration 4, so ``rois.created_by``
+    already exists by the time any OTHER test in this file reaches this
+    code path -- the real database's own bootstrap runs ``init_db`` too
+    (through the app, at every slide open), but ``migrate()`` itself has
+    never run against it, so it sits exactly here: migrations 1-3's columns
+    present, migration 4's two new ones absent. A hand-built table
+    reproduces that shape without touching the real file (R-1).
+    """
+    db_path = tmp_path / "pre_migration_4.db"
+    con = sqlite3.connect(db_path)
+    con.executescript(
+        """
+        CREATE TABLE slides (
+            id INTEGER PRIMARY KEY, source_kind VARCHAR(32), name VARCHAR(512),
+            path VARCHAR(1024) UNIQUE, width INTEGER, height INTEGER,
+            mpp FLOAT, extra_json TEXT, created_at DATETIME
+        );
+        CREATE TABLE rois (
+            id INTEGER PRIMARY KEY, slide_id INTEGER, kind VARCHAR(32),
+            points_json TEXT, bbox_json TEXT, label VARCHAR(512), notes TEXT,
+            patch_path VARCHAR(1024), stats_json TEXT, magnification FLOAT,
+            created_at DATETIME,
+            bbox_x0 FLOAT, bbox_y0 FLOAT, bbox_x1 FLOAT, bbox_y1 FLOAT
+        );
+        """  # migrations 1-3's shape; migration 4's geom_key/created_by absent
+    )
+    con.execute(
+        "INSERT INTO slides (id, source_kind, name, path, width, height, "
+        "extra_json, created_at) VALUES (1, 'local', 's', 'x.svs', 10, 10, "
+        "'{}', '2024-01-01 00:00:00')"
+    )
+    con.execute(
+        "INSERT INTO rois (id, slide_id, kind, points_json, bbox_json, "
+        "created_at) VALUES (1, 1, 'rect', '[[0,0],[10,10]]', '[0,0,10,10]', "
+        "'2024-01-01 00:00:00')"
+    )
+    con.commit()
+    con.close()
+
+    engine = get_engine(f"sqlite:///{db_path}", read_only=True)
+    with engine.connect() as conn:
+        preview = plan_migration_4(conn)  # must not raise
+
+    assert preview["rois"] == 1
+    assert preview["created_by_backfilled"] == 1, (
+        "the column does not exist yet, so every row needs the backfill -- "
+        "computing this must not crash, not merely avoid crashing by "
+        "reporting zero"
+    )
+
+    # and the SAME database migrates cleanly for real (migrate() calls
+    # init_db() first, which adds the column before _migration_4_apply runs).
+    real_report = migrate(get_engine(f"sqlite:///{db_path}"))
+    assert real_report.error is None
+
+
+def test_migration_4_is_idempotent(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    roi_id = _legacy_roi_at(engine, slide_id, "rect", [[0, 0], [10, 10]])
+
+    migrate(engine)
+    with engine.connect() as conn:
+        first = conn.execute(
+            sa.text("SELECT geom_key, created_by FROM rois WHERE id=:id"), {"id": roi_id}
+        ).one()
+
+    second = migrate(engine)  # nothing pending; must not re-run migration 4
+    with engine.connect() as conn:
+        second_row = conn.execute(
+            sa.text("SELECT geom_key, created_by FROM rois WHERE id=:id"), {"id": roi_id}
+        ).one()
+
+    assert second.applied == []
+    assert (second_row.geom_key, second_row.created_by) == (first.geom_key, first.created_by)
+
+
+# --- layers: the DEFAULT 'unregistered' guardrail (design doc §6.2 II) -----
+
+
+def test_layers_registration_defaults_to_unregistered_not_identity(tmp_path):
+    """Pins design doc §6.2's central guardrail at the DATABASE level: a raw
+    INSERT that never even mentions the ``registration`` column -- not
+    ``LayerRepo.add``, not any Python default that a future edit could
+    accidentally change to something falsely reassuring -- must still land
+    as 'unregistered', never an identity/aligned default. This is the exact
+    failure design doc §6.4 calls "the next 29.4x": a layer silently treated
+    as aligned when no one has ever verified that.
+    """
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_layers.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO layers "
+                "(slide_id, kind, source, frame, store_uri, n_entities, created_at) "
+                "VALUES (:sid, 'visium', 'space_ranger', 'fullres_capture', "
+                "'zarr:///x', 500, :now)"
+            ),
+            {"sid": slide_id, "now": datetime(2024, 1, 1)},
+        )
+
+    with engine.connect() as conn:
+        value = conn.execute(
+            sa.text("SELECT registration FROM layers WHERE slide_id=:sid"),
+            {"sid": slide_id},
+        ).scalar_one()
+    assert value == "unregistered"
+
+
+def test_layers_registration_column_rejects_an_explicit_null(tmp_path):
+    """The guardrail is NOT NULL, not merely "usually has a default" -- an
+    explicit NULL (a caller trying to bypass the default) must be rejected
+    by the schema itself, not silently accepted as 'unknown-and-untracked'."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_layers_null.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+
+    with pytest.raises(sa.exc.IntegrityError, match="registration"):
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO layers "
+                    "(slide_id, kind, source, frame, store_uri, n_entities, "
+                    "created_at, registration) "
+                    "VALUES (:sid, 'visium', 'space_ranger', 'fullres_capture', "
+                    "'zarr:///x', 500, :now, NULL)"
+                ),
+                {"sid": slide_id, "now": datetime(2024, 1, 1)},
+            )
+
+
+def test_layer_repo_add_omitting_registration_gets_the_db_default(tmp_path):
+    """Same guardrail, through the application API: ``LayerRepo.add`` with no
+    ``registration`` argument must produce the identical 'unregistered'
+    result as the raw-SQL test above -- the app layer must not quietly paper
+    over (or diverge from) the DB-level guarantee."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_layers2.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+
+    from hescope.store.db import LayerRepo as _LayerRepo
+
+    layer_id = _LayerRepo(engine).add(
+        slide_id=slide_id, kind="visium", source="space_ranger",
+        frame="fullres_capture", store_uri="zarr:///x", n_entities=500,
+    )
+    layer = _LayerRepo(engine).get(layer_id)
+    assert layer["registration"] == "unregistered"
+
+
+def test_layers_unique_index_rejects_a_duplicate_identity(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_layers3.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+    repo = LayerRepo(engine)
+    repo.add(
+        slide_id=slide_id, kind="visium", source="space_ranger",
+        external_id="run-1", frame="fullres_capture", store_uri="zarr:///x",
+        n_entities=500,
+    )
+    with pytest.raises(sa.exc.IntegrityError):
+        repo.add(
+            slide_id=slide_id, kind="visium", source="space_ranger",
+            external_id="run-1", frame="fullres_capture", store_uri="zarr:///y",
+            n_entities=999,
+        )
+
+
+def test_layer_deleted_when_its_slide_is_deleted(tmp_path):
+    """ON DELETE CASCADE on layers.slide_id (design doc §6.4's DDL)."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_layers4.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+    layer_id = LayerRepo(engine).add(
+        slide_id=slide_id, kind="visium", source="space_ranger",
+        frame="fullres_capture", store_uri="zarr:///x", n_entities=500,
+    )
+
+    SlideRepo(engine).delete(slide_id)
+
+    assert LayerRepo(engine).get(layer_id) is None
+
+
+# --- measurements: mpp_effective is the comparability key (design doc §1) --
+
+
+def test_measurements_mpp_effective_makes_incomparable_rows_excludable(tmp_path):
+    """The exact query docs/DATABASE-DESIGN.md L3 motivates ``mpp_effective``
+    with: two measurements of the SAME name on the SAME annotation, one at a
+    comparable mpp and one 2.7x off, and a WHERE clause that keeps only the
+    comparable one -- turning the R07-2 trap into SQL instead of tribal
+    knowledge."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_meas.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+    roi_id = ROIRepo(engine).add(slide_id, ROIGeometry("rect", ((0, 0), (100, 100))))
+    mrepo = MeasurementRepo(engine)
+    mrepo.record(
+        annotation_id=roi_id, name="tissue_fraction", method="roi_stats@v2",
+        value=0.62, unit="", mpp_effective=0.355,
+    )
+    mrepo.record(
+        annotation_id=roi_id, name="tissue_fraction", method="roi_stats@v2",
+        value=0.90, unit="", mpp_effective=0.971,
+    )
+
+    with engine.connect() as conn:
+        comparable = conn.execute(
+            sa.text(
+                "SELECT value FROM measurements "
+                "WHERE annotation_id=:aid AND name='tissue_fraction' "
+                "AND mpp_effective BETWEEN 0.30 AND 0.45"
+            ),
+            {"aid": roi_id},
+        ).scalars().all()
+    assert comparable == [0.62]
+    # re-measuring appended, it did not overwrite: both rows still exist
+    assert len(mrepo.for_annotation(roi_id)) == 2
+
+
+def test_measurement_deleted_when_its_annotation_is_deleted(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_meas2.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+    roi_id = ROIRepo(engine).add(slide_id, ROIGeometry("rect", ((0, 0), (100, 100))))
+    m_id = MeasurementRepo(engine).record(
+        annotation_id=roi_id, name="tissue_fraction", method="roi_stats@v2", value=0.5,
+    )
+
+    assert ROIRepo(engine).delete(roi_id) is True
+
+    with engine.connect() as conn:
+        remaining = conn.execute(
+            sa.text("SELECT COUNT(*) FROM measurements WHERE id=:id"), {"id": m_id}
+        ).scalar_one()
+    assert remaining == 0
+
+
+# --- rois.geom_key / created_by written by ROIRepo.add ---------------------
+
+
+def test_roi_repo_add_writes_a_geom_key_matching_the_stored_geometry(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_roiadd.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    roi = ROIGeometry("polygon", ((1.4, 2.6), (10.0, 3.0), (5.0, 9.0)))
+
+    roi_id = ROIRepo(engine).add(slide_id, roi)
+
+    stored = ROIRepo(engine).get(roi_id)
+    assert stored["geom_key"] == geom_key("polygon", roi.points)
+    assert stored["created_by"] == "user"
+
+
+def test_roi_repo_add_records_an_agent_authored_roi(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_roiadd2.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+
+    roi_id = ROIRepo(engine).add(
+        slide_id, ROIGeometry("rect", ((0, 0), (5, 5))), created_by="agent",
+    )
+
+    assert ROIRepo(engine).get(roi_id)["created_by"] == "agent"
+
+
+# --- selection_resolutions: records a decision, upserts on re-resolve ------
+
+
+def test_selection_resolution_repo_records_and_reads_back(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_sel.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+    roi_id = ROIRepo(engine).add(slide_id, ROIGeometry("rect", ((0, 0), (100, 100))))
+    layer_id = LayerRepo(engine).add(
+        slide_id=slide_id, kind="visium", source="space_ranger",
+        frame="fullres_capture", store_uri="zarr:///x", n_entities=500,
+    )
+    srepo = SelectionResolutionRepo(engine)
+
+    srepo.record(
+        annotation_id=roi_id, layer_id=layer_id, layer_version=1,
+        n_selected=42, index_digest="abc123",
+    )
+
+    got = srepo.get(roi_id, layer_id, 1)
+    assert got["n_selected"] == 42
+    assert got["index_digest"] == "abc123"
+
+
+def test_selection_resolution_repo_upserts_the_same_layer_version(tmp_path):
+    """Re-resolving the SAME (annotation, layer, layer_version) overwrites --
+    it must not accumulate duplicate rows for a re-run at the same version."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_sel2.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+    roi_id = ROIRepo(engine).add(slide_id, ROIGeometry("rect", ((0, 0), (100, 100))))
+    layer_id = LayerRepo(engine).add(
+        slide_id=slide_id, kind="visium", source="space_ranger",
+        frame="fullres_capture", store_uri="zarr:///x", n_entities=500,
+    )
+    srepo = SelectionResolutionRepo(engine)
+    srepo.record(annotation_id=roi_id, layer_id=layer_id, layer_version=1,
+                 n_selected=42, index_digest="abc123")
+
+    srepo.record(annotation_id=roi_id, layer_id=layer_id, layer_version=1,
+                 n_selected=41, index_digest="def456")
+
+    assert srepo.get(roi_id, layer_id, 1)["n_selected"] == 41
+    assert len(srepo.for_annotation(roi_id)) == 1
+
+
+def test_selection_resolution_repo_keeps_a_new_layer_version_as_a_separate_row(tmp_path):
+    """A NEW layer_version (the layer's data changed) gets its OWN row rather
+    than overwriting the old one -- this is the drift-detection mechanism
+    design doc §6.5/§12.6 describe: comparing the two rows is how a re-open
+    six months later can say the hit set changed, instead of staying silent."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_sel3.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+    roi_id = ROIRepo(engine).add(slide_id, ROIGeometry("rect", ((0, 0), (100, 100))))
+    layer_id = LayerRepo(engine).add(
+        slide_id=slide_id, kind="visium", source="space_ranger",
+        frame="fullres_capture", store_uri="zarr:///x", n_entities=500,
+    )
+    srepo = SelectionResolutionRepo(engine)
+    srepo.record(annotation_id=roi_id, layer_id=layer_id, layer_version=1,
+                 n_selected=42, index_digest="abc123")
+
+    srepo.record(annotation_id=roi_id, layer_id=layer_id, layer_version=2,
+                 n_selected=39, index_digest="zzz999")
+
+    assert len(srepo.for_annotation(roi_id)) == 2
+    assert srepo.get(roi_id, layer_id, 1)["n_selected"] == 42
+    assert srepo.get(roi_id, layer_id, 2)["n_selected"] == 39
+
+
+def test_selection_resolution_deleted_when_its_layer_is_deleted(tmp_path):
+    """ON DELETE CASCADE on selection_resolutions.layer_id."""
+    engine = get_engine(f"sqlite:///{tmp_path}/mig4_sel4.db")
+    init_db(engine)
+    slide_id = _legacy_slide(engine, path=str(tmp_path / "x.svs"), created_at=datetime(2024, 1, 1))
+    migrate(engine)
+    roi_id = ROIRepo(engine).add(slide_id, ROIGeometry("rect", ((0, 0), (100, 100))))
+    layer_id = LayerRepo(engine).add(
+        slide_id=slide_id, kind="visium", source="space_ranger",
+        frame="fullres_capture", store_uri="zarr:///x", n_entities=500,
+    )
+    SelectionResolutionRepo(engine).record(
+        annotation_id=roi_id, layer_id=layer_id, layer_version=1,
+        n_selected=1, index_digest="x",
+    )
+
+    SlideRepo(engine).delete(slide_id)  # cascades slides -> layers -> selection_resolutions
+
+    with engine.connect() as conn:
+        remaining = conn.execute(
+            sa.text("SELECT COUNT(*) FROM selection_resolutions")
+        ).scalar_one()
+    assert remaining == 0

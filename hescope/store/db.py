@@ -9,6 +9,7 @@ any SQLAlchemy URL works (postgres://, mysql+pymysql://, ...).
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -16,7 +17,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Iterator, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal, NamedTuple
 
 import sqlalchemy as sa
 from sqlalchemy import ForeignKey, Index, String, Text, event, select
@@ -259,6 +260,41 @@ def normalize_slide_path(path: str | Path) -> str:
     return resolved
 
 
+def geom_key(kind: str, points: "Iterable[tuple[float, float]]") -> str:
+    """Content identity for one ROI's geometry (``docs/DATABASE-DESIGN.md``
+    L3: ``annotations.geom_key`` -- our table stays ``rois``, R-4).
+
+    ``sha256`` of ``kind`` plus every point rounded to the nearest level-0
+    pixel. Two ROIs that are the SAME shape at the SAME place -- drawn
+    twice, imported twice, or a GeoJSON re-import of this project's own
+    export -- collide on this key; two that merely overlap do not. Rounding
+    (rather than hashing the raw floats) is deliberate: geometry round-trips
+    through ``points_json`` and JSON floats, so the identical on-screen shape
+    saved by two different code paths can differ in the 1e-10 digits and
+    would otherwise never match.
+
+    The single writer: :meth:`ROIRepo.add` computes this for every new row,
+    and migration 4's backfill (``hescope.store.migrations._migration_4_apply``)
+    imports THIS function (locally, the same way that module already imports
+    :func:`normalize_slide_path` -- see its module docstring on why a
+    migration does not re-implement logic ``hescope.store.db`` already owns)
+    rather than re-deriving the hash, so a row written by ``ROIRepo.add`` and
+    an identical one recovered by the backfill are guaranteed to collide, not
+    merely intended to.
+
+    Not enforced as a UNIQUE constraint anywhere in this module: the live
+    database already carries duplicate-geometry ROI pairs
+    (``docs/DATABASE-DESIGN.md`` §5 step 5 -- "report the 2 duplicate groups
+    rather than silently dropping them"), and deciding which of a duplicate
+    pair survives is a separate, consented step -- the same reasoning
+    migration 2's slide-identity backfill already applies to duplicate slide
+    content (see ``_conflicting_identities`` in ``hescope.store.migrations``).
+    """
+    rounded = [[round(float(x)), round(float(y))] for x, y in points]
+    payload = json.dumps([kind, rounded], separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def plan_init_db(engine: sa.Engine, conn: sa.Connection | None = None) -> dict:
     """What :func:`init_db` WOULD do, computed without executing anything.
 
@@ -486,9 +522,137 @@ class ROI(Base):
     bbox_y0: Mapped[float | None] = mapped_column(nullable=True)
     bbox_x1: Mapped[float | None] = mapped_column(nullable=True)
     bbox_y1: Mapped[float | None] = mapped_column(nullable=True)
+    # Phase 0's remaining two `rois` columns (docs/DATABASE-DESIGN.md L3),
+    # added by migration 4. Nullable at the DB level -- same convention as
+    # `identity_scheme`/`identity_key` above: a column added to an EXISTING
+    # table via the additive ALTER path (see `plan_init_db`'s "added without
+    # NOT NULL on purpose") cannot itself carry a NOT NULL constraint, so
+    # "always has a value" is enforced by the single writer (ROIRepo.add /
+    # migration 4's backfill), not by the schema. `geom_key` is deliberately
+    # NOT declared UNIQUE here even though DATABASE-DESIGN.md's prototype
+    # DDL has `UNIQUE (slide_id, geom_key)` -- see :func:`geom_key`'s
+    # docstring for why (2 duplicate-geometry groups already live in the
+    # shipped database; merging them is a separate, consented step, out of
+    # this migration's scope).
+    geom_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(16), nullable=True)  # 'user' | 'agent' | 'import'
 
     slide: Mapped[Slide] = relationship(back_populates="rois")
     agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="roi")
+    measurements: Mapped[list["Measurement"]] = relationship(
+        back_populates="annotation", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class Measurement(Base):
+    """One computed number about one ROI (``docs/DATABASE-DESIGN.md`` L3).
+
+    Re-measuring APPENDS rather than overwriting, so a metric has a history
+    -- there is no UPDATE path here, only `record`. ``mpp_effective`` is the
+    comparability key (design doc §1 / §6.3's judged instance): it is what
+    lets "rows measured at incompatible resolutions" become a ``WHERE``
+    clause instead of tribal knowledge (the R07-2 trap).
+    """
+
+    __tablename__ = "measurements"
+    __table_args__ = (Index("ix_measurements_annotation", "annotation_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    annotation_id: Mapped[int] = mapped_column(
+        ForeignKey("rois.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(String(128))  # 'tissue_fraction' | 'hematoxylin_mean' | ...
+    value: Mapped[float | None] = mapped_column(nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(32), nullable=True)  # '' | 'um' | 'mm2' | '1/mm2'
+    method: Mapped[str] = mapped_column(String(128))  # 'roi_stats@v2' | 'macenko' | a model id
+    mpp_effective: Mapped[float | None] = mapped_column(nullable=True)
+    params_json: Mapped[str] = mapped_column(Text, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+    annotation: Mapped[ROI] = relationship(back_populates="measurements")
+
+
+class Layer(Base):
+    """One measurement layer on one slide (design doc §6.4): what makes a
+    new modality (Visium, Xenium, mIF, IMC, an embedding projection, ...) an
+    inserted ROW rather than a new table -- ``kind`` names the modality, the
+    DDL never changes.
+
+    Entity coordinates and expression matrices are NOT columns here -- they
+    live in zarr, at ``store_uri`` (design doc §6.2 invariant III: "reads
+    from zarr, DB only holds the manifest, provenance, and decisions").
+    """
+
+    __tablename__ = "layers"
+    __table_args__ = (
+        Index("ix_layers_slide", "slide_id"),
+        # Mirrors design doc §6.4's literal DDL -- SQLite treats every NULL
+        # `external_id` as distinct, so this does not by itself forbid two
+        # rows with the same (slide_id, kind, source) and both NULL
+        # external_id; a modality without an external id supplies a stable
+        # non-NULL placeholder if it needs the uniqueness enforced.
+        Index(
+            "ux_layers_identity", "slide_id", "kind", "source", "external_id",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slide_id: Mapped[int] = mapped_column(
+        ForeignKey("slides.id", ondelete="CASCADE")
+    )
+    kind: Mapped[str] = mapped_column(String(64))  # 'nuclei' | 'tile_features' | 'visium' | ...
+    source: Mapped[str] = mapped_column(String(128))
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 'level0' | 'fullres_capture' | '<projection_id>' -- MUST NOT contain an
+    # algorithm name (design doc §8.1): the method that produced a frame is
+    # recorded in params_json, never in a column the platform treats as
+    # structure.
+    frame: Mapped[str] = mapped_column(String(128))
+    transform_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # affine to level-0; NULL = unknown
+    # THE guardrail (design doc §6.2 invariant II / §6.4): a layer that has
+    # not been placed in level-0 coordinates must read as unknown, never as
+    # aligned. A caller -- ORM or raw SQL -- that omits this column entirely
+    # gets 'unregistered' from the DATABASE itself, not from application code
+    # that a future writer could bypass. Pinned by
+    # tests/test_migrations.py::test_layers_registration_defaults_to_unregistered_not_identity,
+    # via a raw INSERT that never mentions the column at all.
+    registration: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="unregistered"
+    )
+    store_uri: Mapped[str] = mapped_column(String(1024))  # zarr path; the heavy data lives here, not in SQL
+    n_entities: Mapped[int] = mapped_column()
+    version: Mapped[int] = mapped_column(nullable=False, server_default="1")
+    params_json: Mapped[str] = mapped_column(Text, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+    slide: Mapped[Slide] = relationship()
+
+
+class SelectionResolution(Base):
+    """What one selection (an ROI's polygon) resolved to on one layer, at one
+    layer VERSION (design doc §6.5). Not a materialized membership table --
+    the polygon in ``rois`` is the decision of record; this is a checkable
+    summary of what it hit, so a re-open six months later can say "the hit
+    set changed" instead of staying silent about it (the "29.4x" class of
+    bug: not preventing drift, making drift impossible to miss).
+    """
+
+    __tablename__ = "selection_resolutions"
+
+    annotation_id: Mapped[int] = mapped_column(
+        ForeignKey("rois.id", ondelete="CASCADE"), primary_key=True
+    )
+    layer_id: Mapped[int] = mapped_column(
+        ForeignKey("layers.id", ondelete="CASCADE"), primary_key=True
+    )
+    layer_version: Mapped[int] = mapped_column(primary_key=True)
+    n_selected: Mapped[int] = mapped_column()
+    index_digest: Mapped[str] = mapped_column(String(64))  # hash of the hit index set
+    resolved_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+    annotation: Mapped[ROI] = relationship()
+    layer: Mapped[Layer] = relationship()
 
 
 INTERACTION_KINDS = (
@@ -589,6 +753,51 @@ def _roi_dict(roi: ROI) -> dict:
         "stats_json": roi.stats_json,
         "magnification": roi.magnification,
         "created_at": _iso(roi.created_at),
+        "geom_key": roi.geom_key,
+        "created_by": roi.created_by,
+    }
+
+
+def _measurement_dict(m: Measurement) -> dict:
+    return {
+        "id": m.id,
+        "annotation_id": m.annotation_id,
+        "name": m.name,
+        "value": m.value,
+        "unit": m.unit,
+        "method": m.method,
+        "mpp_effective": m.mpp_effective,
+        "params_json": m.params_json,
+        "created_at": _iso(m.created_at),
+    }
+
+
+def _layer_dict(layer: Layer) -> dict:
+    return {
+        "id": layer.id,
+        "slide_id": layer.slide_id,
+        "kind": layer.kind,
+        "source": layer.source,
+        "external_id": layer.external_id,
+        "frame": layer.frame,
+        "transform_json": layer.transform_json,
+        "registration": layer.registration,
+        "store_uri": layer.store_uri,
+        "n_entities": layer.n_entities,
+        "version": layer.version,
+        "params_json": layer.params_json,
+        "created_at": _iso(layer.created_at),
+    }
+
+
+def _selection_resolution_dict(r: SelectionResolution) -> dict:
+    return {
+        "annotation_id": r.annotation_id,
+        "layer_id": r.layer_id,
+        "layer_version": r.layer_version,
+        "n_selected": r.n_selected,
+        "index_digest": r.index_digest,
+        "resolved_at": _iso(r.resolved_at),
     }
 
 
@@ -1053,8 +1262,19 @@ class ROIRepo:
         patch_path: str | None = None,
         stats: dict | None = None,
         magnification: float | None = None,
+        created_by: str = "user",
     ) -> int:
-        """Persist a geometry ROI (hescope.core.rois.ROI) for a slide."""
+        """Persist a geometry ROI (hescope.core.rois.ROI) for a slide.
+
+        ``created_by`` (Phase 0, ``docs/DATABASE-DESIGN.md`` L3) distinguishes
+        a region a pathologist drew from one a model proposed -- 'user' |
+        'agent' | 'import'. Defaults to 'user' so every EXISTING caller (none
+        of which pass it today -- see migration 4's docstring) keeps writing
+        exactly what it always implicitly meant.
+
+        ``geom_key`` is computed here, the single writer for new rows (see
+        :func:`geom_key`'s docstring for the migration-side other half).
+        """
         points = [[float(x), float(y)] for x, y in roi.points]
         bbox = [int(v) for v in roi.bbox()]
         bbox_x0, bbox_y0, bbox_x1, bbox_y1 = _bbox_columns(roi)
@@ -1073,6 +1293,8 @@ class ROIRepo:
                 patch_path=patch_path,
                 stats_json=json.dumps(stats) if stats is not None else None,
                 magnification=magnification,
+                geom_key=geom_key(roi.kind, roi.points),
+                created_by=created_by,
             )
             s.add(rec)
             s.commit()
@@ -1200,6 +1422,185 @@ class ROIRepo:
             return [_roi_dict(r) for r in s.execute(stmt).scalars()]
 
 
+class MeasurementRepo:
+    """Repository for the ``measurements`` table (design doc §10.1's
+    ``record_measurement``: the only bridge from a draft-cell computation to
+    the evidence base). Re-measuring always APPENDS -- there is no update
+    method -- so a metric keeps its full history rather than losing the
+    previous value the moment a method changes."""
+
+    def __init__(self, engine: sa.Engine) -> None:
+        self.engine = engine
+
+    def record(
+        self,
+        *,
+        annotation_id: int,
+        name: str,
+        method: str,
+        value: float | None = None,
+        unit: str | None = None,
+        mpp_effective: float | None = None,
+        params: dict | None = None,
+    ) -> int:
+        with Session(self.engine) as s:
+            rec = Measurement(
+                annotation_id=annotation_id,
+                name=name,
+                value=value,
+                unit=unit,
+                method=method,
+                mpp_effective=mpp_effective,
+                params_json=json.dumps(params) if params is not None else "{}",
+            )
+            s.add(rec)
+            s.commit()
+            return rec.id  # type: ignore[return-value]
+
+    def for_annotation(self, annotation_id: int) -> list[dict]:
+        """Every measurement ever recorded for one ROI, oldest first --
+        the full history :meth:`record`'s append-only contract keeps."""
+        with Session(self.engine) as s:
+            stmt = (
+                select(Measurement)
+                .where(Measurement.annotation_id == annotation_id)
+                .order_by(Measurement.id)
+            )
+            return [_measurement_dict(m) for m in s.execute(stmt).scalars()]
+
+
+class LayerRepo:
+    """Repository for the ``layers`` table (design doc §6.4)."""
+
+    def __init__(self, engine: sa.Engine) -> None:
+        self.engine = engine
+
+    def add(
+        self,
+        *,
+        slide_id: int,
+        kind: str,
+        source: str,
+        frame: str,
+        store_uri: str,
+        n_entities: int,
+        external_id: str | None = None,
+        transform_json: str | None = None,
+        registration: str | None = None,
+        version: int = 1,
+        params: dict | None = None,
+    ) -> int:
+        """Register one measurement layer.
+
+        ``registration`` defaults to ``None``, meaning: do not send this
+        column at all, so the DATABASE's own ``DEFAULT 'unregistered'``
+        decides (design doc §6.2 invariant II: unknown must never default to
+        identity) -- this is deliberately not ``registration: str =
+        'unregistered'``, because a Python-level default is a promise this
+        function could accidentally break by being edited, where the
+        DB-level default cannot. Pass an explicit value only once a real
+        transform has actually been established.
+        """
+        kwargs: dict[str, Any] = dict(
+            slide_id=slide_id,
+            kind=kind,
+            source=source,
+            external_id=external_id,
+            frame=frame,
+            transform_json=transform_json,
+            store_uri=store_uri,
+            n_entities=int(n_entities),
+            version=int(version),
+            params_json=json.dumps(params) if params is not None else "{}",
+        )
+        if registration is not None:
+            kwargs["registration"] = registration
+        with Session(self.engine) as s:
+            rec = Layer(**kwargs)
+            s.add(rec)
+            s.commit()
+            return rec.id  # type: ignore[return-value]
+
+    def get(self, layer_id: int) -> dict | None:
+        with Session(self.engine) as s:
+            rec = s.get(Layer, layer_id)
+            return _layer_dict(rec) if rec is not None else None
+
+    def for_slide(self, slide_id: int) -> list[dict]:
+        with Session(self.engine) as s:
+            stmt = select(Layer).where(Layer.slide_id == slide_id).order_by(Layer.id)
+            return [_layer_dict(l) for l in s.execute(stmt).scalars()]
+
+
+class SelectionResolutionRepo:
+    """Repository for the ``selection_resolutions`` table (design doc §6.5):
+    what one selection resolved to on one layer version -- a checkable
+    summary, not a materialized membership table (the polygon in ``rois``
+    stays the one decision of record)."""
+
+    def __init__(self, engine: sa.Engine) -> None:
+        self.engine = engine
+
+    def record(
+        self,
+        *,
+        annotation_id: int,
+        layer_id: int,
+        layer_version: int,
+        n_selected: int,
+        index_digest: str,
+    ) -> None:
+        """Upsert keyed on the primary key ``(annotation_id, layer_id,
+        layer_version)`` -- re-resolving the SAME selection against the SAME
+        layer version overwrites rather than duplicating; a NEW
+        ``layer_version`` (the layer's data changed) gets its own row, which
+        is what lets a later read compare them and notice drift."""
+        now = _utcnow()
+        with write_session(self.engine) as s:
+            ins = sqlite_insert(SelectionResolution).values(
+                annotation_id=annotation_id,
+                layer_id=layer_id,
+                layer_version=layer_version,
+                n_selected=n_selected,
+                index_digest=index_digest,
+                resolved_at=now,
+            )
+            stmt = ins.on_conflict_do_update(
+                index_elements=[
+                    SelectionResolution.annotation_id,
+                    SelectionResolution.layer_id,
+                    SelectionResolution.layer_version,
+                ],
+                set_={
+                    "n_selected": ins.excluded.n_selected,
+                    "index_digest": ins.excluded.index_digest,
+                    "resolved_at": ins.excluded.resolved_at,
+                },
+            )
+            s.execute(stmt)
+            s.commit()
+
+    def get(
+        self, annotation_id: int, layer_id: int, layer_version: int
+    ) -> dict | None:
+        with Session(self.engine) as s:
+            rec = s.get(
+                SelectionResolution, (annotation_id, layer_id, layer_version)
+            )
+            return _selection_resolution_dict(rec) if rec is not None else None
+
+    def for_annotation(self, annotation_id: int) -> list[dict]:
+        """Every resolution ever recorded for one ROI, across every layer
+        and layer_version it has been resolved against."""
+        with Session(self.engine) as s:
+            stmt = (
+                select(SelectionResolution)
+                .where(SelectionResolution.annotation_id == annotation_id)
+                .order_by(SelectionResolution.layer_id, SelectionResolution.layer_version)
+            )
+            return [_selection_resolution_dict(r) for r in s.execute(stmt).scalars()]
+
+
 class AgentRunRepo:
     """Repository for the agent_runs table."""
 
@@ -1266,7 +1667,14 @@ class InteractionRepo:
         slide_id: int | None = None,
         roi_id: int | None = None,
     ) -> int | None:
-        """Append one interaction row; returns the row id or None on failure."""
+        """Append one interaction row; returns the row id or None on failure.
+
+        The "never raises" contract is deliberate (tracing must not be able
+        to break the action it traces), but a swallowed write used to leave
+        no trace of ITSELF either -- silently defeating the very
+        automation-bias record this table exists to keep. The failure is
+        logged now so a lost row is at least observable, not just absent.
+        """
         try:
             with Session(self.engine) as s:
                 rec = Interaction(
@@ -1279,7 +1687,11 @@ class InteractionRepo:
                 s.add(rec)
                 s.commit()
                 return rec.id  # type: ignore[return-value]
-        except Exception:
+        except Exception as exc:
+            _LOG.warning(
+                "could not record interaction (kind=%r): %s: %s",
+                kind, type(exc).__name__, exc,
+            )
             return None
 
     def recent(self, limit: int = 50, kind: str | None = None) -> list[dict]:

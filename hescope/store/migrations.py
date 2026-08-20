@@ -33,7 +33,7 @@ import sqlalchemy as sa
 
 from ..core.identity import content_key
 
-SCHEMA_VERSION = 3  # bumped by each phase that adds a migration
+SCHEMA_VERSION = 4  # bumped by each phase that adds a migration
 
 
 def _utcnow() -> datetime:
@@ -608,6 +608,185 @@ def _migration_3_apply(conn: sa.Connection) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# Migration 4: L5 measurement layers, and Phase 0's remaining three columns
+# (design doc §6.4 / §6.5 / §6.2; docs/DATABASE-DESIGN.md L3)
+# ---------------------------------------------------------------------------
+#
+# The DDL for all of it -- the new tables `layers`, `selection_resolutions`,
+# `measurements` (which brings `mpp_effective` with it, since the column has
+# nowhere to live until the table exists), and the two new `rois` columns
+# `geom_key` / `created_by` -- is declared on the current ORM models
+# (`hescope.store.db.Layer`, `SelectionResolution`, `Measurement`, `ROI`) and so
+# is already created by `init_db`'s additive `create_all` + `ALTER TABLE`
+# path BEFORE this function runs (`migrate()` calls `init_db(engine)` first;
+# see this module's docstring on why that order is load-bearing, same as
+# migration 2's slide_files). `layers`, `selection_resolutions` and
+# `measurements` are BRAND NEW tables with no legacy data anywhere to carry
+# forward, so `create_all` alone is their whole story -- this migration does
+# not touch them. `rois` already exists in every real database, so its two
+# new columns land NULL on every existing row; THIS function's job is that
+# data: a real `geom_key` for every existing ROI, and `created_by` backfilled
+# to 'user' wherever it is still NULL.
+#
+# Deliberately NOT done here (documented, not silently dropped): merging the
+# `rois` rows that turn out to share a `(slide_id, geom_key)` -- the live
+# database has 2 such groups (docs/DATABASE-DESIGN.md §5 step 5) -- and
+# extracting `measurements` rows out of the existing `rois.stats_json` blobs
+# (DATABASE-DESIGN.md's own step 4). Both are legitimate follow-on migrations
+# with their own consent question ("which of a duplicate pair survives",
+# "does a stats_json-derived row get a real mpp_effective or NULL"); folding
+# either into this one would make an additive, always-safe-to-run migration
+# into one that needs a decision, which is exactly the distinction migration
+# 2 already drew between "backfill an identity" (always safe) and "merge two
+# rows" (`hescope dedupe-slides`, a separate consented command).
+
+
+@dataclass(frozen=True)
+class _RoiBackfill:
+    """One ``rois`` row's worth of what migration 4 will write, computed once
+    and shared by :func:`_migration_4_apply` (which writes it) and
+    :func:`plan_migration_4` (which only counts it) -- the same
+    non-drifting-preview contract as :class:`_SlideBackfill` (migration 2)
+    and :class:`_TcgaLinkCandidate` (migration 3): see their docstrings for
+    why one shared computation, not two independent ones, is the point."""
+
+    roi_id: int
+    slide_id: int
+    geom_key: str
+    created_by: str | None  # current (pre-migration) value; None -> needs backfill
+
+
+def _rois_has_created_by_column(conn: sa.Connection) -> bool:
+    """Whether ``rois`` already carries migration 4's ``created_by`` column.
+
+    ``False`` on a database migration 4 has never touched -- exactly the
+    shape ``migrate --dry-run`` must be able to preview (R-1: it never calls
+    ``init_db`` -- see :func:`migrate`'s docstring), and precisely the shape
+    of the REAL shipped ``data/hescope.db`` today (it has migrations 1-3's
+    columns from ``init_db``'s ordinary bootstrap, but ``migrate()`` itself
+    has never run against it, so ``schema_migrations`` -- and migration 4's
+    two new ``rois`` columns -- do not exist yet). ``_compute_roi_backfills``
+    used to ``SELECT ... created_by`` unconditionally, so
+    ``plan_migration_4`` crashed with ``OperationalError: no such column:
+    created_by`` the moment it was run against a COPY of the real database
+    rather than one of this test file's fixtures (every fixture here calls
+    ``init_db`` first, which the real database's own bootstrap already does
+    too -- but ``init_db`` alone does not add migration 4's columns; only
+    ``migrate()``, which fixtures also call, does). The real (non-dry-run)
+    apply path never sees ``False`` here: ``migrate()`` calls ``init_db``
+    before any migration's ``apply`` runs, so by the time
+    :func:`_migration_4_apply` calls this the columns already exist -- the
+    same ``identity_ready`` split migration 3's
+    ``_slides_identity_columns_exist`` already uses for the identical
+    reason, one migration over.
+    """
+    if not sa.inspect(conn).has_table("rois"):
+        return False
+    cols = {c["name"] for c in sa.inspect(conn).get_columns("rois")}
+    return "created_by" in cols
+
+
+def _compute_roi_backfills(conn: sa.Connection) -> list[_RoiBackfill]:
+    if not sa.inspect(conn).has_table("rois"):
+        # A dry run may preview an EMPTY database, the same reason
+        # `_compute_slide_backfills` guards this identically -- see that
+        # function's docstring.
+        return []
+    # Local import: this module must not depend on hescope.store.db at
+    # module level (see migrate()'s docstring on the import cycle that
+    # avoids). geom_key() is the SAME function ROIRepo.add uses for every
+    # NEW row (hescope.store.db.geom_key's docstring), imported here rather
+    # than re-implemented so a row written by ROIRepo.add and an identical
+    # one recovered by this backfill are guaranteed to collide, not merely
+    # intended to.
+    from .db import geom_key as _geom_key
+
+    has_created_by = _rois_has_created_by_column(conn)
+    select_cols = "id, slide_id, kind, points_json" + (
+        ", created_by" if has_created_by else ""
+    )
+    rows = conn.execute(sa.text(f"SELECT {select_cols} FROM rois")).all()
+    out: list[_RoiBackfill] = []
+    for row in rows:
+        roi_id, slide_id, kind, points_json = row[0], row[1], row[2], row[3]
+        created_by = row[4] if has_created_by else None
+        try:
+            raw_points = json.loads(points_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_points = []
+        points = [(p[0], p[1]) for p in raw_points]
+        out.append(
+            _RoiBackfill(roi_id, slide_id, _geom_key(kind, points), created_by)
+        )
+    return out
+
+
+def _duplicate_geom_key_groups(
+    backfills: list[_RoiBackfill],
+) -> dict[tuple[int, str], list[int]]:
+    """``(slide_id, geom_key) -> [roi_id, ...]`` for every group of 2+ ROIs
+    that would collide under ``docs/DATABASE-DESIGN.md``'s prototype
+    ``UNIQUE (slide_id, geom_key)`` -- computed so it can be REPORTED, per
+    that doc's own instruction ("report the 2 duplicate groups rather than
+    silently dropping them"); never enforced as an actual constraint by this
+    migration (see :func:`hescope.store.db.geom_key`'s docstring for why)."""
+    groups: dict[tuple[int, str], list[int]] = {}
+    for b in backfills:
+        groups.setdefault((b.slide_id, b.geom_key), []).append(b.roi_id)
+    return {key: ids for key, ids in groups.items() if len(ids) > 1}
+
+
+def plan_migration_4(conn: sa.Connection) -> dict:
+    """What migration 4's ``rois`` backfill WOULD write, computed read-only.
+
+    Returns ``{"rois": N, "created_by_backfilled": N,
+    "duplicate_geom_key_groups": K, "duplicate_geom_key_rois": M}``. Powers
+    ``hescope migrate --dry-run``'s report the same way
+    :func:`plan_migration_2` / :func:`plan_migration_3` do -- shares
+    :func:`_compute_roi_backfills` with :func:`_migration_4_apply` so the
+    preview cannot say something different from what running for real would
+    do. Every resolving row gets a ``geom_key`` (it is a pure function of
+    data already on the row, never a decision), so there is no
+    ``geom_key_backfilled`` count separate from ``rois`` -- but
+    ``duplicate_geom_key_groups``/``duplicate_geom_key_rois`` surface the
+    blast radius a future UNIQUE-enforcing migration would need to resolve
+    (see this module's migration-4 section docstring).
+    """
+    backfills = _compute_roi_backfills(conn)
+    dup_groups = _duplicate_geom_key_groups(backfills)
+    return {
+        "rois": len(backfills),
+        "created_by_backfilled": sum(1 for b in backfills if not b.created_by),
+        "duplicate_geom_key_groups": len(dup_groups),
+        "duplicate_geom_key_rois": sum(len(ids) for ids in dup_groups.values()),
+    }
+
+
+def _migration_4_apply(conn: sa.Connection) -> None:
+    """Backfill ``rois.geom_key`` (every row) and ``rois.created_by``
+    (rows where it is still NULL, to 'user' -- see this module's migration-4
+    section docstring for why 'user' and not something more specific: every
+    ROW predates the column existing at all, i.e. predates any code path
+    that could have written 'agent' or 'import', so 'user' is not a guess,
+    it is the only value that was ever true for these rows).
+
+    One UPDATE per row (``COALESCE`` leaves an already-non-NULL
+    ``created_by`` alone -- relevant only if this ever runs twice on a
+    database where something else set it between calls; ordinary
+    idempotency is already handled by ``migrate`` never re-running an
+    applied version, see :func:`migrate`'s docstring).
+    """
+    for b in _compute_roi_backfills(conn):
+        conn.execute(
+            sa.text(
+                "UPDATE rois SET geom_key=:gk, "
+                "created_by=COALESCE(created_by, 'user') WHERE id=:id"
+            ),
+            {"gk": b.geom_key, "id": b.roi_id},
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -623,6 +802,12 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=3,
         name="TCGA download -> storage -> injection: a real FK on tcga_files.slide_id, and the backfill",
         apply=_migration_3_apply,
+    ),
+    Migration(
+        version=4,
+        name="L5 measurement layers (layers, selection_resolutions) and measurements; "
+             "backfill rois.geom_key and rois.created_by",
+        apply=_migration_4_apply,
     ),
 )
 
